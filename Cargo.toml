@@ -1,0 +1,23 @@
+[package]
+name = "bevytris"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = [".", "crates/core"]
+
+[dependencies]
+bevytris-core = { path = "crates/core" }
+bevy = { version = "0.19", features = ["wav"] }
+dirs = "6"
+rand = "0.9"
+ron = "0.12.2"
+serde = { version = "1.0.229", features = ["derive"] }
+
+# Faster incremental builds: optimize dependencies (incl. bevy) even in dev,
+# keep our own crate lightly optimized for quick rebuilds.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
