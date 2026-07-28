@@ -24,11 +24,21 @@
   the terms of the WTFPL.")
 - File: `space_bg.png` (original `back_3.png`, unchanged)
 
-## Font
+## Font (`assets/fonts/`)
 
-The UI uses Bevy's bundled default font, a subset of **Fira Mono**
-© Mozilla Foundation, licensed under the **SIL Open Font License 1.1**.
-It is embedded in the Bevy engine; no font files ship in this repository.
+**Misaki Font (美咲フォント)** — 8x8 Japanese pixel font
+
+- © 2002-2021 **Num Kadoma** (門真なむ)
+- Source: https://littlelimit.net/misaki.htm
+- File: `misaki_gothic_2nd.ttf` (美咲ゴシック第2, unchanged; embedded into
+  the binary at build time and used as the game-wide default font)
+- License (from the distribution): "These fonts are free software.
+  Unlimited permission is granted to use, copy, and distribute them,
+  with or without modification, either commercially or noncommercially.
+  THESE FONTS ARE PROVIDED 'AS IS' WITHOUT WARRANTY."
+
+Bevy's bundled default font (a **Fira Mono** subset © Mozilla Foundation,
+**SIL OFL 1.1**) remains embedded in the engine as a fallback.
 
 ## Everything else
 

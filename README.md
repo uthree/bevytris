@@ -84,10 +84,12 @@ See [assets/CREDITS.md](assets/CREDITS.md) for full details.
   by **Juhani Junkala** (SubspaceAudio) — **CC0**. Converted to OGG Vorbis.
 - **Background art**: ["Space Background"](https://opengameart.org/content/space-background-1)
   by **Westbeam** — **CC0/WTFPL**.
-- **Font**: the UI uses Bevy's bundled default font, a subset of
-  [Fira Mono](https://github.com/mozilla/Fira) © Mozilla Foundation, licensed
-  under the [SIL Open Font License 1.1](https://openfontlicense.org/). It is
-  embedded in the Bevy engine itself; no font files ship with this repository.
+- **Font**: [Misaki Font (美咲フォント)](https://littlelimit.net/misaki.htm)
+  © 2002-2021 Num Kadoma — an 8x8 Japanese pixel font distributed as free
+  software ("unlimited permission ... with or without modification, either
+  commercially or noncommercially", no warranty). Bevy's bundled
+  [Fira Mono](https://github.com/mozilla/Fira) subset (SIL OFL 1.1) remains
+  as the engine fallback.
 - **Sound effects & other visuals**: generated procedurally by code in this
   repository (`src/audio.rs`, `src/effects.rs`).
 

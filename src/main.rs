@@ -63,9 +63,21 @@ fn main() -> AppExit {
             effects::EffectsPlugin,
             menu::MenuPlugin,
         ))
+        .add_systems(PreStartup, use_misaki_font)
         .add_systems(Startup, setup_camera)
         .add_systems(Update, apply_vsync_setting)
         .run()
+}
+
+/// Replace Bevy's bundled default font with Misaki Gothic 2nd — an 8x8
+/// Japanese pixel font (free license, see assets/CREDITS.md) — so every
+/// `TextFont::default()` in the game renders pixel-style.
+fn use_misaki_font(mut fonts: ResMut<Assets<Font>>) {
+    let bytes = include_bytes!("../assets/fonts/misaki_gothic_2nd.ttf");
+    fonts.insert(
+        Handle::<Font>::default().id(),
+        Font::from_bytes(bytes.to_vec()),
+    );
 }
 
 fn present_mode(vsync: bool) -> PresentMode {

@@ -141,7 +141,7 @@ fn item_bundle(index: usize, action: MenuAction, label: String, width: f32) -> i
             Text::new(label),
             MenuItemLabel,
             TextFont {
-                font_size: FontSize::Px(22.0),
+                font_size: FontSize::Px(24.0),
                 ..default()
             },
             TextColor(Color::srgb(0.85, 0.9, 1.0)),
@@ -163,7 +163,7 @@ fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>) {
             parent.spawn((
                 Text::new("BEVYTRIS"),
                 TextFont {
-                    font_size: FontSize::Px(84.0),
+                    font_size: FontSize::Px(80.0),
                     ..default()
                 },
                 TextColor(Color::srgb(0.3, 0.85, 1.0)),
@@ -207,7 +207,7 @@ fn setup_stage_select(
             parent.spawn((
                 Text::new("SELECT STAGE"),
                 TextFont {
-                    font_size: FontSize::Px(44.0),
+                    font_size: FontSize::Px(40.0),
                     ..default()
                 },
                 TextColor(Color::srgb(0.3, 0.85, 1.0)),
@@ -267,7 +267,7 @@ fn setup_stage_select(
                                 Text::new(label),
                                 MenuItemLabel,
                                 TextFont {
-                                    font_size: FontSize::Px(20.0),
+                                    font_size: FontSize::Px(16.0),
                                     ..default()
                                 },
                                 TextColor(text_color),
@@ -279,7 +279,7 @@ fn setup_stage_select(
                 Text::new(""),
                 StageFooter,
                 TextFont {
-                    font_size: FontSize::Px(20.0),
+                    font_size: FontSize::Px(16.0),
                     ..default()
                 },
                 TextColor(Color::srgb(0.8, 0.85, 0.95)),
@@ -341,7 +341,7 @@ fn setup_settings(mut commands: Commands, mut cursor: ResMut<MenuCursor>, mut re
             parent.spawn((
                 Text::new("SETTINGS"),
                 TextFont {
-                    font_size: FontSize::Px(44.0),
+                    font_size: FontSize::Px(40.0),
                     ..default()
                 },
                 TextColor(Color::srgb(0.3, 0.85, 1.0)),
@@ -839,7 +839,7 @@ fn setup_result_overlay(
                 parent.spawn((
                     Text::new(clear.grade.letter()),
                     TextFont {
-                        font_size: FontSize::Px(110.0),
+                        font_size: FontSize::Px(112.0),
                         ..default()
                     },
                     TextColor(clear.grade.color()),

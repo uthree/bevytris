@@ -319,7 +319,7 @@ pub fn setup_board_visuals(
     // Central countdown text.
     commands.spawn((
         Text2d::new("3"),
-        TextFont { font_size: FontSize::Px(120.0), ..default() },
+        TextFont { font_size: FontSize::Px(128.0), ..default() },
         TextColor(Color::srgb(1.0, 0.9, 0.3)),
         Transform::from_xyz(0.0, 40.0, 50.0),
         CountdownText,
