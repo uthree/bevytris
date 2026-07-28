@@ -61,7 +61,10 @@ pub struct SfxBank {
     lock: Handle<AudioSource>,
     hold: Handle<AudioSource>,
     hold_fail: Handle<AudioSource>,
-    clears: [Handle<AudioSource>; 4],
+    /// Single stable-pitch note for 1-3 line clears (pitched up a major
+    /// triad by line count so the scale reads clearly).
+    clear_note: Handle<AudioSource>,
+    tetris: Handle<AudioSource>,
     tspin: Handle<AudioSource>,
     tspin_clear: Handle<AudioSource>,
     perfect: Handle<AudioSource>,
@@ -98,14 +101,18 @@ impl SfxBank {
             Sfx::Rotate => (self.rotate.clone(), 0.42, 1.0),
             Sfx::RotateFail => (self.rotate_fail.clone(), 0.45, 1.0),
             Sfx::SoftDropTick => (self.soft_drop.clone(), 0.28, 1.0),
-            Sfx::HardDrop => (self.hard_drop.clone(), 0.8, 1.0),
+            Sfx::HardDrop => (self.hard_drop.clone(), 0.55, 1.0),
             Sfx::Lock => (self.lock.clone(), 0.5, 1.0),
             Sfx::Hold => (self.hold.clone(), 0.5, 1.0),
             Sfx::HoldFail => (self.hold_fail.clone(), 0.5, 1.0),
-            Sfx::Clear(n) => {
-                let i = (n.clamp(1, 4) - 1) as usize;
-                (self.clears[i].clone(), 0.85 + i as f32 * 0.05, 1.0)
-            }
+            Sfx::Clear(n) => match n.clamp(1, 4) {
+                // Same note stepping up a major triad: the pitch difference
+                // between single/double/triple is unmistakable.
+                1 => (self.clear_note.clone(), 0.85, 1.0),
+                2 => (self.clear_note.clone(), 0.9, 2f32.powf(4.0 / 12.0)),
+                3 => (self.clear_note.clone(), 0.95, 2f32.powf(7.0 / 12.0)),
+                _ => (self.tetris.clone(), 1.0, 1.0),
+            },
             Sfx::TSpin => (self.tspin.clone(), 0.9, 1.0),
             Sfx::TSpinClear => (self.tspin_clear.clone(), 1.0, 1.0),
             Sfx::PerfectClear => (self.perfect.clone(), 1.0, 1.0),
@@ -141,15 +148,11 @@ fn build_sfx_bank(asset_server: &AssetServer) -> SfxBank {
         lock: asset_server.load("sfx/lock.wav"),
         hold: asset_server.load("sfx/hold.wav"),
         hold_fail: asset_server.load("sfx/hold_fail.wav"),
-        clears: [
-            asset_server.load("sfx/clear1.wav"),
-            asset_server.load("sfx/clear2.wav"),
-            asset_server.load("sfx/clear3.wav"),
-            asset_server.load("sfx/phrase_tetris.ogg"),
-        ],
+        clear_note: asset_server.load("sfx/clear_note.wav"),
+        tetris: asset_server.load("sfx/phrase_tetris.wav"),
         tspin: asset_server.load("sfx/tspin.wav"),
-        tspin_clear: asset_server.load("sfx/phrase_tspin.ogg"),
-        perfect: asset_server.load("sfx/phrase_perfect.ogg"),
+        tspin_clear: asset_server.load("sfx/phrase_tspin.wav"),
+        perfect: asset_server.load("sfx/phrase_perfect.wav"),
         danger_alarm: asset_server.load("sfx/danger_alarm.wav"),
         b2b: asset_server.load("sfx/b2b.wav"),
         combo: asset_server.load("sfx/combo.wav"),

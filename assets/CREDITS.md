@@ -20,9 +20,10 @@
 - Source: https://kenney.nl/assets/music-jingles
 - License: **CC0 1.0** (public domain dedication), as stated on the source
   page and in the pack's License.txt.
-- Files: `phrase_tetris.ogg` (pack's `jingles_NES06.ogg`), `phrase_tspin.ogg`
-  (`jingles_NES08.ogg`), `phrase_perfect.ogg` (`jingles_NES00.ogg`) —
-  unmodified.
+- Files: `phrase_tetris.wav` (pack's `jingles_NES06.ogg`), `phrase_tspin.wav`
+  (`jingles_NES08.ogg`), `phrase_perfect.wav` (`jingles_NES00.ogg`).
+- Modifications: mixed down to mono, peak-normalized to -1 dBFS (loudness
+  matched to the rest of the SFX), converted to 16-bit PCM WAV.
 
 ## Music (`assets/music/`)
 
