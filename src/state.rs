@@ -8,6 +8,11 @@ pub enum AppState {
     Title,
     Settings,
     Playing,
+    /// One-frame bounce state used to restart a match. A Playing→Playing
+    /// identity transition would leave the `PlayState` sub-state untouched
+    /// (stuck at `Finished`), so restarts route through here to get real
+    /// OnExit/OnEnter transitions and a freshly initialized sub-state.
+    Restarting,
 }
 
 /// Sub-state active only while in `AppState::Playing`.

@@ -53,6 +53,10 @@ impl Plugin for MenuPlugin {
         app.init_resource::<MenuCursor>()
             .init_resource::<Rebinding>()
             .add_systems(OnEnter(AppState::Title), setup_title)
+            .add_systems(
+                OnEnter(AppState::Restarting),
+                |mut next: ResMut<NextState<AppState>>| next.set(AppState::Playing),
+            )
             .add_systems(OnEnter(AppState::Settings), setup_settings)
             .add_systems(OnExit(AppState::Settings), persist_settings)
             .add_systems(OnEnter(PlayState::Paused), setup_pause_overlay)
@@ -589,9 +593,10 @@ fn overlay_input(
         || (finished && keys.just_pressed(KeyCode::Enter));
     if restart {
         sfx.write(PlaySfx::new(Sfx::MenuSelect));
-        // Identity transition: re-enters Playing, tearing the session down
-        // and starting a fresh one.
-        next_app.set(AppState::Playing);
+        // Bounce through Restarting: real OnExit/OnEnter(Playing) run and
+        // the PlayState sub-state resets to Countdown (a Playing→Playing
+        // identity transition would leave it stuck at Finished/Paused).
+        next_app.set(AppState::Restarting);
     } else if keys.just_pressed(KeyCode::KeyQ) && !shadowed(KeyCode::KeyQ) {
         sfx.write(PlaySfx::new(Sfx::MenuBack));
         next_app.set(AppState::Title);
