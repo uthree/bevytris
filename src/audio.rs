@@ -499,11 +499,28 @@ pub struct GameAudioPlugin;
 
 impl Plugin for GameAudioPlugin {
     fn build(&self, app: &mut App) {
+        // The initial state's OnEnter runs in the first StateTransition
+        // schedule, which bevy_state places BEFORE PreStartup — so the banks
+        // must already exist when the app starts or the title BGM misses
+        // launch. Build them here, at plugin-build time (this plugin must be
+        // added after DefaultPlugins, which registers these resources).
+        let world = app.world_mut();
+        let sfx = build_sfx_bank(&mut world.resource_mut::<Assets<AudioSource>>());
+        let asset_server = world.resource::<AssetServer>();
+        let bgm = BgmBank {
+            title: asset_server.load("music/title.ogg"),
+            game: vec![
+                asset_server.load("music/level1.ogg"),
+                asset_server.load("music/level2.ogg"),
+                asset_server.load("music/level3.ogg"),
+            ],
+            victory: asset_server.load("music/ending.ogg"),
+        };
+        world.insert_resource(sfx);
+        world.insert_resource(bgm);
+
         app.add_message::<PlaySfx>()
             .init_resource::<CurrentBgm>()
-            // PreStartup: the initial state's OnEnter may run before Startup
-            // systems, and the title BGM needs the bank to exist by then.
-            .add_systems(PreStartup, generate_audio)
             .add_systems(Update, (play_sfx, apply_bgm_volume))
             .add_systems(OnEnter(AppState::Title), start_title_bgm)
             .add_systems(OnEnter(AppState::Playing), start_game_bgm)
@@ -513,32 +530,12 @@ impl Plugin for GameAudioPlugin {
     }
 }
 
-fn generate_audio(
-    mut commands: Commands,
-    mut assets: ResMut<Assets<AudioSource>>,
-    asset_server: Res<AssetServer>,
-) {
-    let bank = build_sfx_bank(&mut assets);
-    let bgm = BgmBank {
-        title: asset_server.load("music/title.ogg"),
-        game: vec![
-            asset_server.load("music/level1.ogg"),
-            asset_server.load("music/level2.ogg"),
-            asset_server.load("music/level3.ogg"),
-        ],
-        victory: asset_server.load("music/ending.ogg"),
-    };
-    commands.insert_resource(bank);
-    commands.insert_resource(bgm);
-}
-
 fn play_sfx(
     mut commands: Commands,
     mut reader: MessageReader<PlaySfx>,
-    bank: Option<Res<SfxBank>>,
+    bank: Res<SfxBank>,
     settings: Res<GameSettings>,
 ) {
-    let Some(bank) = bank else { return };
     let base = settings.sfx_linear();
     for msg in reader.read() {
         let volume = base * msg.gain;
@@ -554,41 +551,36 @@ fn play_sfx(
 
 fn start_title_bgm(
     commands: Commands,
-    bank: Option<Res<BgmBank>>,
+    bank: Res<BgmBank>,
     settings: Res<GameSettings>,
     current: ResMut<CurrentBgm>,
     sinks: Query<&AudioSink, With<Bgm>>,
 ) {
-    if let Some(bank) = bank {
-        swap_bgm(commands, bank.title.clone(), &settings, current, sinks);
-    }
+    swap_bgm(commands, bank.title.clone(), &settings, current, sinks);
 }
 
 fn start_game_bgm(
     commands: Commands,
-    bank: Option<Res<BgmBank>>,
+    bank: Res<BgmBank>,
     settings: Res<GameSettings>,
     current: ResMut<CurrentBgm>,
     sinks: Query<&AudioSink, With<Bgm>>,
 ) {
-    if let Some(bank) = bank {
-        let track = bank
-            .game
-            .choose(&mut rand::rng())
-            .expect("game BGM list is never empty")
-            .clone();
-        swap_bgm(commands, track, &settings, current, sinks);
-    }
+    let track = bank
+        .game
+        .choose(&mut rand::rng())
+        .expect("game BGM list is never empty")
+        .clone();
+    swap_bgm(commands, track, &settings, current, sinks);
 }
 
 /// On a VS win, celebrate with the (CC0) ending jingle.
 fn play_victory_jingle(
     mut commands: Commands,
-    bank: Option<Res<BgmBank>>,
+    bank: Res<BgmBank>,
     settings: Res<GameSettings>,
     result: Option<Res<SessionResult>>,
 ) {
-    let Some(bank) = bank else { return };
     if matches!(result.as_deref(), Some(SessionResult::VsWin { winner: 0 })) {
         commands.spawn((
             AudioPlayer::new(bank.victory.clone()),
@@ -615,6 +607,7 @@ fn swap_bgm(
         return;
     }
     current.0 = Some(track.clone());
+    debug!("bgm: starting {:?}", track.path());
     commands.queue(|world: &mut World| {
         let old: Vec<Entity> = world
             .query_filtered::<Entity, With<Bgm>>()

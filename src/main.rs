@@ -3,7 +3,7 @@
 use bevy::camera::{Hdr, ScalingMode};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
-use bevy::window::{MonitorSelection, PresentMode, WindowMode};
+use bevy::window::{MonitorSelection, PresentMode, WindowMode, WindowResizeConstraints};
 
 mod audio;
 mod config;
@@ -23,13 +23,20 @@ use state::{AppState, GameMode, PlayState};
 
 fn main() -> AppExit {
     let settings = config::load_settings();
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "BEVYTRIS".into(),
                 resolution: (1280, 720).into(),
                 present_mode: present_mode(settings.vsync),
                 mode: window_mode(settings.fullscreen),
+                // Keep the swapchain away from degenerate sizes while the
+                // user drags the window edges.
+                resize_constraints: WindowResizeConstraints {
+                    min_width: 640.0,
+                    min_height: 360.0,
+                    ..default()
+                },
                 ..default()
             }),
             ..default()
@@ -69,8 +76,26 @@ fn main() -> AppExit {
         .add_systems(
             Update,
             (fullscreen_hotkey, apply_window_settings, sync_ui_scale),
-        )
-        .run()
+        );
+
+    // Workaround for https://github.com/bevyengine/bevy/issues/20141:
+    // on Windows, `Continuous` mode drives frames solely through the
+    // request_redraw → RedrawRequested chain; if the OS swallows a single
+    // request (observed during drag-resize on some machines), the event loop
+    // sits in ControlFlow::Wait forever — the game freezes, then Windows
+    // reports it as not responding. `Reactive` mode re-requests a redraw on
+    // every wait tick, so a lost request costs a few milliseconds instead.
+    // Normal frame pacing is unaffected: updates are still driven by
+    // RedrawRequested events in both modes.
+    #[cfg(target_os = "windows")]
+    app.insert_resource(bevy::winit::WinitSettings {
+        focused_mode: bevy::winit::UpdateMode::reactive(std::time::Duration::from_millis(4)),
+        unfocused_mode: bevy::winit::UpdateMode::reactive_low_power(
+            std::time::Duration::from_millis(16),
+        ),
+    });
+
+    app.run()
 }
 
 /// Replace Bevy's bundled default font with Misaki Gothic 2nd — an 8x8
