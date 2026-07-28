@@ -96,6 +96,8 @@ struct SettingsFile {
     master_volume: u32,
     bgm_volume: u32,
     sfx_volume: u32,
+    #[serde(default)]
+    vsync: bool,
 }
 
 /// Live settings resource.
@@ -110,6 +112,8 @@ pub struct GameSettings {
     pub master_volume: u32,
     pub bgm_volume: u32,
     pub sfx_volume: u32,
+    /// Off by default: vsync adds a frame or two of input latency.
+    pub vsync: bool,
 }
 
 impl Default for GameSettings {
@@ -130,6 +134,7 @@ impl Default for GameSettings {
             master_volume: 8,
             bgm_volume: 6,
             sfx_volume: 8,
+            vsync: false,
         }
     }
 }
@@ -172,6 +177,7 @@ impl GameSettings {
             master_volume: self.master_volume,
             bgm_volume: self.bgm_volume,
             sfx_volume: self.sfx_volume,
+            vsync: self.vsync,
         }
     }
 
@@ -187,6 +193,7 @@ impl GameSettings {
         settings.master_volume = file.master_volume.min(10);
         settings.bgm_volume = file.bgm_volume.min(10);
         settings.sfx_volume = file.sfx_volume.min(10);
+        settings.vsync = file.vsync;
         settings
     }
 }

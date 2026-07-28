@@ -27,6 +27,7 @@ enum MenuAction {
     AdjustMaster,
     AdjustBgm,
     AdjustSfx,
+    ToggleVsync,
     Back,
 }
 
@@ -364,6 +365,7 @@ fn setup_settings(mut commands: Commands, mut cursor: ResMut<MenuCursor>, mut re
                 MenuAction::AdjustMaster,
                 MenuAction::AdjustBgm,
                 MenuAction::AdjustSfx,
+                MenuAction::ToggleVsync,
                 MenuAction::Back,
             ] {
                 parent.spawn(item_bundle(index, action, String::new(), 420.0));
@@ -399,6 +401,11 @@ fn settings_label(action: MenuAction, settings: &GameSettings, rebinding: &Rebin
         MenuAction::AdjustMaster => format!("{:<12} {}/10", "Master Vol", settings.master_volume),
         MenuAction::AdjustBgm => format!("{:<12} {}/10", "BGM Vol", settings.bgm_volume),
         MenuAction::AdjustSfx => format!("{:<12} {}/10", "SFX Vol", settings.sfx_volume),
+        MenuAction::ToggleVsync => format!(
+            "{:<12} {}",
+            "VSync",
+            if settings.vsync { "ON" } else { "OFF (fast)" }
+        ),
         MenuAction::Back => "BACK".to_string(),
         _ => return None,
     })
@@ -576,6 +583,10 @@ fn run_menu_action(
                 s.sfx_volume = (s.sfx_volume as i32 + adjust).clamp(0, 10) as u32;
                 true
             }
+            MenuAction::ToggleVsync => {
+                s.vsync = !s.vsync;
+                true
+            }
             _ => false,
         };
         if changed {
@@ -620,6 +631,12 @@ fn run_menu_action(
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
             p.rebinding.action = Some(action);
             p.rebinding.just_started = true;
+        }
+        MenuAction::ToggleVsync => {
+            // Enter toggles too (same as left/right).
+            p.settings.vsync = !p.settings.vsync;
+            save_settings(&p.settings);
+            sfx.write(PlaySfx::quiet(Sfx::MenuMove));
         }
         MenuAction::Back => {
             sfx.write(PlaySfx::new(Sfx::MenuBack));
@@ -832,11 +849,14 @@ fn setup_result_overlay(
             if let Some(stats) = stats {
                 parent.spawn(overlay_text(&stats, 21.0, Color::srgb(0.85, 0.9, 1.0)));
             }
-            parent.spawn(overlay_text(
-                "R / ENTER: play again    Q: title",
-                20.0,
-                Color::srgb(0.6, 0.7, 0.8),
-            ));
+            let won_stage = matches!(result.as_deref(), Some(SessionResult::VsWin { winner: 0 }))
+                && stage.is_some();
+            let hint = if won_stage && stage.is_some_and(|s| s < MAX_STAGE) {
+                "ENTER: next stage    R: replay    Q: title"
+            } else {
+                "R / ENTER: play again    Q: title"
+            };
+            parent.spawn(overlay_text(hint, 20.0, Color::srgb(0.6, 0.7, 0.8)));
         });
 }
 
@@ -844,6 +864,8 @@ fn overlay_input(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<State<PlayState>>,
     settings: Res<GameSettings>,
+    result: Option<Res<SessionResult>>,
+    mut mode: ResMut<GameMode>,
     mut next_app: ResMut<NextState<AppState>>,
     mut sfx: MessageWriter<PlaySfx>,
 ) {
@@ -853,9 +875,23 @@ fn overlay_input(
     let pause_key = settings.key_for(Action::Pause);
     let shadowed = |key: KeyCode| !finished && pause_key == key;
 
-    let restart = (keys.just_pressed(KeyCode::KeyR) && !shadowed(KeyCode::KeyR))
-        || (finished && keys.just_pressed(KeyCode::Enter));
-    if restart {
+    // After beating a stage, ENTER advances to the next one (R replays).
+    let next_stage = match (*mode, result.as_deref()) {
+        (GameMode::VsCpu { stage }, Some(SessionResult::VsWin { winner: 0 }))
+            if finished && stage < MAX_STAGE =>
+        {
+            Some(stage + 1)
+        }
+        _ => None,
+    };
+
+    if finished && keys.just_pressed(KeyCode::Enter) {
+        if let Some(stage) = next_stage {
+            *mode = GameMode::VsCpu { stage };
+        }
+        sfx.write(PlaySfx::new(Sfx::MenuSelect));
+        next_app.set(AppState::Restarting);
+    } else if keys.just_pressed(KeyCode::KeyR) && !shadowed(KeyCode::KeyR) {
         sfx.write(PlaySfx::new(Sfx::MenuSelect));
         // Bounce through Restarting: real OnExit/OnEnter(Playing) run and
         // the PlayState sub-state resets to Countdown (a Playing→Playing

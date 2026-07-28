@@ -22,18 +22,19 @@ pub(crate) mod core {
 use state::{AppState, GameMode, PlayState};
 
 fn main() -> AppExit {
+    let settings = config::load_settings();
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "BEVYTRIS".into(),
                 resolution: (1280, 720).into(),
-                present_mode: PresentMode::AutoVsync,
+                present_mode: present_mode(settings.vsync),
                 ..default()
             }),
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.02, 0.025, 0.06)))
-        .insert_resource(config::load_settings())
+        .insert_resource(settings)
         // Dev helpers: BEVYTRIS_SCREEN=settings|stages|playing skips the
         // title menu, BEVYTRIS_MODE=vs-stage-N|vs-easy|vs-normal|vs-hard
         // preselects the game mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages.
@@ -63,7 +64,33 @@ fn main() -> AppExit {
             menu::MenuPlugin,
         ))
         .add_systems(Startup, setup_camera)
+        .add_systems(Update, apply_vsync_setting)
         .run()
+}
+
+fn present_mode(vsync: bool) -> PresentMode {
+    if vsync {
+        PresentMode::AutoVsync
+    } else {
+        // Lowest input latency; macOS/Windows compositors prevent tearing.
+        PresentMode::AutoNoVsync
+    }
+}
+
+/// Live-apply the VSync toggle from the settings screen.
+fn apply_vsync_setting(
+    settings: Res<config::GameSettings>,
+    mut windows: Query<&mut Window>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for mut window in &mut windows {
+        let wanted = present_mode(settings.vsync);
+        if window.present_mode != wanted {
+            window.present_mode = wanted;
+        }
+    }
 }
 
 fn setup_camera(mut commands: Commands) {

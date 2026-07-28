@@ -373,7 +373,9 @@ fn empty_color(y: i8) -> Color {
     if y >= VISIBLE_HEIGHT {
         Color::NONE
     } else {
-        Color::srgba(1.0, 1.0, 1.0, 0.03)
+        // Kept very faint: a strong grid competes with the stack for
+        // attention (playtester feedback).
+        Color::srgba(1.0, 1.0, 1.0, 0.012)
     }
 }
 
