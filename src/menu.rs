@@ -29,6 +29,7 @@ enum MenuAction {
     AdjustBgm,
     AdjustSfx,
     ToggleVsync,
+    ToggleFullscreen,
     Back,
 }
 
@@ -368,6 +369,7 @@ fn setup_settings(mut commands: Commands, mut cursor: ResMut<MenuCursor>, mut re
                 MenuAction::AdjustBgm,
                 MenuAction::AdjustSfx,
                 MenuAction::ToggleVsync,
+                MenuAction::ToggleFullscreen,
                 MenuAction::Back,
             ] {
                 parent.spawn(item_bundle(index, action, String::new(), 420.0));
@@ -408,6 +410,11 @@ fn settings_label(action: MenuAction, settings: &GameSettings, rebinding: &Rebin
             "{:<12} {}",
             "VSync",
             if settings.vsync { "ON" } else { "OFF (fast)" }
+        ),
+        MenuAction::ToggleFullscreen => format!(
+            "{:<12} {}",
+            "Fullscreen",
+            if settings.fullscreen { "ON" } else { "OFF" }
         ),
         MenuAction::Back => "BACK".to_string(),
         _ => return None,
@@ -594,6 +601,10 @@ fn run_menu_action(
                 s.vsync = !s.vsync;
                 true
             }
+            MenuAction::ToggleFullscreen => {
+                s.fullscreen = !s.fullscreen;
+                true
+            }
             _ => false,
         };
         if changed {
@@ -642,6 +653,11 @@ fn run_menu_action(
         MenuAction::ToggleVsync => {
             // Enter toggles too (same as left/right).
             p.settings.vsync = !p.settings.vsync;
+            save_settings(&p.settings);
+            sfx.write(PlaySfx::quiet(Sfx::MenuMove));
+        }
+        MenuAction::ToggleFullscreen => {
+            p.settings.fullscreen = !p.settings.fullscreen;
             save_settings(&p.settings);
             sfx.write(PlaySfx::quiet(Sfx::MenuMove));
         }

@@ -1,9 +1,9 @@
 //! bevytris: a guideline-flavored Tetris clone built on Bevy.
 
-use bevy::camera::Hdr;
+use bevy::camera::{Hdr, ScalingMode};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
-use bevy::window::PresentMode;
+use bevy::window::{MonitorSelection, PresentMode, WindowMode};
 
 mod audio;
 mod config;
@@ -29,6 +29,7 @@ fn main() -> AppExit {
                 title: "BEVYTRIS".into(),
                 resolution: (1280, 720).into(),
                 present_mode: present_mode(settings.vsync),
+                mode: window_mode(settings.fullscreen),
                 ..default()
             }),
             ..default()
@@ -65,7 +66,10 @@ fn main() -> AppExit {
         ))
         .add_systems(PreStartup, use_misaki_font)
         .add_systems(Startup, setup_camera)
-        .add_systems(Update, apply_vsync_setting)
+        .add_systems(
+            Update,
+            (fullscreen_hotkey, apply_window_settings, sync_ui_scale),
+        )
         .run()
 }
 
@@ -89,8 +93,27 @@ fn present_mode(vsync: bool) -> PresentMode {
     }
 }
 
-/// Live-apply the VSync toggle from the settings screen.
-fn apply_vsync_setting(
+fn window_mode(fullscreen: bool) -> WindowMode {
+    if fullscreen {
+        WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+    } else {
+        WindowMode::Windowed
+    }
+}
+
+/// F11 toggles fullscreen from anywhere (persisted like the settings row).
+fn fullscreen_hotkey(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<config::GameSettings>,
+) {
+    if keys.just_pressed(KeyCode::F11) {
+        settings.fullscreen = !settings.fullscreen;
+        config::save_settings(&settings);
+    }
+}
+
+/// Live-apply the VSync / Fullscreen toggles.
+fn apply_window_settings(
     settings: Res<config::GameSettings>,
     mut windows: Query<&mut Window>,
 ) {
@@ -98,16 +121,34 @@ fn apply_vsync_setting(
         return;
     }
     for mut window in &mut windows {
-        let wanted = present_mode(settings.vsync);
-        if window.present_mode != wanted {
-            window.present_mode = wanted;
+        let wanted_present = present_mode(settings.vsync);
+        if window.present_mode != wanted_present {
+            window.present_mode = wanted_present;
         }
+        let wanted_mode = window_mode(settings.fullscreen);
+        if window.mode != wanted_mode {
+            window.mode = wanted_mode;
+        }
+    }
+}
+
+/// Keep UI proportional to the world camera's AutoMin scaling so menus and
+/// HUD grow with the window instead of shrinking relative to the boards.
+fn sync_ui_scale(windows: Query<&Window>, mut ui_scale: ResMut<UiScale>) {
+    let Ok(window) = windows.single() else { return };
+    let scale = (window.width() / 1280.0)
+        .min(window.height() / 720.0)
+        .max(0.5);
+    if (ui_scale.0 - scale).abs() > 0.001 {
+        ui_scale.0 = scale;
     }
 }
 
 fn setup_camera(mut commands: Commands) {
     // HDR + bloom: anything drawn with color components pushed past 1.0
     // (active piece, frame glow, particles, shockwaves) blooms into neon.
+    // AutoMin keeps the 1280x720 composition fully visible and scales it
+    // up on larger/fullscreen displays.
     commands.spawn((
         Camera2d,
         Hdr,
@@ -115,6 +156,13 @@ fn setup_camera(mut commands: Commands) {
             intensity: 0.18,
             ..Bloom::NATURAL
         },
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::AutoMin {
+                min_width: 1280.0,
+                min_height: 720.0,
+            },
+            ..OrthographicProjection::default_2d()
+        }),
     ));
 }
 

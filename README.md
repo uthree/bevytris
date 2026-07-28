@@ -58,6 +58,7 @@ cargo test -p bevytris-core
 | Rotate CCW  | Z           |
 | Hold        | C           |
 | Pause       | Esc         |
+| Fullscreen  | F11         |
 
 Menus: arrow keys + Enter (mouse also works). All gameplay keys can be rebound
 in **SETTINGS**; press Enter on a binding row, then press the new key.

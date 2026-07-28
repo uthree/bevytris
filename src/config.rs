@@ -100,6 +100,8 @@ struct SettingsFile {
     vsync: bool,
     #[serde(default = "default_sdf")]
     sdf: u32,
+    #[serde(default)]
+    fullscreen: bool,
 }
 
 fn default_sdf() -> u32 {
@@ -126,6 +128,8 @@ pub struct GameSettings {
     /// Soft drop factor: gravity multiplier while soft-dropping.
     /// 5..=40 in steps of 5, or SDF_MAX for instant.
     pub sdf: u32,
+    /// Borderless fullscreen (also toggled with F11).
+    pub fullscreen: bool,
 }
 
 impl Default for GameSettings {
@@ -148,6 +152,7 @@ impl Default for GameSettings {
             sfx_volume: 8,
             vsync: false,
             sdf: 20,
+            fullscreen: false,
         }
     }
 }
@@ -220,6 +225,7 @@ impl GameSettings {
             sfx_volume: self.sfx_volume,
             vsync: self.vsync,
             sdf: self.sdf,
+            fullscreen: self.fullscreen,
         }
     }
 
@@ -241,6 +247,7 @@ impl GameSettings {
         } else {
             (file.sdf.clamp(5, 40) / 5) * 5
         };
+        settings.fullscreen = file.fullscreen;
         settings
     }
 }
