@@ -2,6 +2,8 @@
 
 A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bevy.org) 0.19.
 
+![title screen](docs/screenshot.png)
+
 ## Features
 
 - **Marathon mode** — classic single-player, guideline gravity curve, 10 lines per level
