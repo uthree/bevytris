@@ -106,11 +106,11 @@ impl SfxBank {
             Sfx::Hold => (self.hold.clone(), 0.5, 1.0),
             Sfx::HoldFail => (self.hold_fail.clone(), 0.5, 1.0),
             Sfx::Clear(n) => match n.clamp(1, 4) {
-                // Same note stepping up a major triad: the pitch difference
-                // between single/double/triple is unmistakable.
-                1 => (self.clear_note.clone(), 0.85, 1.0),
-                2 => (self.clear_note.clone(), 0.9, 2f32.powf(4.0 / 12.0)),
-                3 => (self.clear_note.clone(), 0.95, 2f32.powf(7.0 / 12.0)),
+                // Same metallic hit stepping up a major triad: the pitch
+                // difference between single/double/triple is unmistakable.
+                1 => (self.clear_note.clone(), 1.0, 1.0),
+                2 => (self.clear_note.clone(), 1.0, 2f32.powf(4.0 / 12.0)),
+                3 => (self.clear_note.clone(), 1.0, 2f32.powf(7.0 / 12.0)),
                 _ => (self.tetris.clone(), 1.0, 1.0),
             },
             Sfx::TSpin => (self.tspin.clone(), 0.9, 1.0),

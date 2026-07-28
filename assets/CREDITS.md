@@ -20,10 +20,19 @@
 - Source: https://kenney.nl/assets/music-jingles
 - License: **CC0 1.0** (public domain dedication), as stated on the source
   page and in the pack's License.txt.
-- Files: `phrase_tetris.wav` (pack's `jingles_NES06.ogg`), `phrase_tspin.wav`
-  (`jingles_NES08.ogg`), `phrase_perfect.wav` (`jingles_NES00.ogg`).
+- File: `phrase_perfect.wav` (pack's `jingles_NES00.ogg`).
 - Modifications: mixed down to mono, peak-normalized to -1 dBFS (loudness
   matched to the rest of the SFX), converted to 16-bit PCM WAV.
+
+**"Impact Sounds"** by **Kenney** (kenney.nl)
+
+- Source: https://kenney.nl/assets/impact-sounds
+- License: **CC0 1.0** (public domain dedication).
+- Files: `clear_note.wav` (pack's `impactMetal_heavy_003.ogg`, mono +
+  soft-limited; pitch-shifted up a major triad at runtime for 1-3 line
+  clears), `phrase_tetris.wav` and `phrase_tspin.wav` (derived works:
+  rising major-chord arpeggios mixed from pitch-shifted copies of
+  `impactBell_heavy_002.ogg`).
 
 ## Music (`assets/music/`)
 
