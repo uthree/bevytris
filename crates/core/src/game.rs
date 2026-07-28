@@ -52,8 +52,20 @@ pub struct LineClear {
 #[derive(Debug, Clone)]
 pub enum GameEvent {
     Spawned,
-    Moved,
-    Rotated { kicked: bool },
+    Moved {
+        dx: i8,
+    },
+    /// A horizontal move failed (wall or stack in the way).
+    MoveBlocked {
+        dx: i8,
+    },
+    Rotated {
+        kicked: bool,
+        /// True for clockwise turns.
+        cw: bool,
+        /// The wall-kick offset that was applied (0,0 = no kick).
+        kick: (i8, i8),
+    },
     RotationFailed,
     SoftDropStep,
     HardDrop { distance: i8 },
@@ -256,9 +268,10 @@ impl Game {
             self.active = moved;
             self.last_rotation_kick = None;
             self.maybe_reset_lock();
-            self.events.push(GameEvent::Moved);
+            self.events.push(GameEvent::Moved { dx });
             true
         } else {
+            self.events.push(GameEvent::MoveBlocked { dx });
             false
         }
     }
@@ -276,7 +289,11 @@ impl Game {
                 self.last_rotation_kick = Some(i);
                 self.note_descent();
                 self.maybe_reset_lock();
-                self.events.push(GameEvent::Rotated { kicked: i > 0 });
+                self.events.push(GameEvent::Rotated {
+                    kicked: i > 0,
+                    cw: clockwise,
+                    kick: (dx, dy),
+                });
                 return true;
             }
         }
@@ -913,6 +930,9 @@ mod tests {
         let mut game = Game::new(1, 1);
         force_piece(&mut game, PieceKind::T);
         assert!(game.rotate(true));
-        assert!(game.events.iter().any(|e| matches!(e, GameEvent::Rotated { kicked: false })));
+        assert!(game
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::Rotated { kicked: false, cw: true, .. })));
     }
 }

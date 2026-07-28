@@ -11,7 +11,7 @@ use crate::audio::{PlaySfx, Sfx};
 use crate::core::board::{BOARD_WIDTH, VISIBLE_HEIGHT};
 use crate::core::game::{ClearKind, GameEvent};
 use crate::emissive;
-use crate::render::{BoardTheme, FrameGlow};
+use crate::render::{BoardKick, BoardTheme, FrameGlow};
 use crate::session::{BoardEvent, BoardIndex, GameSession, SessionResult};
 use crate::state::{AppState, PlayState};
 
@@ -154,13 +154,17 @@ fn apply_camera_shake(
     mut shake: ResMut<CameraShake>,
     mut cameras: Query<&mut Transform, With<Camera2d>>,
 ) {
-    let mut rng = rand::rng();
+    // Smooth shake: sum of incommensurate sine waves instead of per-frame
+    // random jumps — the camera sways instead of vibrating.
+    let t = time.elapsed_secs();
     let s = shake.trauma * shake.trauma;
     for mut tf in &mut cameras {
         if s > 0.0001 {
-            tf.translation.x = rng.random_range(-1.0..1.0) * s * 24.0;
-            tf.translation.y = rng.random_range(-1.0..1.0) * s * 24.0;
-            tf.rotation = Quat::from_rotation_z(rng.random_range(-1.0..1.0) * s * 0.03);
+            let x = (t * 31.7).sin() + 0.55 * (t * 57.3 + 1.1).sin();
+            let y = (t * 27.1 + 0.7).sin() + 0.55 * (t * 47.9 + 2.3).sin();
+            tf.translation.x = x * s * 14.0;
+            tf.translation.y = y * s * 14.0;
+            tf.rotation = Quat::from_rotation_z((t * 23.3 + 0.4).sin() * s * 0.022);
         } else {
             tf.translation.x = 0.0;
             tf.translation.y = 0.0;
@@ -547,6 +551,7 @@ fn map_events_to_effects(
     mut shake: ResMut<CameraShake>,
     mut surge: ResMut<StarSurge>,
     mut glows: Query<&mut FrameGlow>,
+    mut kicks: Query<&mut BoardKick>,
     boards: Query<(&Transform, &BoardTheme, &BoardIndex, &GameSession)>,
     assets: Res<EffectAssets>,
     // Hard-drop distance per board, consumed by the following Locked event
@@ -573,33 +578,59 @@ fn map_events_to_effects(
             sfx.write(PlaySfx { sfx: s, gain: g });
         };
 
+        // Input feedback is for the player's own board only — the CPU issues
+        // inputs far too fast for per-input feedback to read well.
+        let own_input = index.0 == 0;
         match &msg.event {
-            GameEvent::Moved => {
+            GameEvent::Moved { dx } => {
                 play(Sfx::Move, 0.5 * gain);
-                // Tactile micro-shake for the player's own inputs only (the
-                // CPU spams inputs far too fast for this to feel good).
-                if index.0 == 0 {
-                    shake.add(0.10);
+                if own_input {
+                    shake.add(0.06);
+                    if let Ok(mut kick) = kicks.get_mut(msg.board) {
+                        kick.impulse(Vec2::new(*dx as f32 * 16.0, 0.0));
+                    }
                 }
             }
-            GameEvent::Rotated { kicked } => {
+            GameEvent::MoveBlocked { dx } => {
+                // Pressing into the wall: the board leans that way and stays
+                // leaned while the key is held (impulses repeat at ARR rate).
+                if own_input {
+                    if let Ok(mut kick) = kicks.get_mut(msg.board) {
+                        kick.impulse(Vec2::new(*dx as f32 * 46.0, 0.0));
+                    }
+                }
+            }
+            GameEvent::Rotated { kicked, cw, kick } => {
                 play(Sfx::Rotate, if *kicked { 1.0 } else { 0.7 } * gain);
-                if index.0 == 0 {
-                    shake.add(if *kicked { 0.16 } else { 0.13 });
+                if own_input {
+                    shake.add(if *kicked { 0.10 } else { 0.07 });
+                    if let Ok(mut k) = kicks.get_mut(msg.board) {
+                        // Reaction torque: piece spins CW, board recoils CCW.
+                        k.spin(if *cw { 0.95 } else { -0.95 });
+                        // Wall kicks shove the piece; the board recoils the
+                        // opposite way.
+                        if kick.0 != 0 {
+                            k.impulse(Vec2::new(-kick.0 as f32 * 34.0, 0.0));
+                        }
+                    }
                 }
             }
             GameEvent::RotationFailed => play(Sfx::RotateFail, 0.35 * gain),
             GameEvent::SoftDropStep => {
                 play(Sfx::SoftDropTick, 0.25 * gain);
-                if index.0 == 0 {
-                    shake.add(0.045);
+                if own_input {
+                    shake.add(0.03);
                 }
             }
             GameEvent::HardDrop { distance } => {
                 play(Sfx::HardDrop, gain);
                 drop_distance.insert(msg.board, *distance);
-                if index.0 == 0 {
-                    shake.add(0.14 + *distance as f32 * 0.004);
+                if own_input {
+                    shake.add(0.10 + *distance as f32 * 0.003);
+                    if let Ok(mut kick) = kicks.get_mut(msg.board) {
+                        // The board takes the hit and dips.
+                        kick.impulse(Vec2::new(0.0, -(85.0 + *distance as f32 * 3.0)));
+                    }
                 }
             }
             GameEvent::Locked { piece } => {
@@ -843,6 +874,11 @@ fn map_events_to_effects(
                     Color::srgb(1.0, 0.2, 0.2),
                     0.5 + *rows as f32 * 0.06,
                 );
+                // The rising garbage shoves the board upward (both boards —
+                // it reads as the stack physically pushing in).
+                if let Ok(mut kick) = kicks.get_mut(msg.board) {
+                    kick.impulse(Vec2::new(0.0, 55.0 + *rows as f32 * 6.0));
+                }
                 if index.0 == 0 {
                     shake.add(0.1 + *rows as f32 * 0.04);
                 }
@@ -850,6 +886,10 @@ fn map_events_to_effects(
             GameEvent::TopOut => {
                 play(Sfx::GameOver, gain);
                 shake.add(0.55);
+                if let Ok(mut kick) = kicks.get_mut(msg.board) {
+                    kick.impulse(Vec2::new(0.0, -150.0));
+                    kick.spin(1.4);
+                }
                 spawn_flash(&mut commands, Color::srgb(1.0, 0.3, 0.2), 0.3, 0.6);
                 // Board "explodes": scatter particles over the whole field.
                 for y in 0..VISIBLE_HEIGHT {

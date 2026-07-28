@@ -42,6 +42,63 @@ struct FrameBar;
 
 const FRAME_BASE_COLOR: Color = Color::srgb(0.25, 0.75, 0.95);
 
+/// Spring-damper motion for a whole board: inputs push it around (pressing
+/// into a wall leans it, rotations twist it, hard drops thump it down) and
+/// the spring settles it back home. This is what makes the board feel like
+/// it has inertia.
+#[derive(Component)]
+pub struct BoardKick {
+    home: Vec3,
+    offset: Vec2,
+    vel: Vec2,
+    rot: f32,
+    rot_vel: f32,
+}
+
+impl BoardKick {
+    pub fn new(home: Vec3) -> Self {
+        Self {
+            home,
+            offset: Vec2::ZERO,
+            vel: Vec2::ZERO,
+            rot: 0.0,
+            rot_vel: 0.0,
+        }
+    }
+
+    /// Push the board (px/s velocity change).
+    pub fn impulse(&mut self, v: Vec2) {
+        self.vel += v;
+    }
+
+    /// Twist the board (rad/s angular velocity change; +z = CCW).
+    pub fn spin(&mut self, w: f32) {
+        self.rot_vel += w;
+    }
+}
+
+fn update_board_kick(time: Res<Time>, mut boards: Query<(&mut BoardKick, &mut Transform)>) {
+    // Underdamped spring: lively single overshoot, then settle.
+    const K: f32 = 220.0;
+    const C: f32 = 12.0;
+    const K_ROT: f32 = 420.0;
+    const C_ROT: f32 = 16.0;
+    let dt = time.delta_secs().min(0.05);
+    for (mut kick, mut tf) in &mut boards {
+        let acc = -K * kick.offset - C * kick.vel;
+        kick.vel += acc * dt;
+        let dv = kick.vel * dt;
+        kick.offset = (kick.offset + dv).clamp_length_max(13.0);
+
+        let rot_acc = -K_ROT * kick.rot - C_ROT * kick.rot_vel;
+        kick.rot_vel += rot_acc * dt;
+        kick.rot = (kick.rot + kick.rot_vel * dt).clamp(-0.045, 0.045);
+
+        tf.translation = kick.home + kick.offset.extend(0.0);
+        tf.rotation = Quat::from_rotation_z(kick.rot);
+    }
+}
+
 #[derive(Component)]
 struct CellSprite {
     x: i8,
@@ -85,6 +142,7 @@ impl Plugin for RenderPlugin {
                 sync_danger_bar,
                 sync_countdown,
                 sync_frame_glow,
+                update_board_kick,
             )
                 .run_if(in_state(AppState::Playing)),
         );
@@ -115,6 +173,7 @@ pub fn setup_board_visuals(
                 Transform::from_xyz(x, -14.0, 0.0),
                 BoardTheme { cell },
                 FrameGlow::default(),
+                BoardKick::new(Vec3::new(x, -14.0, 0.0)),
             ))
             .with_children(|parent| {
                 // Backdrop panel.
