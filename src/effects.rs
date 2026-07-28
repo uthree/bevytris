@@ -7,7 +7,10 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rand::Rng;
 use std::collections::HashMap;
 
-use crate::audio::{PlaySfx, Sfx};
+use bevy::audio::Volume;
+
+use crate::audio::{PlaySfx, Sfx, SfxBank};
+use crate::config::GameSettings;
 use crate::core::board::{BOARD_WIDTH, VISIBLE_HEIGHT};
 use crate::core::game::{ClearKind, GameEvent};
 use crate::emissive;
@@ -21,7 +24,13 @@ impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraShake>()
             .init_resource::<StarSurge>()
+            .init_resource::<DangerLevel>()
             .add_systems(Startup, (setup_effect_assets, spawn_starfield))
+            .add_systems(
+                Update,
+                (update_danger, sync_danger_vignette, sync_danger_alarm)
+                    .run_if(in_state(AppState::Playing)),
+            )
             .add_systems(
                 Update,
                 (
@@ -59,6 +68,8 @@ pub struct EffectAssets {
     /// Feather-edged rectangle used by streaks (drop trails, row bars):
     /// stays crisp and rectangular when stretched, unlike the radial glow.
     pub bar: Handle<Image>,
+    /// Screen-edge vignette (transparent center) for the danger overlay.
+    pub vignette: Handle<Image>,
 }
 
 #[derive(Component)]
@@ -107,6 +118,15 @@ fn soft_rect_image() -> Image {
     image_from_alpha(64, move |nx, ny| edge(nx) * edge(ny))
 }
 
+/// Transparent center with alpha ramping up toward the edges; stretched
+/// over the whole window as the danger overlay.
+fn vignette_image() -> Image {
+    image_from_alpha(128, |nx, ny| {
+        let d = nx.abs().max(ny.abs());
+        ((d - 0.45) / 0.55).clamp(0.0, 1.0).powf(1.6)
+    })
+}
+
 fn setup_effect_assets(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -115,6 +135,7 @@ fn setup_effect_assets(
     commands.insert_resource(EffectAssets {
         glow: images.add(radial_glow_image()),
         bar: images.add(soft_rect_image()),
+        vignette: images.add(vignette_image()),
     });
     // CC0 space painting (Westbeam, see assets/CREDITS.md), dimmed so the
     // boards stay the brightest thing on screen.
@@ -712,19 +733,22 @@ fn map_events_to_effects(
                 banner_stagger += 44.0;
             }
             GameEvent::Cleared(clear) => {
-                play(Sfx::Clear(clear.lines), gain);
                 let is_tspin = clear.kind != ClearKind::Normal;
-                if is_tspin {
-                    play(Sfx::TSpin, gain);
+                // One "headline" sound per clear so the jingle phrases never
+                // stack: perfect clear > T-spin > tetris/normal clears.
+                // Short accents (B2B coin, combo ladder) still layer on top.
+                if clear.perfect_clear {
+                    play(Sfx::PerfectClear, gain);
+                } else if is_tspin {
+                    play(Sfx::TSpinClear, gain);
+                } else {
+                    play(Sfx::Clear(clear.lines), gain);
                 }
                 if clear.b2b {
                     play(Sfx::B2b, 0.9 * gain);
                 }
                 if clear.combo >= 1 {
                     play(Sfx::Combo(clear.combo), gain);
-                }
-                if clear.perfect_clear {
-                    play(Sfx::PerfectClear, gain);
                 }
 
                 // Shake & spectacle effects scale with how big the clear is.
@@ -1105,4 +1129,126 @@ fn run_celebration(
     });
     shake.add(0.07);
     surge.0 = surge.0.max(2.5);
+}
+
+// ---------------------------------------------------------------------------
+// Danger (pinch) presentation
+// ---------------------------------------------------------------------------
+
+/// Smoothed 0..1 danger per board, driven by locked-stack height.
+#[derive(Resource, Default)]
+pub struct DangerLevel(pub [f32; 2]);
+
+#[derive(Component)]
+struct DangerVignette;
+
+#[derive(Component)]
+struct DangerAlarm;
+
+/// Stack height (rows) where the danger presentation starts / peaks.
+const DANGER_START: f32 = 12.0;
+const DANGER_FULL: f32 = 18.0;
+/// Heartbeat frequency (rad/s) shared by the vignette and the board frame.
+pub const DANGER_PULSE: f32 = 6.0;
+
+fn update_danger(
+    time: Res<Time>,
+    state: Res<State<PlayState>>,
+    mut danger: ResMut<DangerLevel>,
+    mut boards: Query<(&GameSession, &BoardIndex, &mut FrameGlow)>,
+) {
+    for (session, index, mut glow) in &mut boards {
+        let height = session
+            .game
+            .board
+            .column_heights()
+            .into_iter()
+            .max()
+            .unwrap_or(0) as f32;
+        let target = if matches!(state.get(), PlayState::Running | PlayState::Paused) {
+            ((height - DANGER_START) / (DANGER_FULL - DANGER_START)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let slot = &mut danger.0[index.0.min(1)];
+        // Ease in fast, out slower, so the effect breathes instead of popping.
+        let rate = if target > *slot { 4.0 } else { 1.8 };
+        *slot += (target - *slot) * (rate * time.delta_secs()).min(1.0);
+        if *slot < 0.005 {
+            *slot = 0.0;
+        }
+        glow.danger = *slot;
+    }
+}
+
+/// Red screen-edge vignette that pulses with the human board's danger.
+/// Spawned lazily so it also works when the app boots straight into
+/// `Playing` (dev shortcut) before `Startup` assets existed.
+fn sync_danger_vignette(
+    mut commands: Commands,
+    assets: Res<EffectAssets>,
+    danger: Res<DangerLevel>,
+    time: Res<Time>,
+    mut vignette: Query<&mut ImageNode, With<DangerVignette>>,
+) {
+    let Ok(mut node) = vignette.single_mut() else {
+        commands.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            ImageNode {
+                image: assets.vignette.clone(),
+                color: Color::NONE,
+                // Fill the node exactly; Auto would letterbox the square
+                // texture in the middle of the screen instead.
+                image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+                ..default()
+            },
+            // Behind every other UI node (HUD, overlays) — the vignette only
+            // needs to cover the world-space playfield.
+            GlobalZIndex(-1),
+            Pickable::IGNORE,
+            DangerVignette,
+            DespawnOnExit(AppState::Playing),
+        ));
+        return;
+    };
+    let level = danger.0[0];
+    let pulse = 0.7 + 0.3 * (time.elapsed_secs() * DANGER_PULSE).sin();
+    node.color = Color::srgba(1.0, 0.12, 0.10, 0.24 * level * pulse);
+}
+
+/// Low-health alarm loop while the human board is in danger.
+fn sync_danger_alarm(
+    mut commands: Commands,
+    danger: Res<DangerLevel>,
+    state: Res<State<PlayState>>,
+    settings: Res<GameSettings>,
+    bank: Res<SfxBank>,
+    alarm: Query<Entity, With<DangerAlarm>>,
+    mut sinks: Query<&mut AudioSink, With<DangerAlarm>>,
+) {
+    let level = danger.0[0];
+    let active = level > 0.05 && matches!(state.get(), PlayState::Running);
+    if active {
+        if alarm.is_empty() {
+            debug!("danger: alarm on (level {:.2})", level);
+            commands.spawn((
+                AudioPlayer::new(bank.danger_alarm()),
+                PlaybackSettings::LOOP.with_volume(Volume::Linear(0.0)),
+                DangerAlarm,
+                DespawnOnExit(AppState::Playing),
+            ));
+        }
+        for mut sink in &mut sinks {
+            sink.set_volume(Volume::Linear(settings.sfx_linear() * (0.18 + 0.4 * level)));
+        }
+    } else {
+        for e in &alarm {
+            commands.entity(e).despawn();
+        }
+    }
 }

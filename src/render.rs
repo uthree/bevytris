@@ -25,6 +25,9 @@ pub struct FrameGlow {
     pub color: Color,
     /// 1.0 = full glow, decays to 0.
     pub t: f32,
+    /// Persistent 0..1 danger level (written by the effects module);
+    /// tints the frame red with a heartbeat pulse.
+    pub danger: f32,
 }
 
 impl Default for FrameGlow {
@@ -32,6 +35,7 @@ impl Default for FrameGlow {
         Self {
             color: Color::WHITE,
             t: 0.0,
+            danger: 0.0,
         }
     }
 }
@@ -41,6 +45,8 @@ impl Default for FrameGlow {
 struct FrameBar;
 
 const FRAME_BASE_COLOR: Color = Color::srgb(0.25, 0.75, 0.95);
+/// Frame tint while the board's stack is dangerously high.
+const DANGER_FRAME_COLOR: Color = Color::srgb(1.0, 0.16, 0.12);
 
 /// Spring-damper motion for a whole board: inputs push it around (pressing
 /// into a wall leans it, rotations twist it, hard drops thump it down) and
@@ -579,13 +585,17 @@ fn sync_frame_glow(
     for (mut glow, children) in &mut boards {
         glow.t = (glow.t - 2.6 * time.delta_secs()).max(0.0);
         let t = glow.t * glow.t; // ease-out: snappy attack, soft tail
+        // Danger: steady red heartbeat underneath the event pulses.
+        let heartbeat = (time.elapsed_secs() * crate::effects::DANGER_PULSE).sin() * 0.5 + 0.5;
+        let danger_t = glow.danger * (0.35 + 0.55 * heartbeat);
         for child in children.iter() {
             let Ok((mut sprite, mut tf)) = bars.get_mut(child) else {
                 continue;
             };
-            let mixed = FRAME_BASE_COLOR.mix(&glow.color, t.min(1.0));
+            let base = FRAME_BASE_COLOR.mix(&DANGER_FRAME_COLOR, danger_t.min(1.0));
+            let mixed = base.mix(&glow.color, t.min(1.0));
             // Base frame glows a little; pulses push it deep into HDR.
-            sprite.color = crate::emissive(mixed, 1.35 + 2.4 * t);
+            sprite.color = crate::emissive(mixed, 1.35 + 2.4 * t + 1.1 * danger_t);
             let swell = 1.0 + t * 1.8;
             // Bars are thin in exactly one axis; swell that axis only.
             let size = sprite.custom_size.unwrap_or(Vec2::ONE);

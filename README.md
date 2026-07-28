@@ -92,6 +92,8 @@ See [assets/CREDITS.md](assets/CREDITS.md) for full details.
   by **Juhani Junkala** (SubspaceAudio) — **CC0**. Converted to OGG Vorbis.
 - **Sound effects**: ["512 Sound Effects (8-bit style)"](https://opengameart.org/content/512-sound-effects-8-bit-style)
   by **Juhani Junkala** (SubspaceAudio) — **CC0**. Trimmed and normalized.
+- **Jingles** (tetris / T-spin / perfect clear phrases):
+  ["Music Jingles"](https://kenney.nl/assets/music-jingles) by **Kenney** — **CC0**.
 - **Background art**: ["Space Background"](https://opengameart.org/content/space-background-1)
   by **Westbeam** — **CC0/WTFPL**.
 - **Font**: [Misaki Font (美咲フォント)](https://littlelimit.net/misaki.htm)

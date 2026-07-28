@@ -15,6 +15,15 @@
   at runtime as combos climb.
 - Although CC0 requires no attribution, we credit the author with pleasure.
 
+**"Music Jingles"** by **Kenney** (kenney.nl)
+
+- Source: https://kenney.nl/assets/music-jingles
+- License: **CC0 1.0** (public domain dedication), as stated on the source
+  page and in the pack's License.txt.
+- Files: `phrase_tetris.ogg` (pack's `jingles_NES06.ogg`), `phrase_tspin.ogg`
+  (`jingles_NES08.ogg`), `phrase_perfect.ogg` (`jingles_NES00.ogg`) —
+  unmodified.
+
 ## Music (`assets/music/`)
 
 **"Retro Game Music Pack" (5 Chiptunes: Action)** by **Juhani Junkala** (SubspaceAudio)

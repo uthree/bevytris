@@ -21,8 +21,12 @@ pub enum Sfx {
     Lock,
     Hold,
     HoldFail,
+    /// Clear(4) is the TETRIS jingle phrase; 1-3 are short synth risers.
     Clear(u32),
+    /// Sparkle for spins that clear no lines.
     TSpin,
+    /// Jingle phrase for T-spins that clear lines.
+    TSpinClear,
     PerfectClear,
     B2b,
     /// Coin chime pitched up a pentatonic step per combo count.
@@ -59,7 +63,9 @@ pub struct SfxBank {
     hold_fail: Handle<AudioSource>,
     clears: [Handle<AudioSource>; 4],
     tspin: Handle<AudioSource>,
+    tspin_clear: Handle<AudioSource>,
     perfect: Handle<AudioSource>,
+    danger_alarm: Handle<AudioSource>,
     b2b: Handle<AudioSource>,
     combo: Handle<AudioSource>,
     level_up: Handle<AudioSource>,
@@ -76,6 +82,11 @@ pub struct SfxBank {
 }
 
 impl SfxBank {
+    /// Looping low-health alarm for the danger (pinch) presentation.
+    pub fn danger_alarm(&self) -> Handle<AudioSource> {
+        self.danger_alarm.clone()
+    }
+
     /// Handle, base gain and playback speed for one effect. The samples on
     /// disk are peak-normalized, so base gains re-balance them (movement
     /// ticks stay subtle, rewards hit hard); speed != 1.0 pitch-shifts.
@@ -96,6 +107,7 @@ impl SfxBank {
                 (self.clears[i].clone(), 0.85 + i as f32 * 0.05, 1.0)
             }
             Sfx::TSpin => (self.tspin.clone(), 0.9, 1.0),
+            Sfx::TSpinClear => (self.tspin_clear.clone(), 1.0, 1.0),
             Sfx::PerfectClear => (self.perfect.clone(), 1.0, 1.0),
             Sfx::B2b => (self.b2b.clone(), 0.6, 1.0),
             Sfx::Combo(n) => {
@@ -133,10 +145,12 @@ fn build_sfx_bank(asset_server: &AssetServer) -> SfxBank {
             asset_server.load("sfx/clear1.wav"),
             asset_server.load("sfx/clear2.wav"),
             asset_server.load("sfx/clear3.wav"),
-            asset_server.load("sfx/clear4.wav"),
+            asset_server.load("sfx/phrase_tetris.ogg"),
         ],
         tspin: asset_server.load("sfx/tspin.wav"),
-        perfect: asset_server.load("sfx/perfect.wav"),
+        tspin_clear: asset_server.load("sfx/phrase_tspin.ogg"),
+        perfect: asset_server.load("sfx/phrase_perfect.ogg"),
+        danger_alarm: asset_server.load("sfx/danger_alarm.wav"),
         b2b: asset_server.load("sfx/b2b.wav"),
         combo: asset_server.load("sfx/combo.wav"),
         level_up: asset_server.load("sfx/level_up.wav"),
