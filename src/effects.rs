@@ -1146,8 +1146,13 @@ struct DangerVignette;
 struct DangerAlarm;
 
 /// Stack height (rows) where the danger presentation starts / peaks.
-const DANGER_START: f32 = 12.0;
-const DANGER_FULL: f32 = 18.0;
+/// The visible field is 20 rows; below 15 the player still has plenty of
+/// room, so the vignette only creeps in from 15 and the alarm waits for
+/// [`DANGER_ALARM_LEVEL`] (~16 rows).
+const DANGER_START: f32 = 15.0;
+const DANGER_FULL: f32 = 19.0;
+/// Danger level (0..1) above which the alarm loop starts.
+const DANGER_ALARM_LEVEL: f32 = 0.25;
 /// Heartbeat frequency (rad/s) shared by the vignette and the board frame.
 pub const DANGER_PULSE: f32 = 6.0;
 
@@ -1232,8 +1237,10 @@ fn sync_danger_alarm(
     mut sinks: Query<&mut AudioSink, With<DangerAlarm>>,
 ) {
     let level = danger.0[0];
-    let active = level > 0.05 && matches!(state.get(), PlayState::Running);
-    if active {
+    let running = matches!(state.get(), PlayState::Running);
+    // Hysteresis: start above the threshold, stop a notch below it, so the
+    // loop doesn't flutter when the stack hovers right at the line.
+    if running && level > DANGER_ALARM_LEVEL {
         if alarm.is_empty() {
             debug!("danger: alarm on (level {:.2})", level);
             commands.spawn((
@@ -1243,12 +1250,12 @@ fn sync_danger_alarm(
                 DespawnOnExit(AppState::Playing),
             ));
         }
-        for mut sink in &mut sinks {
-            sink.set_volume(Volume::Linear(settings.sfx_linear() * (0.18 + 0.4 * level)));
-        }
-    } else {
+    } else if !running || level < DANGER_ALARM_LEVEL - 0.08 {
         for e in &alarm {
             commands.entity(e).despawn();
         }
+    }
+    for mut sink in &mut sinks {
+        sink.set_volume(Volume::Linear(settings.sfx_linear() * (0.18 + 0.4 * level)));
     }
 }
