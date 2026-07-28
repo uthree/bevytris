@@ -100,6 +100,9 @@ pub struct Game {
     lock_timer: f32,
     lock_resets: u32,
     lowest_y: i8,
+    /// True once the piece has touched the stack at the current lowest row.
+    /// Moves/rotations only consume lockdown resets after first touchdown.
+    touched_down: bool,
     /// Kick-table index of the last successful rotation, or None if the
     /// piece moved/fell afterwards. Drives T-spin detection.
     last_rotation_kick: Option<usize>,
@@ -139,6 +142,7 @@ impl Game {
             lock_timer: 0.0,
             lock_resets: 0,
             lowest_y: 0,
+            touched_down: false,
             last_rotation_kick: None,
             soft_dropping: false,
             incoming: VecDeque::new(),
@@ -188,11 +192,13 @@ impl Game {
         // One frame can never need more than the board height in steps.
         self.gravity_acc = self.gravity_acc.min(64.0);
 
+        let mut descended = false;
         while self.gravity_acc >= 1.0 {
             self.gravity_acc -= 1.0;
             if self.board.fits(&self.active.shifted(0, -1)) {
                 self.active = self.active.shifted(0, -1);
                 self.last_rotation_kick = None;
+                descended = true;
                 if self.soft_dropping {
                     self.score += 1;
                     self.events.push(GameEvent::SoftDropStep);
@@ -204,13 +210,20 @@ impl Game {
             }
         }
 
+        // Lockdown timing. The timer PAUSES while airborne (it only resets
+        // when the piece reaches a new lowest row or spends a reset); this
+        // closes the "kick the piece into the air for a free timer reset"
+        // stall. A frame in which the piece descended charges nothing, so a
+        // lag spike that both lands the piece and exceeds LOCK_DELAY cannot
+        // insta-lock it.
         if self.grounded() {
-            self.lock_timer += dt;
+            self.touched_down = true;
+            if !descended {
+                self.lock_timer += dt;
+            }
             if self.lock_timer >= LOCK_DELAY {
                 self.lock_active();
             }
-        } else {
-            self.lock_timer = 0.0;
         }
     }
 
@@ -219,13 +232,16 @@ impl Game {
             self.lowest_y = self.active.y;
             self.lock_resets = 0;
             self.lock_timer = 0.0;
+            self.touched_down = false;
         }
     }
 
-    /// Grant a lockdown reset (extended placement rule) after a successful
-    /// move or rotation while grounded.
+    /// Spend a lockdown reset (extended placement rule) after a successful
+    /// move or rotation. Counts once the piece has touched down at the
+    /// current lowest row — even if a kick left it momentarily airborne —
+    /// so the 15-reset budget cannot be bypassed.
     fn maybe_reset_lock(&mut self) {
-        if self.grounded() && self.lock_resets < MAX_LOCK_RESETS {
+        if self.touched_down && self.lock_resets < MAX_LOCK_RESETS {
             self.lock_resets += 1;
             self.lock_timer = 0.0;
         }
@@ -332,6 +348,7 @@ impl Game {
         self.lowest_y = self.active.y;
         self.lock_timer = 0.0;
         self.lock_resets = 0;
+        self.touched_down = false;
         self.gravity_acc = 0.0;
         self.last_rotation_kick = None;
         self.events.push(GameEvent::Spawned);
@@ -570,16 +587,10 @@ impl Game {
         }
         if total > 0 {
             self.events.push(GameEvent::GarbageRose { rows: total });
-            // The active piece may now overlap the raised stack; push it up.
-            while !self.board.fits(&self.active) {
-                let up = self.active.shifted(0, 1);
-                if up.y > super::board::BOARD_HEIGHT {
-                    self.top_out();
-                    return;
-                }
-                self.active = up;
-            }
         }
+        // Note: garbage only ever rises between a lock and the next spawn,
+        // so there is never a live falling piece to push out of the way;
+        // `spawn_active` performs the real block-out check right after.
     }
 }
 
@@ -833,6 +844,65 @@ mod tests {
             game.tick(1.0 / 60.0);
         }
         assert!(game.stats.pieces > pieces_before);
+    }
+
+    #[test]
+    fn garbage_rise_does_not_falsely_top_out() {
+        // O locked in a roofed cavity at rows 19-20 of columns 8-9; the
+        // column is otherwise solid up to row 38. Rising garbage must not
+        // end the game: the spawn area is still free afterwards.
+        let mut game = Game::new(1, 1);
+        for x in [8, 9] {
+            for y in (0..=18).chain(21..=38) {
+                game.board.set_cell(x, y, Some(Cell::Garbage));
+            }
+        }
+        game.active = ActivePiece { kind: PieceKind::O, rot: Rot::R0, x: 8, y: 19 };
+        game.queue_garbage(8);
+        game.hard_drop(); // locks in place (rows 19-20), no line clear
+        assert!(
+            game.events.iter().any(|e| matches!(e, GameEvent::GarbageRose { rows: 8 })),
+            "garbage should have risen"
+        );
+        assert!(!game.game_over, "legal board must not top out after garbage rise");
+    }
+
+    #[test]
+    fn rotation_stall_cannot_prevent_lock() {
+        // Alternating CW/CCW rotations on the floor used to reset the lock
+        // timer forever (airborne frames zeroed it). With the 15-reset
+        // budget enforced, the piece must lock within a few seconds.
+        let mut game = Game::new(5, 1);
+        // Bring the piece to the floor quickly.
+        game.set_soft_drop(true);
+        for _ in 0..120 {
+            game.tick(1.0 / 60.0);
+        }
+        game.set_soft_drop(false);
+        let before = game.stats.pieces;
+        let mut locked = false;
+        for i in 0..(30 * 60) {
+            game.rotate(if i % 2 == 0 { true } else { false });
+            game.tick(1.0 / 60.0);
+            if game.stats.pieces > before {
+                locked = true;
+                break;
+            }
+        }
+        assert!(locked, "piece must lock despite rotation spam");
+    }
+
+    #[test]
+    fn lag_spike_does_not_instalock_on_landing_frame() {
+        // A single huge dt that both lands the piece and exceeds LOCK_DELAY
+        // must not lock it in the same tick.
+        let mut game = Game::new(1, 1);
+        let before = game.stats.pieces;
+        game.tick(25.0); // piece falls all the way to the floor during this tick
+        assert_eq!(game.stats.pieces, before, "landing frame must not charge lock delay");
+        // But staying grounded afterwards locks normally.
+        game.tick(0.6);
+        assert!(game.stats.pieces > before);
     }
 
     #[test]

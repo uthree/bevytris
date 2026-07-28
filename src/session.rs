@@ -218,6 +218,16 @@ fn human_input(
         das.arr_acc = 0.0;
         game.move_horizontal(1);
     }
+    // Keys already held when control resumes (countdown end, unpause) never
+    // fire just_pressed; pick them up with a fully charged DAS so holding a
+    // direction through the countdown slides the piece immediately.
+    if das.dir == 0 && (keys.pressed(left) != keys.pressed(right)) {
+        das.dir = if keys.pressed(left) { -1 } else { 1 };
+        das.held_secs = das_secs;
+        das.arr_acc = 0.0;
+        game.move_horizontal(das.dir);
+    }
+
     let dir_key = if das.dir < 0 { left } else { right };
     if das.dir != 0 && !keys.pressed(dir_key) {
         // Released the active direction; fall back to the other if held.
@@ -302,7 +312,17 @@ fn cpu_drive(
 
         if plan.is_none() {
             let next = game.queue.front().copied();
-            *plan = ai::plan(&game.board, game.active.kind, game.hold, next, profile, rng);
+            let next2 = game.queue.get(1).copied();
+            *plan = ai::plan(
+                &game.board,
+                game.active.kind,
+                game.hold,
+                next,
+                next2,
+                game.incoming_total(),
+                profile,
+                rng,
+            );
             if plan.is_none() {
                 // Nowhere to go: give up gracefully by dropping.
                 game.hard_drop();
@@ -318,7 +338,7 @@ fn cpu_drive(
             game.hold();
             *hold_done = true;
             // After hold a different piece is active; the plan targeted it.
-            return;
+            continue;
         }
         let rot_now = game.active.rot;
         if rot_now != p.rot {

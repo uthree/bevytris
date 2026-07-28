@@ -38,8 +38,13 @@ struct MenuItemLabel;
 struct MenuCursor(usize);
 
 /// Which action is waiting for a key press (settings screen).
+/// `just_started` guards the frame the rebind began, so the confirming
+/// Enter press / mouse click is never captured as the new binding.
 #[derive(Resource, Default)]
-struct Rebinding(Option<Action>);
+struct Rebinding {
+    action: Option<Action>,
+    just_started: bool,
+}
 
 pub struct MenuPlugin;
 
@@ -64,7 +69,12 @@ impl Plugin for MenuPlugin {
             )
             .add_systems(
                 Update,
-                rebind_capture.run_if(in_state(AppState::Settings)),
+                // Deterministically AFTER the nav systems: the keypress that
+                // starts a rebind must not be read as the new binding.
+                rebind_capture
+                    .after(menu_keyboard_nav)
+                    .after(menu_mouse)
+                    .run_if(in_state(AppState::Settings)),
             )
             .add_systems(
                 Update,
@@ -161,7 +171,8 @@ fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>) {
 
 fn setup_settings(mut commands: Commands, mut cursor: ResMut<MenuCursor>, mut rebinding: ResMut<Rebinding>) {
     cursor.0 = 0;
-    rebinding.0 = None;
+    rebinding.action = None;
+    rebinding.just_started = false;
     commands
         .spawn((root_node(), DespawnOnExit(AppState::Settings)))
         .with_children(|parent| {
@@ -216,7 +227,7 @@ fn setup_settings(mut commands: Commands, mut cursor: ResMut<MenuCursor>, mut re
 fn settings_label(action: MenuAction, settings: &GameSettings, rebinding: &Rebinding) -> Option<String> {
     Some(match action {
         MenuAction::Bind(a) => {
-            let key = if rebinding.0 == Some(a) {
+            let key = if rebinding.action == Some(a) {
                 "PRESS KEY...".to_string()
             } else {
                 format!("[{}]", key_label(settings.key_for(a)))
@@ -268,7 +279,7 @@ fn menu_keyboard_nav(
     mut sfx: MessageWriter<PlaySfx>,
     activate: MenuActivateParams,
 ) {
-    if activate.rebinding.0.is_some() {
+    if activate.rebinding.action.is_some() {
         return;
     }
     let count = item_count(&items);
@@ -314,7 +325,7 @@ fn menu_mouse(
     sfx: MessageWriter<PlaySfx>,
     activate: MenuActivateParams,
 ) {
-    if activate.rebinding.0.is_some() {
+    if activate.rebinding.action.is_some() {
         return;
     }
     let mut clicked: Option<MenuAction> = None;
@@ -387,6 +398,9 @@ fn run_menu_action(
             _ => false,
         };
         if changed {
+            // Persist immediately so closing the app from this screen
+            // doesn't silently drop slider changes.
+            save_settings(&p.settings);
             sfx.write(PlaySfx::quiet(Sfx::MenuMove));
         }
         return;
@@ -415,7 +429,8 @@ fn run_menu_action(
         }
         MenuAction::Bind(action) => {
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
-            p.rebinding.0 = Some(action);
+            p.rebinding.action = Some(action);
+            p.rebinding.just_started = true;
         }
         MenuAction::Back => {
             sfx.write(PlaySfx::new(Sfx::MenuBack));
@@ -446,7 +461,13 @@ fn rebind_capture(
     mut settings: ResMut<GameSettings>,
     mut sfx: MessageWriter<PlaySfx>,
 ) {
-    let Some(action) = rebinding.0 else {
+    if rebinding.just_started {
+        // Swallow the keypress/click that opened the rebind prompt.
+        keyboard.clear();
+        rebinding.just_started = false;
+        return;
+    }
+    let Some(action) = rebinding.action else {
         keyboard.clear();
         return;
     };
@@ -455,14 +476,14 @@ fn rebind_capture(
             continue;
         }
         if input.key_code == KeyCode::Escape {
-            rebinding.0 = None;
+            rebinding.action = None;
             sfx.write(PlaySfx::new(Sfx::MenuBack));
             return;
         }
         if crate::config::bindable_keys().contains(&input.key_code) {
             settings.bind(action, input.key_code);
             save_settings(&settings);
-            rebinding.0 = None;
+            rebinding.action = None;
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
             return;
         }
@@ -554,18 +575,24 @@ fn setup_result_overlay(
 fn overlay_input(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<State<PlayState>>,
+    settings: Res<GameSettings>,
     mut next_app: ResMut<NextState<AppState>>,
     mut sfx: MessageWriter<PlaySfx>,
 ) {
     let finished = *state.get() == PlayState::Finished;
-    let restart = keys.just_pressed(KeyCode::KeyR)
+    // While paused, the pause key resumes via pause_toggle; if the player
+    // has rebound Pause to R or Q, that key must not also restart/quit.
+    let pause_key = settings.key_for(Action::Pause);
+    let shadowed = |key: KeyCode| !finished && pause_key == key;
+
+    let restart = (keys.just_pressed(KeyCode::KeyR) && !shadowed(KeyCode::KeyR))
         || (finished && keys.just_pressed(KeyCode::Enter));
     if restart {
         sfx.write(PlaySfx::new(Sfx::MenuSelect));
         // Identity transition: re-enters Playing, tearing the session down
         // and starting a fresh one.
         next_app.set(AppState::Playing);
-    } else if keys.just_pressed(KeyCode::KeyQ) {
+    } else if keys.just_pressed(KeyCode::KeyQ) && !shadowed(KeyCode::KeyQ) {
         sfx.write(PlaySfx::new(Sfx::MenuBack));
         next_app.set(AppState::Title);
     }

@@ -5,7 +5,7 @@
 use rand::rngs::StdRng;
 use rand::Rng;
 
-use super::board::{ActivePiece, Board, BOARD_HEIGHT, BOARD_WIDTH};
+use super::board::{ActivePiece, Board, BOARD_HEIGHT, BOARD_WIDTH, VISIBLE_HEIGHT};
 use super::piece::{PieceKind, Rot};
 
 /// A concrete placement decision for the current piece.
@@ -39,7 +39,9 @@ impl AiProfile {
             uses_hold: false,
             eval_noise: 6.0,
             action_interval: 0.22,
-            think_time: 0.55,
+            // Must stay below LOCK_DELAY (0.5 s) or a piece spawning onto a
+            // tall stack locks before the CPU makes a single input.
+            think_time: 0.45,
         }
     }
 
@@ -80,6 +82,8 @@ struct Simulated {
     landing_height: f32,
     eroded: f32,
     lines: u32,
+    /// Lowest row occupied by the piece where it came to rest.
+    min_y: i8,
 }
 
 /// All reachable hard-drop placements of `kind` on `board`.
@@ -113,6 +117,7 @@ fn simulate_placements(board: &Board, kind: PieceKind) -> Vec<Simulated> {
                 landing_height: (min_y + max_y) as f32 / 2.0,
                 eroded: (cleared_rows.len() * piece_cells_eroded) as f32,
                 lines: cleared_rows.len() as u32,
+                min_y,
             });
         }
     }
@@ -193,29 +198,47 @@ fn best_score_for(board: &Board, kind: PieceKind) -> f32 {
 
 /// Choose a placement for the current situation.
 ///
-/// `hold` is the piece currently in the hold slot (if any), `next` the first
-/// preview piece. Returns None only if no placement fits (already topped
-/// out).
+/// `hold` is the piece currently in the hold slot (if any); `next`/`next2`
+/// are the first two preview pieces. `incoming` is the number of queued
+/// garbage rows — the planner treats them as imminent height and favors
+/// clears that cancel them. Returns None only if no placement fits.
+#[allow(clippy::too_many_arguments)]
 pub fn plan(
     board: &Board,
     current: PieceKind,
     hold: Option<PieceKind>,
     next: Option<PieceKind>,
+    next2: Option<PieceKind>,
+    incoming: u32,
     profile: &AiProfile,
     rng: &mut StdRng,
 ) -> Option<Plan> {
     let mut best: Option<Plan> = None;
 
-    let mut consider = |kind: PieceKind, use_hold: bool, best: &mut Option<Plan>| {
+    // Danger is judged on the CURRENT board plus queued garbage, so a clear
+    // that reduces the stack is not penalized for leaving "low danger".
+    let base_height = *board.column_heights().iter().max().unwrap_or(&0) as f32;
+    let danger = base_height + incoming.min(8) as f32;
+
+    let mut consider = |kind: PieceKind, use_hold: bool, follow: Option<PieceKind>, best: &mut Option<Plan>| {
         for sim in simulate_placements(board, kind) {
+            // Never choose a placement that rests entirely above the skyline
+            // (instant lock-out).
+            if sim.min_y >= VISIBLE_HEIGHT {
+                continue;
+            }
             let mut score = evaluate(&sim);
+            // A placement that walls off the spawn area kills us next piece.
+            let spawn_blocked = (3..=6)
+                .any(|x| sim.board.cell(x, 20).is_some() || sim.board.cell(x, 21).is_some());
+            if spawn_blocked {
+                score -= 10_000.0;
+            }
             if profile.lookahead {
-                if let Some(next_kind) = next {
-                    // After holding, the "next" piece may differ; close enough
-                    // for a game AI — exactness matters less than strength.
-                    let follow = best_score_for(&sim.board, next_kind);
-                    if follow.is_finite() {
-                        score += 0.6 * follow;
+                if let Some(next_kind) = follow {
+                    let follow_score = best_score_for(&sim.board, next_kind);
+                    if follow_score.is_finite() {
+                        score += 0.6 * follow_score;
                     } else {
                         score -= 1000.0;
                     }
@@ -224,12 +247,14 @@ pub fn plan(
             if profile.eval_noise > 0.0 {
                 score += rng.random_range(-profile.eval_noise..profile.eval_noise);
             }
-            // Survival instinct: prefer clearing lines when the stack is
-            // dangerously high.
-            let heights = sim.board.column_heights();
-            let max_h = *heights.iter().max().unwrap_or(&0);
-            if max_h >= 14 {
+            // Survival instinct: prefer clearing lines when the stack (plus
+            // garbage about to rise) is dangerously high, and cancel garbage
+            // aggressively.
+            if danger >= 12.0 {
                 score += sim.lines as f32 * 12.0;
+            }
+            if incoming > 0 {
+                score += sim.lines as f32 * (4.0 + 2.0 * incoming.min(8) as f32);
             }
             if best.as_ref().is_none_or(|b| score > b.score) {
                 *best = Some(Plan { use_hold, rot: sim.rot, x: sim.x, score });
@@ -237,15 +262,16 @@ pub fn plan(
         }
     };
 
-    consider(current, false, &mut best);
+    consider(current, false, next, &mut best);
     if profile.uses_hold {
-        // Holding swaps in either the held piece or (if empty) the next one.
+        // Holding swaps in either the held piece or (if empty) the next one;
+        // in the latter case the true follow-up piece is the second preview.
         match hold {
-            Some(h) if h != current => consider(h, true, &mut best),
+            Some(h) if h != current => consider(h, true, next, &mut best),
             None => {
                 if let Some(n) = next {
                     if n != current {
-                        consider(n, true, &mut best);
+                        consider(n, true, next2, &mut best);
                     }
                 }
             }
@@ -265,7 +291,16 @@ mod tests {
     fn finds_a_placement_on_empty_board() {
         let board = Board::new();
         let mut rng = StdRng::seed_from_u64(1);
-        let plan = plan(&board, PieceKind::T, None, Some(PieceKind::I), &AiProfile::normal(), &mut rng);
+        let plan = plan(
+            &board,
+            PieceKind::T,
+            None,
+            Some(PieceKind::I),
+            None,
+            0,
+            &AiProfile::normal(),
+            &mut rng,
+        );
         assert!(plan.is_some());
     }
 
@@ -280,7 +315,7 @@ mod tests {
             }
         }
         let mut rng = StdRng::seed_from_u64(1);
-        let p = plan(&board, PieceKind::I, None, None, &AiProfile::hard(), &mut rng).unwrap();
+        let p = plan(&board, PieceKind::I, None, None, None, 0, &AiProfile::hard(), &mut rng).unwrap();
         // Vertical I in box column 2 → box x must be 7 to fill column 9.
         // Horizontal I flat on the floor also plausible; accept either a
         // clear-producing move: simulate and require lines cleared > 0 OR
@@ -304,7 +339,7 @@ mod tests {
             board.set_cell(0, y, Some(Cell::Garbage));
         }
         let mut rng = StdRng::seed_from_u64(2);
-        let p = plan(&board, PieceKind::O, None, None, &AiProfile::normal(), &mut rng).unwrap();
+        let p = plan(&board, PieceKind::O, None, None, None, 0, &AiProfile::normal(), &mut rng).unwrap();
         // O at box x=-1..0 would stack on the column or next to it; make
         // sure evaluation didn't pick something that creates a hole.
         let mut piece = ActivePiece { kind: PieceKind::O, rot: p.rot, x: p.x, y: BOARD_HEIGHT - 2 };

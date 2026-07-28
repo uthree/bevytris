@@ -31,7 +31,12 @@ fn main() -> AppExit {
         }))
         .insert_resource(ClearColor(Color::srgb(0.02, 0.025, 0.06)))
         .insert_resource(config::load_settings())
-        .init_state::<AppState>()
+        // Dev helper: BEVYTRIS_SCREEN=settings|playing skips the title menu.
+        .insert_state(match std::env::var("BEVYTRIS_SCREEN").as_deref() {
+            Ok("settings") => AppState::Settings,
+            Ok("playing") => AppState::Playing,
+            _ => AppState::Title,
+        })
         .add_sub_state::<PlayState>()
         .add_plugins((
             audio::GameAudioPlugin,

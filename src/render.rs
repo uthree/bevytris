@@ -433,6 +433,7 @@ fn sync_danger_bar(
 }
 
 fn sync_countdown(
+    time: Res<Time>,
     countdown: Option<Res<Countdown>>,
     state: Res<State<PlayState>>,
     mut query: Query<(&mut Text2d, &mut Visibility, &mut TextColor), With<CountdownText>>,
@@ -457,7 +458,7 @@ fn sync_countdown(
             if **text != "GO!" {
                 **text = "GO!".to_string();
             }
-            let a = color.0.alpha() - 0.02;
+            let a = color.0.alpha() - 1.2 * time.delta_secs();
             if a <= 0.0 {
                 *vis = Visibility::Hidden;
             } else {

@@ -596,6 +596,11 @@ pub struct BgmBank {
 #[derive(Component)]
 pub struct Bgm;
 
+/// Which track is currently playing, so re-entering a state (Settings →
+/// Title, or a match restart) doesn't restart the music from bar one.
+#[derive(Resource, Default)]
+struct CurrentBgm(Option<Handle<AudioSource>>);
+
 #[derive(Message)]
 pub struct PlaySfx {
     pub sfx: Sfx,
@@ -617,26 +622,13 @@ pub struct GameAudioPlugin;
 impl Plugin for GameAudioPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<PlaySfx>()
+            .init_resource::<CurrentBgm>()
             // PreStartup: the initial state's OnEnter may run before Startup
             // systems, and the title BGM needs the bank to exist by then.
             .add_systems(PreStartup, generate_audio)
             .add_systems(Update, (play_sfx, apply_bgm_volume))
-            .add_systems(
-                OnEnter(AppState::Title),
-                |c: Commands, b: Option<Res<BgmBank>>, s: Res<GameSettings>| {
-                    if let Some(b) = b {
-                        swap_bgm(c, b.title.clone(), &s);
-                    }
-                },
-            )
-            .add_systems(
-                OnEnter(AppState::Playing),
-                |c: Commands, b: Option<Res<BgmBank>>, s: Res<GameSettings>| {
-                    if let Some(b) = b {
-                        swap_bgm(c, b.game.clone(), &s);
-                    }
-                },
-            )
+            .add_systems(OnEnter(AppState::Title), start_title_bgm)
+            .add_systems(OnEnter(AppState::Playing), start_game_bgm)
             .add_systems(OnEnter(PlayState::Paused), pause_bgm)
             .add_systems(OnExit(PlayState::Paused), resume_bgm)
             .add_systems(OnEnter(PlayState::Finished), pause_bgm);
@@ -675,7 +667,46 @@ fn play_sfx(
     }
 }
 
-fn swap_bgm(mut commands: Commands, track: Handle<AudioSource>, settings: &GameSettings) {
+fn start_title_bgm(
+    commands: Commands,
+    bank: Option<Res<BgmBank>>,
+    settings: Res<GameSettings>,
+    current: ResMut<CurrentBgm>,
+    sinks: Query<&AudioSink, With<Bgm>>,
+) {
+    if let Some(bank) = bank {
+        swap_bgm(commands, bank.title.clone(), &settings, current, sinks);
+    }
+}
+
+fn start_game_bgm(
+    commands: Commands,
+    bank: Option<Res<BgmBank>>,
+    settings: Res<GameSettings>,
+    current: ResMut<CurrentBgm>,
+    sinks: Query<&AudioSink, With<Bgm>>,
+) {
+    if let Some(bank) = bank {
+        swap_bgm(commands, bank.game.clone(), &settings, current, sinks);
+    }
+}
+
+fn swap_bgm(
+    mut commands: Commands,
+    track: Handle<AudioSource>,
+    settings: &GameSettings,
+    mut current: ResMut<CurrentBgm>,
+    sinks: Query<&AudioSink, With<Bgm>>,
+) {
+    if current.0.as_ref() == Some(&track) {
+        // Same track: keep playing where it is (it may have been paused by
+        // a result screen — a match restart must un-pause it).
+        for sink in &sinks {
+            sink.play();
+        }
+        return;
+    }
+    current.0 = Some(track.clone());
     commands.queue(|world: &mut World| {
         let old: Vec<Entity> = world
             .query_filtered::<Entity, With<Bgm>>()

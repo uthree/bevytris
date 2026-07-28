@@ -210,6 +210,7 @@ fn spawn_flash(commands: &mut Commands, color: Color, peak_alpha: f32, life: f32
             max_life: life,
             peak_alpha,
         },
+        DespawnOnExit(AppState::Playing),
     ));
 }
 
