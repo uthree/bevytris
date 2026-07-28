@@ -26,6 +26,22 @@ pub fn gravity_seconds(level: u32) -> f32 {
     (0.8 - (l - 1.0) * 0.007).powf(l - 1.0)
 }
 
+/// Highest level timed leveling will reach; `gravity_seconds` flatlines
+/// there anyway, so climbing further would only inflate the HUD number.
+pub const MAX_TIMED_LEVEL: u32 = 20;
+
+/// How `level` (and with it gravity) advances during play.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Leveling {
+    /// Marathon rule: +1 level every `LINES_PER_LEVEL` cleared lines.
+    Lines,
+    /// Versus rule: the level rises with elapsed play time alone — one
+    /// level every `seconds_per_level`, capped at `MAX_TIMED_LEVEL`.
+    /// Cleared lines never change it, so efficient downstacking is never
+    /// punished with extra gravity and stalling never keeps a match slow.
+    Timed { seconds_per_level: f32 },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClearKind {
     Normal,
@@ -104,6 +120,7 @@ pub struct Game {
     pub score: u64,
     pub lines: u32,
     pub level: u32,
+    pub leveling: Leveling,
     start_level: u32,
     /// -1 when the previous lock did not clear lines.
     combo: i32,
@@ -152,6 +169,7 @@ impl Game {
             score: 0,
             lines: 0,
             level: start_level.max(1),
+            leveling: Leveling::Lines,
             start_level: start_level.max(1),
             combo: -1,
             b2b_armed: false,
@@ -201,6 +219,15 @@ impl Game {
             return;
         }
         self.stats.time += dt as f64;
+
+        if let Leveling::Timed { seconds_per_level } = self.leveling {
+            let steps = (self.stats.time / seconds_per_level.max(1e-3) as f64) as u32;
+            let new_level = (self.start_level + steps).min(MAX_TIMED_LEVEL);
+            if new_level > self.level {
+                self.level = new_level;
+                self.events.push(GameEvent::LevelUp { level: new_level });
+            }
+        }
 
         let mut sec_per_row = gravity_seconds(self.level);
         if self.soft_dropping {
@@ -545,10 +572,12 @@ impl Game {
 
         // --- Lines / level -------------------------------------------------
         self.lines += lines;
-        let new_level = self.start_level + self.lines / LINES_PER_LEVEL;
-        if new_level > self.level {
-            self.level = new_level;
-            self.events.push(GameEvent::LevelUp { level: new_level });
+        if matches!(self.leveling, Leveling::Lines) {
+            let new_level = self.start_level + self.lines / LINES_PER_LEVEL;
+            if new_level > self.level {
+                self.level = new_level;
+                self.events.push(GameEvent::LevelUp { level: new_level });
+            }
         }
 
         self.b2b_armed = difficult;
@@ -850,6 +879,46 @@ mod tests {
         assert_eq!(game.lines, 10);
         assert_eq!(game.level, 2);
         assert!(game.events.iter().any(|e| matches!(e, GameEvent::LevelUp { level: 2 })));
+    }
+
+    #[test]
+    fn timed_leveling_rises_with_play_time() {
+        let mut game = Game::new(1, 1);
+        game.leveling = Leveling::Timed { seconds_per_level: 1.0 };
+        for _ in 0..132 {
+            game.tick(1.0 / 60.0); // 2.2 s total
+        }
+        assert_eq!(game.level, 3);
+        assert!(game.events.iter().any(|e| matches!(e, GameEvent::LevelUp { level: 2 })));
+        assert!(game.events.iter().any(|e| matches!(e, GameEvent::LevelUp { level: 3 })));
+    }
+
+    #[test]
+    fn timed_leveling_ignores_line_clears() {
+        let mut game = Game::new(1, 1);
+        game.leveling = Leveling::Timed { seconds_per_level: 60.0 };
+        game.lines = 29; // one more line would be level 4 under the lines rule
+        fill_row(&mut game, 0, &[4]);
+        force_piece(&mut game, PieceKind::I);
+        game.rotate(true);
+        while game.active.x + 2 != 4 {
+            let dir = if game.active.x + 2 < 4 { 1 } else { -1 };
+            if !game.move_horizontal(dir) {
+                break;
+            }
+        }
+        game.hard_drop();
+        assert_eq!(game.lines, 30);
+        assert_eq!(game.level, 1, "line clears must not level up in timed mode");
+        assert!(!game.events.iter().any(|e| matches!(e, GameEvent::LevelUp { .. })));
+    }
+
+    #[test]
+    fn timed_leveling_caps_at_max_level() {
+        let mut game = Game::new(1, 1);
+        game.leveling = Leveling::Timed { seconds_per_level: 1.0 };
+        game.tick(500.0);
+        assert_eq!(game.level, MAX_TIMED_LEVEL);
     }
 
     #[test]

@@ -9,9 +9,25 @@ use rand::{Rng, SeedableRng};
 use crate::audio::{PlaySfx, Sfx};
 use crate::config::{Action, GameSettings};
 use crate::core::ai::{self, AiProfile, Plan};
-use crate::core::game::{Game, GameEvent, Stats};
+use crate::core::game::{Game, GameEvent, Leveling, Stats};
 use crate::progress::{Grade, Progress};
 use crate::state::{AppState, GameMode, PlayState};
+
+/// VS rounds speed up on a clock — one gravity level every this many
+/// seconds, for both players alike — instead of by cleared lines. Playing
+/// well (downstacking a lot) no longer drags your own gravity up faster
+/// than the opponent's, and no round can stay slow forever. 25 s/level
+/// roughly matches the old pace at a typical ~20 lines/minute.
+const VS_SECONDS_PER_LEVEL: f32 = 25.0;
+
+/// A fresh board for `mode`; VS boards use the timed gravity ramp.
+fn new_game(seed: u64, mode: GameMode) -> Game {
+    let mut game = Game::new(seed, 1);
+    if matches!(mode, GameMode::VsCpu { .. }) {
+        game.leveling = Leveling::Timed { seconds_per_level: VS_SECONDS_PER_LEVEL };
+    }
+    game
+}
 
 /// One playfield (either the human's or the CPU's).
 #[derive(Component)]
@@ -201,7 +217,6 @@ impl Plugin for SessionPlugin {
 fn spawn_session(mut commands: Commands, mode: Res<GameMode>) {
     let seed: u64 = rand::rng().random();
     // Both players get the same piece sequence (standard for versus play).
-    let start_level = 1;
 
     commands.remove_resource::<SessionResult>();
     commands.remove_resource::<LastRound>();
@@ -209,7 +224,7 @@ fn spawn_session(mut commands: Commands, mode: Res<GameMode>) {
     commands.insert_resource(MatchState::new(*mode));
 
     commands.spawn((
-        GameSession { game: Game::new(seed, start_level) },
+        GameSession { game: new_game(seed, *mode) },
         BoardIndex(0),
         HumanControlled,
         DasState::default(),
@@ -221,7 +236,7 @@ fn spawn_session(mut commands: Commands, mode: Res<GameMode>) {
     if let GameMode::VsCpu { stage } = *mode {
         let profile = AiProfile::for_stage(stage);
         commands.spawn((
-            GameSession { game: Game::new(seed, start_level) },
+            GameSession { game: new_game(seed, *mode) },
             BoardIndex(1),
             CpuControlled::new(profile, seed),
             DespawnOnExit(AppState::Playing),
@@ -668,6 +683,7 @@ mod tests {
 /// boards for the next round.
 fn round_over_tick(
     time: Res<Time>,
+    mode: Res<GameMode>,
     mut timer: ResMut<RoundOverTimer>,
     mut match_state: ResMut<MatchState>,
     mut boards: Query<(
@@ -684,7 +700,7 @@ fn round_over_tick(
 
     let seed: u64 = rand::rng().random();
     for (mut session, cpu, das) in &mut boards {
-        session.game = Game::new(seed, 1);
+        session.game = new_game(seed, *mode);
         if let Some(mut cpu) = cpu {
             cpu.reset_for_round();
         }

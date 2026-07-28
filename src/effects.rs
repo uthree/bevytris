@@ -884,8 +884,11 @@ fn map_events_to_effects(
                 }
             }
             GameEvent::LevelUp { level } => {
-                play(Sfx::LevelUp, gain);
+                // Player board only: under timed (VS) leveling both boards
+                // level up on the same frame, and a second copy of the sfx
+                // from the CPU board would double-trigger it.
                 if index.0 == 0 {
+                    play(Sfx::LevelUp, gain);
                     shake.add(0.15);
                     let green = Color::srgb(0.5, 1.0, 0.6);
                     pulse_frame(&mut glows, msg.board, green, 0.8);

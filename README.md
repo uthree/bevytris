@@ -10,7 +10,9 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
 - **VS CPU mode** — a 30-stage ladder of computer opponents with distinct
   personalities (Balanced / Rusher / Thinker), human-like blunder rates that
   fade out as stages climb, garbage attack & cancellation rules modeled
-  after modern versus games, **first-to-2 rounds** (boss stages 10/20/30 are
+  after modern versus games, a **time-based gravity ramp** (both boards
+  speed up one level every 25 s, margin-time style — cleared lines never
+  change the pace), **first-to-2 rounds** (boss stages 10/20/30 are
   first-to-3), and an **S/A/B/C/D grade** on every stage clear based on
   dominance, attack-per-minute and style. Progress and best grades persist.
 - **Guideline-compliant mechanics**
