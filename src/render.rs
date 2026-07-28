@@ -297,14 +297,17 @@ fn sync_cells(
             };
             let p = (cell.x, cell.y);
             let color = if !game.game_over && active_cells.contains(&p) {
-                piece_color(game.active.kind, 1.25, 1.0)
+                // HDR-boosted so the falling piece blooms.
+                crate::emissive(piece_color(game.active.kind, 1.05, 1.0), 1.9)
             } else if let Some(locked) = game.board.cell(cell.x, cell.y) {
                 match locked {
                     Cell::Piece(kind) => {
                         if game.game_over {
                             piece_color(kind, 0.45, 1.0)
                         } else {
-                            piece_color(kind, 0.95, 1.0)
+                            // Slight HDR lift keeps the stack vivid without
+                            // competing with the active piece's glow.
+                            crate::emissive(piece_color(kind, 0.95, 1.0), 1.15)
                         }
                     }
                     Cell::Garbage => Color::srgb(0.42, 0.44, 0.50),
@@ -456,7 +459,7 @@ fn sync_danger_bar(
             sprite.color = if rows == 0 {
                 Color::NONE
             } else {
-                Color::srgba(0.95, 0.15, 0.2, pulse)
+                crate::emissive(Color::srgb(0.95, 0.15, 0.2), 2.2).with_alpha(pulse)
             };
         }
     }
@@ -477,7 +480,9 @@ fn sync_frame_glow(
             let Ok((mut sprite, mut tf)) = bars.get_mut(child) else {
                 continue;
             };
-            sprite.color = FRAME_BASE_COLOR.mix(&glow.color, t.min(1.0));
+            let mixed = FRAME_BASE_COLOR.mix(&glow.color, t.min(1.0));
+            // Base frame glows a little; pulses push it deep into HDR.
+            sprite.color = crate::emissive(mixed, 1.35 + 2.4 * t);
             let swell = 1.0 + t * 1.8;
             // Bars are thin in exactly one axis; swell that axis only.
             let size = sprite.custom_size.unwrap_or(Vec2::ONE);

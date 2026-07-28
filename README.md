@@ -18,10 +18,13 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
   - Piece spawning in rows 21–22 with immediate drop, block-out / lock-out top-out rules
 - **Configurable controls** — every action can be rebound in the Settings menu;
   DAS / ARR handling tuning and volume sliders included. Settings persist to disk.
-- **Flashy presentation** — particles, screen shake, line-clear banners,
-  full-screen flashes, confetti, starfield background
-- **100% procedural audio** — every sound effect and both chiptune BGM loops are
-  synthesized in code at startup; the game ships with zero audio asset files
+- **Flashy presentation** — HDR bloom on everything that matters, glow
+  particles, hard-drop light trails, line-clear light bars, shockwave rings,
+  screen shake, banners, confetti, starfield over a hand-painted space
+  backdrop
+- **Audio** — CC0 chiptune BGM by Juhani Junkala (random track per match,
+  victory jingle included); all sound effects are procedurally synthesized
+  in code at startup
 
 ## Building & running
 
@@ -70,17 +73,19 @@ Settings are stored as RON at the platform config directory, e.g.
 
 ## Credits & licenses
 
+See [assets/CREDITS.md](assets/CREDITS.md) for full details.
+
 - **Code**: licensed under [Apache-2.0](LICENSE).
+- **Music**: ["Retro Game Music Pack" (5 Chiptunes: Action)](https://opengameart.org/content/5-chiptunes-action)
+  by **Juhani Junkala** (SubspaceAudio) — **CC0**. Converted to OGG Vorbis.
+- **Background art**: ["Space Background"](https://opengameart.org/content/space-background-1)
+  by **Westbeam** — **CC0/WTFPL**.
 - **Font**: the UI uses Bevy's bundled default font, a subset of
   [Fira Mono](https://github.com/mozilla/Fira) © Mozilla Foundation, licensed
   under the [SIL Open Font License 1.1](https://openfontlicense.org/). It is
   embedded in the Bevy engine itself; no font files ship with this repository.
-- **Audio**: all sound effects and music are original works generated
-  procedurally by code in this repository (`src/audio.rs`). No third-party
-  audio assets are used. The BGM tracks are original compositions written for
-  this project.
-- **Graphics**: all visuals are solid-color sprites and text drawn by code;
-  no third-party art assets are used.
+- **Sound effects & other visuals**: generated procedurally by code in this
+  repository (`src/audio.rs`, `src/effects.rs`).
 
 This is a fan-made, non-commercial clone built for learning purposes.
 *Tetris* is a trademark of Tetris Holding, LLC; this project is not

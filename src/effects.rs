@@ -1,12 +1,16 @@
 //! Juice: particles, screen shake, flashes, floating banners, confetti and
 //! the scrolling starfield background. Also maps game events to SFX.
 
+use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rand::Rng;
+use std::collections::HashMap;
 
 use crate::audio::{PlaySfx, Sfx};
 use crate::core::board::{BOARD_WIDTH, VISIBLE_HEIGHT};
 use crate::core::game::{ClearKind, GameEvent};
+use crate::emissive;
 use crate::render::{BoardTheme, FrameGlow};
 use crate::session::{BoardEvent, BoardIndex, GameSession, SessionResult};
 use crate::state::{AppState, PlayState};
@@ -17,7 +21,7 @@ impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraShake>()
             .init_resource::<StarSurge>()
-            .add_systems(Startup, spawn_starfield)
+            .add_systems(Startup, (setup_effect_assets, spawn_starfield))
             .add_systems(
                 Update,
                 (
@@ -26,7 +30,9 @@ impl Plugin for EffectsPlugin {
                     update_banners,
                     update_flashes,
                     update_shockwaves,
+                    update_streaks,
                     update_starfield,
+                    drift_background,
                 ),
             )
             .add_systems(OnEnter(PlayState::Finished), finish_fanfare)
@@ -34,6 +40,97 @@ impl Plugin for EffectsPlugin {
                 PostUpdate,
                 apply_camera_shake.before(TransformSystems::Propagate),
             );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generated effect textures & background art
+// ---------------------------------------------------------------------------
+
+#[derive(Resource)]
+pub struct EffectAssets {
+    /// Soft radial gradient used by particles.
+    pub glow: Handle<Image>,
+    /// Feather-edged rectangle used by streaks (drop trails, row bars):
+    /// stays crisp and rectangular when stretched, unlike the radial glow.
+    pub bar: Handle<Image>,
+}
+
+#[derive(Component)]
+struct BackgroundArt;
+
+fn image_from_alpha(size: u32, alpha: impl Fn(f32, f32) -> f32) -> Image {
+    let mut data = Vec::with_capacity((size * size * 4) as usize);
+    let max = (size - 1) as f32;
+    for y in 0..size {
+        for x in 0..size {
+            // Normalized coordinates in -1..1.
+            let nx = x as f32 / max * 2.0 - 1.0;
+            let ny = y as f32 / max * 2.0 - 1.0;
+            let a = alpha(nx, ny).clamp(0.0, 1.0);
+            data.extend_from_slice(&[255, 255, 255, (a * 255.0) as u8]);
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
+/// 64x64 white radial gradient with soft falloff.
+fn radial_glow_image() -> Image {
+    image_from_alpha(64, |nx, ny| {
+        let d = Vec2::new(nx, ny).length();
+        (1.0 - d).clamp(0.0, 1.0).powi(2)
+    })
+}
+
+/// Rectangle with a flat core and feathered edges on both axes.
+fn soft_rect_image() -> Image {
+    let edge = |n: f32| {
+        // 1.0 in the core, smooth falloff over the outer 35%.
+        let t = ((1.0 - n.abs()) / 0.35).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    image_from_alpha(64, move |nx, ny| edge(nx) * edge(ny))
+}
+
+fn setup_effect_assets(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    asset_server: Res<AssetServer>,
+) {
+    commands.insert_resource(EffectAssets {
+        glow: images.add(radial_glow_image()),
+        bar: images.add(soft_rect_image()),
+    });
+    // CC0 space painting (Westbeam, see assets/CREDITS.md), dimmed so the
+    // boards stay the brightest thing on screen.
+    commands.spawn((
+        Sprite {
+            image: asset_server.load("images/space_bg.png"),
+            custom_size: Some(Vec2::new(1560.0, 1170.0)),
+            color: Color::srgb(0.5, 0.5, 0.62),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, -30.0),
+        BackgroundArt,
+    ));
+}
+
+/// Slow parallax drift so the backdrop feels alive.
+fn drift_background(time: Res<Time>, mut query: Query<&mut Transform, With<BackgroundArt>>) {
+    let t = time.elapsed_secs();
+    for mut tf in &mut query {
+        tf.translation.x = 14.0 * (t * 0.031).sin();
+        tf.translation.y = 10.0 * (t * 0.023).cos();
     }
 }
 
@@ -87,8 +184,10 @@ struct Particle {
     max_life: f32,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_burst(
     commands: &mut Commands,
+    glow: &Handle<Image>,
     center: Vec2,
     color: Color,
     count: usize,
@@ -101,9 +200,16 @@ fn spawn_burst(
     for _ in 0..count {
         let angle = rng.random_range(0.0..std::f32::consts::TAU);
         let v = rng.random_range(0.3..1.0) * speed;
-        let s = rng.random_range(0.5..1.2) * size;
+        // Glow textures read much softer than solid quads, so scale up and
+        // push the color into HDR for bloom.
+        let s = rng.random_range(0.5..1.2) * size * 2.6;
         commands.spawn((
-            Sprite::from_color(color, Vec2::splat(s)),
+            Sprite {
+                image: glow.clone(),
+                custom_size: Some(Vec2::splat(s)),
+                color: emissive(color, 3.0),
+                ..default()
+            },
             Transform::from_translation(center.extend(20.0))
                 .with_rotation(Quat::from_rotation_z(rng.random_range(0.0..3.14))),
             Particle {
@@ -116,6 +222,67 @@ fn spawn_burst(
             },
             DespawnOnExit(AppState::Playing),
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaks: light bars for cleared rows and hard-drop trails
+// ---------------------------------------------------------------------------
+
+#[derive(Component)]
+struct Streak {
+    life: f32,
+    max_life: f32,
+    /// Vertical collapse (cleared rows) vs pure fade (drop trails).
+    collapse: bool,
+}
+
+fn spawn_streak(
+    commands: &mut Commands,
+    glow: &Handle<Image>,
+    center: Vec2,
+    size: Vec2,
+    color: Color,
+    boost: f32,
+    life: f32,
+    collapse: bool,
+) {
+    commands.spawn((
+        Sprite {
+            image: glow.clone(),
+            custom_size: Some(size),
+            color: emissive(color, boost),
+            ..default()
+        },
+        Transform::from_translation(center.extend(14.0)),
+        Streak {
+            life,
+            max_life: life,
+            collapse,
+        },
+        DespawnOnExit(AppState::Playing),
+    ));
+}
+
+fn update_streaks(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut query: Query<(Entity, &mut Streak, &mut Transform, &mut Sprite)>,
+) {
+    for (entity, mut streak, mut tf, mut sprite) in &mut query {
+        streak.life -= time.delta_secs();
+        if streak.life <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let fade = (streak.life / streak.max_life).clamp(0.0, 1.0);
+        sprite.color.set_alpha(fade);
+        if streak.collapse {
+            // Squash vertically while widening a touch: reads as the row
+            // being vaporized.
+            tf.scale.y = fade;
+            tf.scale.x = 1.0 + (1.0 - fade) * 0.12;
+        }
     }
 }
 
@@ -154,13 +321,16 @@ struct Banner {
 }
 
 fn spawn_banner(commands: &mut Commands, pos: Vec2, text: String, color: Color, size: f32) {
+    // Small jitter so back-to-back banners don't stack into one blob.
+    let mut rng = rand::rng();
+    let pos = pos + Vec2::new(rng.random_range(-14.0..14.0), rng.random_range(-8.0..8.0));
     commands.spawn((
         Text2d::new(text),
         TextFont {
             font_size: FontSize::Px(size),
             ..default()
         },
-        TextColor(color),
+        TextColor(emissive(color, 1.7)),
         Transform::from_translation(pos.extend(40.0)).with_scale(Vec3::splat(0.3)),
         Banner {
             life: 1.2,
@@ -292,7 +462,11 @@ fn update_shockwaves(
             }
             let alpha = fade * (1.0 - i as f32 * 0.28);
             gizmos
-                .circle_2d(wave.center, r, wave.color.with_alpha(alpha))
+                .circle_2d(
+                    wave.center,
+                    r,
+                    emissive(wave.color, 3.2).with_alpha(alpha),
+                )
                 .resolution(72);
         }
     }
@@ -374,7 +548,13 @@ fn map_events_to_effects(
     mut surge: ResMut<StarSurge>,
     mut glows: Query<&mut FrameGlow>,
     boards: Query<(&Transform, &BoardTheme, &BoardIndex, &GameSession)>,
+    assets: Res<EffectAssets>,
+    // Hard-drop distance per board, consumed by the following Locked event
+    // to draw the fall trail.
+    mut drop_distance: Local<HashMap<Entity, i8>>,
 ) {
+    let glow_tex = assets.glow.clone();
+    let bar_tex = assets.bar.clone();
     let pulse_frame = |glows: &mut Query<&mut FrameGlow>, board: Entity, color: Color, strength: f32| {
         if let Ok(mut glow) = glows.get_mut(board) {
             glow.color = color;
@@ -394,14 +574,30 @@ fn map_events_to_effects(
         };
 
         match &msg.event {
-            GameEvent::Moved => play(Sfx::Move, 0.5 * gain),
+            GameEvent::Moved => {
+                play(Sfx::Move, 0.5 * gain);
+                // Tactile micro-shake for the player's own inputs only (the
+                // CPU spams inputs far too fast for this to feel good).
+                if index.0 == 0 {
+                    shake.add(0.10);
+                }
+            }
             GameEvent::Rotated { kicked } => {
-                play(Sfx::Rotate, if *kicked { 1.0 } else { 0.7 } * gain)
+                play(Sfx::Rotate, if *kicked { 1.0 } else { 0.7 } * gain);
+                if index.0 == 0 {
+                    shake.add(if *kicked { 0.16 } else { 0.13 });
+                }
             }
             GameEvent::RotationFailed => play(Sfx::RotateFail, 0.35 * gain),
-            GameEvent::SoftDropStep => play(Sfx::SoftDropTick, 0.25 * gain),
+            GameEvent::SoftDropStep => {
+                play(Sfx::SoftDropTick, 0.25 * gain);
+                if index.0 == 0 {
+                    shake.add(0.045);
+                }
+            }
             GameEvent::HardDrop { distance } => {
                 play(Sfx::HardDrop, gain);
+                drop_distance.insert(msg.board, *distance);
                 if index.0 == 0 {
                     shake.add(0.14 + *distance as f32 * 0.004);
                 }
@@ -413,6 +609,7 @@ fn map_events_to_effects(
                     if y < VISIBLE_HEIGHT {
                         spawn_burst(
                             &mut commands,
+                            &glow_tex,
                             cell_world(board_tf, theme, x, y),
                             Color::srgba(0.9, 0.9, 1.0, 0.8),
                             2,
@@ -421,6 +618,41 @@ fn map_events_to_effects(
                             0.3,
                             60.0,
                         );
+                    }
+                }
+                // Light trail down the columns the piece just fell through.
+                if let Some(distance) = drop_distance.remove(&msg.board) {
+                    if distance >= 3 {
+                        let cells = piece.board_cells();
+                        let color = {
+                            let (r, g, b) = piece.kind.color();
+                            Color::srgb(r, g, b)
+                        };
+                        for &(x, _) in &cells {
+                            let top = cells
+                                .iter()
+                                .filter(|c| c.0 == x)
+                                .map(|c| c.1)
+                                .max()
+                                .unwrap_or(0);
+                            let from = (top + 1).min(VISIBLE_HEIGHT - 1);
+                            let to = (top + distance).min(VISIBLE_HEIGHT - 1);
+                            if to <= from {
+                                continue;
+                            }
+                            let a = cell_world(board_tf, theme, x, from);
+                            let b = cell_world(board_tf, theme, x, to);
+                            spawn_streak(
+                                &mut commands,
+                                &bar_tex,
+                                (a + b) / 2.0,
+                                Vec2::new(theme.cell * 0.8, (b.y - a.y).abs() + theme.cell),
+                                color.with_alpha(0.55),
+                                2.4,
+                                0.22,
+                                false,
+                            );
+                        }
                     }
                 }
             }
@@ -484,27 +716,37 @@ fn map_events_to_effects(
                     surge.0 = surge.0.max(5.5);
                 }
 
-                // Particle spray along each cleared row.
+                // Each cleared row: a collapsing light bar plus a spray of
+                // glowing particles.
+                let spray = if spectacle >= 4.0 { 6 } else { 4 };
                 for &row in &clear.rows {
                     if row >= VISIBLE_HEIGHT {
                         continue;
                     }
+                    let row_center = Vec2::new(
+                        center.x,
+                        cell_world(board_tf, theme, 0, row).y,
+                    );
+                    spawn_streak(
+                        &mut commands,
+                        &bar_tex,
+                        row_center,
+                        Vec2::new(theme.cell * BOARD_WIDTH as f32 * 1.06, theme.cell * 1.7),
+                        ring_color,
+                        3.5,
+                        0.3,
+                        true,
+                    );
                     for x in 0..BOARD_WIDTH {
                         let pos = cell_world(board_tf, theme, x, row);
-                        let color = if is_tspin {
-                            Color::srgb(0.9, 0.5, 1.0)
-                        } else if clear.lines == 4 {
-                            Color::srgb(0.4, 0.9, 1.0)
-                        } else {
-                            Color::srgb(1.0, 0.95, 0.7)
-                        };
                         spawn_burst(
                             &mut commands,
+                            &glow_tex,
                             pos,
-                            color,
-                            4,
-                            220.0,
-                            theme.cell * 0.22,
+                            ring_color,
+                            spray,
+                            240.0,
+                            theme.cell * 0.24,
                             0.55,
                             240.0,
                         );
@@ -615,6 +857,7 @@ fn map_events_to_effects(
                         if session.game.board.cell(x, y).is_some() && (x + y) % 2 == 0 {
                             spawn_burst(
                                 &mut commands,
+                                &glow_tex,
                                 cell_world(board_tf, theme, x, y),
                                 Color::srgb(0.7, 0.7, 0.75),
                                 1,
@@ -661,7 +904,7 @@ fn finish_fanfare(
                     tf.translation.y + h / 2.0 + rng.random_range(0.0..120.0),
                 );
                 commands.spawn((
-                    Sprite::from_color(color, Vec2::new(6.0, 10.0)),
+                    Sprite::from_color(emissive(color, 1.9), Vec2::new(6.0, 10.0)),
                     Transform::from_translation(pos.extend(25.0)),
                     Particle {
                         vel: Vec2::new(rng.random_range(-40.0..40.0), rng.random_range(-30.0..10.0)),

@@ -1,5 +1,7 @@
 //! bevytris: a guideline-flavored Tetris clone built on Bevy.
 
+use bevy::camera::Hdr;
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::window::PresentMode;
 
@@ -57,5 +59,25 @@ fn main() -> AppExit {
 }
 
 fn setup_camera(mut commands: Commands) {
-    commands.spawn(Camera2d);
+    // HDR + bloom: anything drawn with color components pushed past 1.0
+    // (active piece, frame glow, particles, shockwaves) blooms into neon.
+    commands.spawn((
+        Camera2d,
+        Hdr,
+        Bloom {
+            intensity: 0.18,
+            ..Bloom::NATURAL
+        },
+    ));
+}
+
+/// Boost a color into HDR range so it blooms (factor 1.0 = no glow).
+pub fn emissive(color: Color, boost: f32) -> Color {
+    let l = color.to_linear();
+    Color::LinearRgba(bevy::color::LinearRgba {
+        red: l.red * boost,
+        green: l.green * boost,
+        blue: l.blue * boost,
+        alpha: l.alpha,
+    })
 }

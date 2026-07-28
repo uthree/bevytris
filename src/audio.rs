@@ -1,11 +1,13 @@
-//! Fully procedural audio: every sound effect and both BGM loops are
-//! synthesized at startup into in-memory WAV files. No external assets,
-//! no licensing concerns.
+//! Audio: sound effects are procedurally synthesized at startup into
+//! in-memory WAV files; BGM streams from CC0 tracks by Juhani Junkala
+//! (see assets/CREDITS.md).
 
 use bevy::audio::{AudioSource, PlaybackSettings, Volume};
 use bevy::prelude::*;
+use rand::seq::IndexedRandom;
 
 use crate::config::GameSettings;
+use crate::session::SessionResult;
 use crate::state::{AppState, PlayState};
 
 const SAMPLE_RATE: u32 = 44_100;
@@ -425,171 +427,16 @@ fn build_sfx_bank(assets: &mut Assets<AudioSource>) -> SfxBank {
 }
 
 // ---------------------------------------------------------------------------
-// BGM: two original chiptune loops (composed for this project — public
-// domain melodies are deliberately avoided).
-// ---------------------------------------------------------------------------
-
-type Phrase = &'static [(Option<i32>, u32)]; // (semitone rel. A4, steps)
-
-fn render_phrase(
-    buf: &mut Vec<f32>,
-    phrase: Phrase,
-    wave: Wave,
-    step_secs: f32,
-    amp: f32,
-    start: f32,
-    transpose: i32,
-    gate: f32,
-) {
-    let mut at = start;
-    for &(semi, steps) in phrase {
-        let dur = steps as f32 * step_secs;
-        if let Some(s) = semi {
-            Tone {
-                wave,
-                freq_start: note(s + transpose),
-                freq_end: note(s + transpose),
-                amp,
-                duration: dur * gate,
-                attack: 0.004,
-                decay: 1.2,
-            }
-            .render(buf, at);
-        }
-        at += dur;
-    }
-}
-
-/// In-game BGM: driving 8-bar chiptune loop in A minor at 150 BPM.
-/// Progression: Am / Am / F / F / C / C / G / G.
-fn build_game_bgm() -> Vec<f32> {
-    let step = 0.1; // 150 BPM, 16th notes
-    let mut buf = Vec::new();
-
-    #[rustfmt::skip]
-    let melody: Phrase = &[
-        // Bar 1 (Am): rising arpeggio and turn
-        (Some(0), 2), (Some(3), 2), (Some(7), 2), (Some(12), 2),
-        (Some(10), 2), (Some(7), 2), (Some(3), 2), (Some(7), 2),
-        // Bar 2 (Am): descending answer
-        (Some(8), 2), (Some(7), 2), (Some(5), 2), (Some(3), 2),
-        (Some(5), 2), (Some(3), 2), (Some(2), 2), (Some(0), 2),
-        // Bar 3 (F)
-        (Some(-4), 2), (Some(0), 2), (Some(3), 2), (Some(8), 2),
-        (Some(7), 2), (Some(3), 2), (Some(0), 2), (Some(3), 2),
-        // Bar 4 (F)
-        (Some(5), 2), (Some(3), 2), (Some(2), 2), (Some(3), 2),
-        (Some(5), 4), (Some(7), 4),
-        // Bar 5 (C)
-        (Some(3), 2), (Some(7), 2), (Some(10), 2), (Some(15), 2),
-        (Some(14), 2), (Some(10), 2), (Some(7), 2), (Some(10), 2),
-        // Bar 6 (C)
-        (Some(12), 2), (Some(10), 2), (Some(8), 2), (Some(10), 2),
-        (Some(7), 4), (Some(3), 4),
-        // Bar 7 (G)
-        (Some(-2), 2), (Some(2), 2), (Some(5), 2), (Some(10), 2),
-        (Some(8), 2), (Some(5), 2), (Some(2), 2), (Some(5), 2),
-        // Bar 8 (G): cadence back to Am
-        (Some(7), 2), (Some(5), 2), (Some(3), 2), (Some(2), 2),
-        (Some(0), 6), (None, 2),
-    ];
-    render_phrase(&mut buf, melody, Wave::Square(0.5), step, 0.30, 0.0, 0, 0.9);
-    // Soft echo of the lead one octave down.
-    render_phrase(&mut buf, melody, Wave::Triangle, step, 0.10, 0.0, -12, 0.9);
-
-    // Bass: eighth-note root/octave pump per chord.
-    let roots = [-24, -24, -28, -28, -21, -21, -26, -26]; // A2 A2 F2 F2 C3 C3 G2 G2
-    let bar = step * 16.0;
-    for (bar_i, &root) in roots.iter().enumerate() {
-        for beat in 0..8 {
-            let semi = if beat % 2 == 0 { root } else { root + 12 };
-            Tone {
-                wave: Wave::Triangle,
-                freq_start: note(semi),
-                freq_end: note(semi),
-                amp: 0.28,
-                duration: step * 1.6,
-                attack: 0.003,
-                decay: 2.0,
-            }
-            .render(&mut buf, bar_i as f32 * bar + beat as f32 * step * 2.0);
-        }
-    }
-
-    // Hi-hat: noise ticks on off-beats.
-    let total_steps = 8 * 16;
-    for s in 0..total_steps {
-        if s % 2 == 0 {
-            let accent = if s % 8 == 4 { 0.10 } else { 0.05 };
-            Tone {
-                wave: Wave::Noise,
-                freq_start: 0.0,
-                freq_end: 0.0,
-                amp: accent,
-                duration: 0.03,
-                attack: 0.001,
-                decay: 8.0,
-            }
-            .render(&mut buf, s as f32 * step);
-        }
-    }
-
-    // Trim/pad to the exact loop length so looping stays on the grid.
-    let loop_len = (8.0 * bar * SAMPLE_RATE as f32) as usize;
-    buf.resize(loop_len, 0.0);
-    buf
-}
-
-/// Title BGM: calm 4-bar arpeggio loop (Am F C G) at 90 BPM.
-fn build_title_bgm() -> Vec<f32> {
-    let step = 60.0 / 90.0 / 4.0; // 16ths at 90 BPM
-    let mut buf = Vec::new();
-    let chords: [&[i32]; 4] = [
-        &[-12, -5, 0, 3],  // Am
-        &[-16, -9, -4, 0], // F
-        &[-9, -2, 3, 7],   // C
-        &[-14, -7, -2, 2], // G
-    ];
-    for (bar_i, chord) in chords.iter().enumerate() {
-        for s in 0..16 {
-            let n = chord[[0, 1, 2, 3, 2, 1][s % 6] as usize];
-            Tone {
-                wave: Wave::Triangle,
-                freq_start: note(n),
-                freq_end: note(n),
-                amp: 0.22,
-                duration: step * 1.8,
-                attack: 0.01,
-                decay: 1.0,
-            }
-            .render(&mut buf, (bar_i * 16 + s) as f32 * step);
-        }
-        // Slow sine lead, one note per bar.
-        let lead = [12, 8, 10, 9][bar_i];
-        Tone {
-            wave: Wave::Sine,
-            freq_start: note(lead),
-            freq_end: note(lead),
-            amp: 0.15,
-            duration: step * 14.0,
-            attack: 0.3,
-            decay: 0.8,
-        }
-        .render(&mut buf, bar_i as f32 * 16.0 * step);
-    }
-    let loop_len = (4.0 * 16.0 * step * SAMPLE_RATE as f32) as usize;
-    buf.resize(loop_len, 0.0);
-    buf
-}
-
-// ---------------------------------------------------------------------------
 // Bevy plumbing
 // ---------------------------------------------------------------------------
 
+/// BGM streamed from CC0 assets ("Retro Game Music Pack" by Juhani Junkala,
+/// see assets/CREDITS.md). In-game tracks are picked at random per match.
 #[derive(Resource)]
 pub struct BgmBank {
     title: Handle<AudioSource>,
-    game: Handle<AudioSource>,
+    game: Vec<Handle<AudioSource>>,
+    victory: Handle<AudioSource>,
 }
 
 /// Marker for the currently playing BGM entity.
@@ -631,17 +478,24 @@ impl Plugin for GameAudioPlugin {
             .add_systems(OnEnter(AppState::Playing), start_game_bgm)
             .add_systems(OnEnter(PlayState::Paused), pause_bgm)
             .add_systems(OnExit(PlayState::Paused), resume_bgm)
-            .add_systems(OnEnter(PlayState::Finished), pause_bgm);
+            .add_systems(OnEnter(PlayState::Finished), (pause_bgm, play_victory_jingle));
     }
 }
 
-fn generate_audio(mut commands: Commands, mut assets: ResMut<Assets<AudioSource>>) {
+fn generate_audio(
+    mut commands: Commands,
+    mut assets: ResMut<Assets<AudioSource>>,
+    asset_server: Res<AssetServer>,
+) {
     let bank = build_sfx_bank(&mut assets);
-    let mut game = build_game_bgm();
-    let mut title = build_title_bgm();
     let bgm = BgmBank {
-        game: assets.add(to_source(&mut game)),
-        title: assets.add(to_source(&mut title)),
+        title: asset_server.load("music/title.ogg"),
+        game: vec![
+            asset_server.load("music/level1.ogg"),
+            asset_server.load("music/level2.ogg"),
+            asset_server.load("music/level3.ogg"),
+        ],
+        victory: asset_server.load("music/ending.ogg"),
     };
     commands.insert_resource(bank);
     commands.insert_resource(bgm);
@@ -687,7 +541,30 @@ fn start_game_bgm(
     sinks: Query<&AudioSink, With<Bgm>>,
 ) {
     if let Some(bank) = bank {
-        swap_bgm(commands, bank.game.clone(), &settings, current, sinks);
+        let track = bank
+            .game
+            .choose(&mut rand::rng())
+            .expect("game BGM list is never empty")
+            .clone();
+        swap_bgm(commands, track, &settings, current, sinks);
+    }
+}
+
+/// On a VS win, celebrate with the (CC0) ending jingle.
+fn play_victory_jingle(
+    mut commands: Commands,
+    bank: Option<Res<BgmBank>>,
+    settings: Res<GameSettings>,
+    result: Option<Res<SessionResult>>,
+) {
+    let Some(bank) = bank else { return };
+    if matches!(result.as_deref(), Some(SessionResult::VsWin { winner: 0 })) {
+        commands.spawn((
+            AudioPlayer::new(bank.victory.clone()),
+            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(settings.bgm_linear())),
+            // Cut the jingle if the player leaves the result screen early.
+            DespawnOnExit(PlayState::Finished),
+        ));
     }
 }
 
