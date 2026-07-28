@@ -663,13 +663,11 @@ mod tests {
     }
 }
 
-/// Wait out the intermission (or let the player skip it), then reset both
+/// Wait out the intermission (deliberately not skippable: round results
+/// should register before the next countdown starts), then reset both
 /// boards for the next round.
-#[allow(clippy::too_many_arguments)]
 fn round_over_tick(
     time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
-    settings: Res<GameSettings>,
     mut timer: ResMut<RoundOverTimer>,
     mut match_state: ResMut<MatchState>,
     mut boards: Query<(
@@ -680,9 +678,7 @@ fn round_over_tick(
     mut next: ResMut<NextState<PlayState>>,
     mut commands: Commands,
 ) {
-    let skip = keys.just_pressed(KeyCode::Enter)
-        || keys.just_pressed(settings.key_for(Action::HardDrop));
-    if !timer.0.tick(time.delta()).is_finished() && !skip {
+    if !timer.0.tick(time.delta()).is_finished() {
         return;
     }
 

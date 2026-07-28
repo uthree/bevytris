@@ -779,7 +779,7 @@ fn setup_round_overlay(
                 parent.spawn(overlay_text(&score, 26.0, Color::srgb(0.9, 0.93, 1.0)));
             }
             parent.spawn(overlay_text(
-                "next round...    ENTER: skip",
+                "next round...",
                 18.0,
                 Color::srgb(0.6, 0.7, 0.8),
             ));

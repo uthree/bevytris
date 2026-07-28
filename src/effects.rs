@@ -36,6 +36,11 @@ impl Plugin for EffectsPlugin {
                 ),
             )
             .add_systems(OnEnter(PlayState::Finished), finish_fanfare)
+            .add_systems(Update, run_celebration)
+            .add_systems(
+                OnExit(PlayState::Finished),
+                |mut commands: Commands| commands.remove_resource::<Celebration>(),
+            )
             .add_systems(
                 PostUpdate,
                 apply_camera_shake.before(TransformSystems::Propagate),
@@ -920,48 +925,184 @@ fn map_events_to_effects(
     }
 }
 
-/// Confetti + fanfare when a VS match ends with a human win.
+/// Sustained match-end celebration: repeated fireworks, rings and confetti
+/// waves for a few seconds after a VS win.
+#[derive(Resource)]
+struct Celebration {
+    total: Timer,
+    spawn: Timer,
+    center: Vec2,
+}
+
+fn spawn_confetti_wave(commands: &mut Commands, center: Vec2, top_y: f32, count: usize) {
+    let mut rng = rand::rng();
+    for _ in 0..count {
+        let color = Color::srgb(
+            rng.random_range(0.4..1.0),
+            rng.random_range(0.4..1.0),
+            rng.random_range(0.4..1.0),
+        );
+        let pos = Vec2::new(
+            center.x + rng.random_range(-190.0..190.0),
+            top_y + rng.random_range(0.0..140.0),
+        );
+        commands.spawn((
+            Sprite::from_color(emissive(color, 1.9), Vec2::new(6.0, 10.0)),
+            Transform::from_translation(pos.extend(25.0)),
+            Particle {
+                vel: Vec2::new(rng.random_range(-45.0..45.0), rng.random_range(-40.0..10.0)),
+                gravity: 140.0,
+                damping: 0.4,
+                spin: rng.random_range(-10.0..10.0),
+                life: rng.random_range(1.6..3.2),
+                max_life: 3.2,
+            },
+            DespawnOnExit(AppState::Playing),
+        ));
+    }
+}
+
+/// Match-end effects: big celebration on a player win, a proper collapse
+/// on a loss.
+#[allow(clippy::too_many_arguments)]
 fn finish_fanfare(
     mut commands: Commands,
     result: Option<Res<SessionResult>>,
-    boards: Query<(&Transform, &BoardTheme, &BoardIndex), With<GameSession>>,
+    boards: Query<(&Transform, &BoardTheme, &BoardIndex, &GameSession)>,
     mut sfx: MessageWriter<PlaySfx>,
+    mut shake: ResMut<CameraShake>,
+    mut surge: ResMut<StarSurge>,
+    mut glows: Query<&mut FrameGlow>,
+    mut kicks: Query<(Entity, &mut BoardKick)>,
+    assets: Res<EffectAssets>,
 ) {
     let Some(result) = result else { return };
-    if let SessionResult::VsWin { winner } = *result {
-        if winner == 0 {
+
+    let board_of = |slot: usize| boards.iter().find(|(_, _, i, _)| i.0 == slot);
+
+    match *result {
+        SessionResult::VsWin { winner: 0 } => {
+            // ---- VICTORY: fireworks show over the player's board --------
             sfx.write(PlaySfx::new(Sfx::Win));
+            if let Some((tf, theme, _, _)) = board_of(0) {
+                let center = Vec2::new(tf.translation.x, tf.translation.y);
+                let h = theme.cell * VISIBLE_HEIGHT as f32;
+                spawn_confetti_wave(&mut commands, center, center.y + h / 2.0, 90);
+                spawn_shockwave(&mut commands, center, Color::srgb(1.0, 0.9, 0.3), true);
+                spawn_shockwave(&mut commands, center, Color::WHITE, true);
+                shake.add(0.4);
+                surge.0 = 9.0;
+                commands.insert_resource(Celebration {
+                    total: Timer::from_seconds(3.4, TimerMode::Once),
+                    spawn: Timer::from_seconds(0.16, TimerMode::Repeating),
+                    center,
+                });
+            }
+            // Gold frames on both boards.
+            for (entity, _) in &kicks {
+                if let Ok(mut glow) = glows.get_mut(entity) {
+                    glow.color = Color::srgb(1.0, 0.85, 0.25);
+                    glow.t = 1.0;
+                }
+            }
         }
-        for (tf, theme, index) in &boards {
-            if index.0 != winner {
-                continue;
+        SessionResult::VsWin { winner } => {
+            // ---- DEFEAT: the player's board collapses --------------------
+            sfx.write(PlaySfx::new(Sfx::Defeat));
+            spawn_flash(&mut commands, Color::srgb(1.0, 0.2, 0.15), 0.38, 0.8);
+            shake.add(0.85);
+            if let Some((tf, theme, _, session)) = board_of(0) {
+                let mut rng = rand::rng();
+                for y in 0..VISIBLE_HEIGHT {
+                    for x in 0..BOARD_WIDTH {
+                        if session.game.board.cell(x, y).is_some() {
+                            spawn_burst(
+                                &mut commands,
+                                &assets.glow,
+                                cell_world(tf, theme, x, y),
+                                Color::srgb(
+                                    rng.random_range(0.55..0.8),
+                                    rng.random_range(0.3..0.5),
+                                    rng.random_range(0.25..0.4),
+                                ),
+                                1,
+                                rng.random_range(260.0..430.0),
+                                theme.cell * 0.3,
+                                1.3,
+                                420.0,
+                            );
+                        }
+                    }
+                }
             }
-            let mut rng = rand::rng();
-            let h = theme.cell * VISIBLE_HEIGHT as f32;
-            for _ in 0..140 {
-                let color = Color::srgb(
-                    rng.random_range(0.4..1.0),
-                    rng.random_range(0.4..1.0),
-                    rng.random_range(0.4..1.0),
-                );
-                let pos = Vec2::new(
-                    tf.translation.x + rng.random_range(-160.0..160.0),
-                    tf.translation.y + h / 2.0 + rng.random_range(0.0..120.0),
-                );
-                commands.spawn((
-                    Sprite::from_color(emissive(color, 1.9), Vec2::new(6.0, 10.0)),
-                    Transform::from_translation(pos.extend(25.0)),
-                    Particle {
-                        vel: Vec2::new(rng.random_range(-40.0..40.0), rng.random_range(-30.0..10.0)),
-                        gravity: 140.0,
-                        damping: 0.4,
-                        spin: rng.random_range(-10.0..10.0),
-                        life: rng.random_range(1.6..3.0),
-                        max_life: 3.0,
-                    },
-                    DespawnOnExit(AppState::Playing),
-                ));
+            for (entity, mut kick) in &mut kicks {
+                if let Ok(mut glow) = glows.get_mut(entity) {
+                    glow.color = Color::srgb(1.0, 0.2, 0.2);
+                    glow.t = 1.0;
+                }
+                // The player's board takes the hit hardest.
+                kick.impulse(Vec2::new(0.0, -170.0));
             }
+            // Modest confetti for the CPU's corner.
+            if let Some((tf, theme, _, _)) = board_of(winner) {
+                let center = Vec2::new(tf.translation.x, tf.translation.y);
+                let h = theme.cell * VISIBLE_HEIGHT as f32;
+                spawn_confetti_wave(&mut commands, center, center.y + h / 2.0, 40);
+            }
+        }
+        SessionResult::SoloOver => {
+            // Marathon over: a weighty thud under the TopOut effects.
+            sfx.write(PlaySfx { sfx: Sfx::Defeat, gain: 0.8 });
         }
     }
+}
+
+fn run_celebration(
+    time: Res<Time>,
+    mut commands: Commands,
+    celebration: Option<ResMut<Celebration>>,
+    assets: Option<Res<EffectAssets>>,
+    mut sfx: MessageWriter<PlaySfx>,
+    mut shake: ResMut<CameraShake>,
+    mut surge: ResMut<StarSurge>,
+) {
+    let (Some(mut c), Some(assets)) = (celebration, assets) else {
+        return;
+    };
+    c.total.tick(time.delta());
+    if c.total.is_finished() {
+        commands.remove_resource::<Celebration>();
+        return;
+    }
+    if !c.spawn.tick(time.delta()).just_finished() {
+        return;
+    }
+
+    // One firework per tick: a colored burst + ring at a random spot
+    // around the winning board, plus a fresh confetti wave now and then.
+    let mut rng = rand::rng();
+    let pos = c.center
+        + Vec2::new(
+            rng.random_range(-230.0..230.0),
+            rng.random_range(-160.0..230.0),
+        );
+    let palette = [
+        Color::srgb(1.0, 0.85, 0.3),
+        Color::srgb(0.4, 0.9, 1.0),
+        Color::srgb(0.9, 0.5, 1.0),
+        Color::srgb(0.5, 1.0, 0.6),
+        Color::srgb(1.0, 0.55, 0.4),
+    ];
+    let color = palette[rng.random_range(0..palette.len())];
+    spawn_burst(&mut commands, &assets.glow, pos, color, 26, 340.0, 7.0, 0.85, 170.0);
+    spawn_shockwave(&mut commands, pos, color, false);
+    if rng.random_range(0..3) == 0 {
+        spawn_confetti_wave(&mut commands, c.center, c.center.y + 260.0, 26);
+    }
+    sfx.write(PlaySfx {
+        sfx: Sfx::Combo(rng.random_range(2..9)),
+        gain: 0.3,
+    });
+    shake.add(0.07);
+    surge.0 = surge.0.max(2.5);
 }

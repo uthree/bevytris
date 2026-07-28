@@ -213,6 +213,8 @@ pub enum Sfx {
     Countdown,
     Go,
     GameOver,
+    /// Deep boom layered under GameOver when the whole match is lost.
+    Defeat,
     Win,
     MenuMove,
     MenuSelect,
@@ -240,6 +242,7 @@ pub struct SfxBank {
     countdown: Handle<AudioSource>,
     go: Handle<AudioSource>,
     game_over: Handle<AudioSource>,
+    defeat: Handle<AudioSource>,
     win: Handle<AudioSource>,
     menu_move: Handle<AudioSource>,
     menu_select: Handle<AudioSource>,
@@ -271,6 +274,7 @@ impl SfxBank {
             Sfx::Countdown => self.countdown.clone(),
             Sfx::Go => self.go.clone(),
             Sfx::GameOver => self.game_over.clone(),
+            Sfx::Defeat => self.defeat.clone(),
             Sfx::Win => self.win.clone(),
             Sfx::MenuMove => self.menu_move.clone(),
             Sfx::MenuSelect => self.menu_select.clone(),
@@ -393,6 +397,32 @@ fn build_sfx_bank(assets: &mut Assets<AudioSource>) -> SfxBank {
         buf
     });
 
+    // Heavy sub-bass boom with a noise rumble tail.
+    let defeat = add({
+        let mut buf = blip(Wave::Noise, 0.0, 0.0, 0.7, 0.45);
+        Tone {
+            wave: Wave::Sine,
+            freq_start: 72.0,
+            freq_end: 27.0,
+            amp: 0.95,
+            duration: 1.0,
+            attack: 0.004,
+            decay: 2.0,
+        }
+        .render(&mut buf, 0.0);
+        Tone {
+            wave: Wave::Square(0.5),
+            freq_start: 110.0,
+            freq_end: 50.0,
+            amp: 0.22,
+            duration: 0.45,
+            attack: 0.005,
+            decay: 3.0,
+        }
+        .render(&mut buf, 0.04);
+        buf
+    });
+
     let win = add(arpeggio(&[0, 4, 7, 12, 12, 16, 19, 24], 0.09, 0.35, 0.45, true));
 
     let menu_move = add(blip(Wave::Square(0.5), 700.0, 700.0, 0.03, 0.2));
@@ -419,6 +449,7 @@ fn build_sfx_bank(assets: &mut Assets<AudioSource>) -> SfxBank {
         countdown,
         go,
         game_over,
+        defeat,
         win,
         menu_move,
         menu_select,
