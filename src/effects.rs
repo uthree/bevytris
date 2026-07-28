@@ -7,7 +7,7 @@ use rand::Rng;
 use crate::audio::{PlaySfx, Sfx};
 use crate::core::board::{BOARD_WIDTH, VISIBLE_HEIGHT};
 use crate::core::game::{ClearKind, GameEvent};
-use crate::render::BoardTheme;
+use crate::render::{BoardTheme, FrameGlow};
 use crate::session::{BoardEvent, BoardIndex, GameSession, SessionResult};
 use crate::state::{AppState, PlayState};
 
@@ -16,6 +16,7 @@ pub struct EffectsPlugin;
 impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraShake>()
+            .init_resource::<StarSurge>()
             .add_systems(Startup, spawn_starfield)
             .add_systems(
                 Update,
@@ -24,6 +25,7 @@ impl Plugin for EffectsPlugin {
                     update_particles,
                     update_banners,
                     update_flashes,
+                    update_shockwaves,
                     update_starfield,
                 ),
             )
@@ -232,8 +234,84 @@ fn update_flashes(
 }
 
 // ---------------------------------------------------------------------------
+// Shockwave rings (playfield-friendly replacement for fullscreen flashes:
+// thin expanding outlines never obscure the stack)
+// ---------------------------------------------------------------------------
+
+#[derive(Component)]
+struct Shockwave {
+    center: Vec2,
+    radius: f32,
+    speed: f32,
+    life: f32,
+    max_life: f32,
+    color: Color,
+    rings: u32,
+}
+
+fn spawn_shockwave(commands: &mut Commands, center: Vec2, color: Color, big: bool) {
+    let (radius, speed, life, rings) = if big {
+        (30.0, 950.0, 0.5, 3)
+    } else {
+        (20.0, 550.0, 0.3, 2)
+    };
+    commands.spawn((
+        Shockwave {
+            center,
+            radius,
+            speed,
+            life,
+            max_life: life,
+            color,
+            rings,
+        },
+        DespawnOnExit(AppState::Playing),
+    ));
+}
+
+fn update_shockwaves(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut gizmos: Gizmos,
+    mut query: Query<(Entity, &mut Shockwave)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut wave) in &mut query {
+        wave.life -= dt;
+        if wave.life <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        wave.radius += wave.speed * dt;
+        wave.speed *= 1.0 - 1.5 * dt; // ease out
+        let fade = (wave.life / wave.max_life).clamp(0.0, 1.0);
+        for i in 0..wave.rings {
+            let r = wave.radius - i as f32 * 7.0;
+            if r <= 1.0 {
+                continue;
+            }
+            let alpha = fade * (1.0 - i as f32 * 0.28);
+            gizmos
+                .circle_2d(wave.center, r, wave.color.with_alpha(alpha))
+                .resolution(72);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Starfield background
 // ---------------------------------------------------------------------------
+
+/// Temporary starfield speed multiplier; spikes on spectacular clears so the
+/// whole background lunges without ever covering the boards.
+#[derive(Resource)]
+struct StarSurge(f32);
+
+impl Default for StarSurge {
+    fn default() -> Self {
+        StarSurge(1.0)
+    }
+}
 
 #[derive(Component)]
 struct Star {
@@ -259,9 +337,15 @@ fn spawn_starfield(mut commands: Commands) {
     }
 }
 
-fn update_starfield(time: Res<Time>, mut query: Query<(&Star, &mut Transform)>) {
+fn update_starfield(
+    time: Res<Time>,
+    mut surge: ResMut<StarSurge>,
+    mut query: Query<(&Star, &mut Transform)>,
+) {
+    let dt = time.delta_secs();
+    surge.0 += (1.0 - surge.0) * (3.0 * dt).min(1.0);
     for (star, mut tf) in &mut query {
-        tf.translation.y -= star.speed * time.delta_secs();
+        tf.translation.y -= star.speed * surge.0 * dt;
         if tf.translation.y < -380.0 {
             tf.translation.y = 380.0;
         }
@@ -287,8 +371,16 @@ fn map_events_to_effects(
     mut events: MessageReader<BoardEvent>,
     mut sfx: MessageWriter<PlaySfx>,
     mut shake: ResMut<CameraShake>,
+    mut surge: ResMut<StarSurge>,
+    mut glows: Query<&mut FrameGlow>,
     boards: Query<(&Transform, &BoardTheme, &BoardIndex, &GameSession)>,
 ) {
+    let pulse_frame = |glows: &mut Query<&mut FrameGlow>, board: Entity, color: Color, strength: f32| {
+        if let Ok(mut glow) = glows.get_mut(board) {
+            glow.color = color;
+            glow.t = glow.t.max(strength.min(1.0));
+        }
+    };
     let mut banner_stagger = 0.0f32;
     for msg in events.read() {
         let Ok((board_tf, theme, index, session)) = boards.get(msg.board) else {
@@ -362,22 +454,34 @@ fn map_events_to_effects(
                     play(Sfx::PerfectClear, gain);
                 }
 
-                // Shake & flash scale with how spectacular the clear is.
+                // Shake & spectacle effects scale with how big the clear is.
+                // Deliberately NO fullscreen flash here: tinting the whole
+                // playfield made the stack hard to read mid-game. Instead:
+                // frame glow + expanding ring + starfield surge, all of
+                // which stay out of the playfield.
                 let spectacle = clear.lines as f32
                     + if is_tspin { 2.0 } else { 0.0 }
                     + if clear.perfect_clear { 4.0 } else { 0.0 };
                 if index.0 == 0 || spectacle >= 4.0 {
                     shake.add(0.06 * spectacle + 0.06);
                 }
-                if spectacle >= 4.0 {
-                    let color = if clear.perfect_clear {
-                        Color::srgb(1.0, 1.0, 0.9)
-                    } else if is_tspin {
-                        Color::srgb(0.8, 0.3, 1.0)
-                    } else {
-                        Color::srgb(0.3, 0.8, 1.0)
-                    };
-                    spawn_flash(&mut commands, color, 0.22, 0.35);
+                let ring_color = if clear.perfect_clear {
+                    Color::srgb(1.0, 0.95, 0.4)
+                } else if is_tspin {
+                    Color::srgb(0.85, 0.4, 1.0)
+                } else if clear.lines == 4 {
+                    Color::srgb(0.35, 0.85, 1.0)
+                } else {
+                    Color::srgb(0.9, 0.95, 1.0)
+                };
+                pulse_frame(&mut glows, msg.board, ring_color, 0.25 + 0.14 * spectacle);
+                spawn_shockwave(&mut commands, center, ring_color, spectacle >= 4.0);
+                if clear.perfect_clear {
+                    // Double ring + hard background lunge for the big one.
+                    spawn_shockwave(&mut commands, center, Color::WHITE, true);
+                    surge.0 = 9.0;
+                } else if spectacle >= 4.0 {
+                    surge.0 = surge.0.max(5.5);
                 }
 
                 // Particle spray along each cleared row.
@@ -476,21 +580,29 @@ fn map_events_to_effects(
                 play(Sfx::LevelUp, gain);
                 if index.0 == 0 {
                     shake.add(0.15);
-                    spawn_flash(&mut commands, Color::srgb(0.5, 1.0, 0.6), 0.15, 0.3);
+                    let green = Color::srgb(0.5, 1.0, 0.6);
+                    pulse_frame(&mut glows, msg.board, green, 0.8);
+                    spawn_shockwave(&mut commands, center, green, true);
+                    surge.0 = surge.0.max(4.0);
                     spawn_banner(
                         &mut commands,
                         center + Vec2::new(0.0, 80.0),
                         format!("LEVEL {level}"),
-                        Color::srgb(0.5, 1.0, 0.6),
+                        green,
                         theme.cell,
                     );
                 }
             }
             GameEvent::GarbageRose { rows } => {
                 play(Sfx::GarbageRise, gain);
+                pulse_frame(
+                    &mut glows,
+                    msg.board,
+                    Color::srgb(1.0, 0.2, 0.2),
+                    0.5 + *rows as f32 * 0.06,
+                );
                 if index.0 == 0 {
                     shake.add(0.1 + *rows as f32 * 0.04);
-                    spawn_flash(&mut commands, Color::srgb(1.0, 0.2, 0.2), 0.12, 0.25);
                 }
             }
             GameEvent::TopOut => {

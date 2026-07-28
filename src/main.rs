@@ -16,7 +16,7 @@ pub(crate) mod core {
     pub use bevytris_core::*;
 }
 
-use state::{AppState, PlayState};
+use state::{AppState, CpuDifficulty, GameMode, PlayState};
 
 fn main() -> AppExit {
     App::new()
@@ -31,11 +31,18 @@ fn main() -> AppExit {
         }))
         .insert_resource(ClearColor(Color::srgb(0.02, 0.025, 0.06)))
         .insert_resource(config::load_settings())
-        // Dev helper: BEVYTRIS_SCREEN=settings|playing skips the title menu.
+        // Dev helpers: BEVYTRIS_SCREEN=settings|playing skips the title menu,
+        // BEVYTRIS_MODE=vs-easy|vs-normal|vs-hard preselects the game mode.
         .insert_state(match std::env::var("BEVYTRIS_SCREEN").as_deref() {
             Ok("settings") => AppState::Settings,
             Ok("playing") => AppState::Playing,
             _ => AppState::Title,
+        })
+        .insert_resource(match std::env::var("BEVYTRIS_MODE").as_deref() {
+            Ok("vs-easy") => GameMode::VsCpu(CpuDifficulty::Easy),
+            Ok("vs-normal") => GameMode::VsCpu(CpuDifficulty::Normal),
+            Ok("vs-hard") => GameMode::VsCpu(CpuDifficulty::Hard),
+            _ => GameMode::Single,
         })
         .add_sub_state::<PlayState>()
         .add_plugins((

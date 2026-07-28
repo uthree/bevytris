@@ -17,6 +17,31 @@ pub struct BoardTheme {
     pub cell: f32,
 }
 
+/// Transient glow on the board's neon frame, set by the effects layer when
+/// something spectacular happens (replaces the old fullscreen flash, which
+/// tinted the playfield and got in the way of reading the stack).
+#[derive(Component)]
+pub struct FrameGlow {
+    pub color: Color,
+    /// 1.0 = full glow, decays to 0.
+    pub t: f32,
+}
+
+impl Default for FrameGlow {
+    fn default() -> Self {
+        Self {
+            color: Color::WHITE,
+            t: 0.0,
+        }
+    }
+}
+
+/// Marker for the four frame bars around a board.
+#[derive(Component)]
+struct FrameBar;
+
+const FRAME_BASE_COLOR: Color = Color::srgb(0.25, 0.75, 0.95);
+
 #[derive(Component)]
 struct CellSprite {
     x: i8,
@@ -59,6 +84,7 @@ impl Plugin for RenderPlugin {
                 sync_hud,
                 sync_danger_bar,
                 sync_countdown,
+                sync_frame_glow,
             )
                 .run_if(in_state(AppState::Playing)),
         );
@@ -85,15 +111,18 @@ pub fn setup_board_visuals(
 
         commands
             .entity(entity)
-            .insert((Transform::from_xyz(x, -14.0, 0.0), BoardTheme { cell }))
+            .insert((
+                Transform::from_xyz(x, -14.0, 0.0),
+                BoardTheme { cell },
+                FrameGlow::default(),
+            ))
             .with_children(|parent| {
                 // Backdrop panel.
                 parent.spawn((
                     Sprite::from_color(Color::srgba(0.02, 0.02, 0.05, 0.92), Vec2::new(w + 8.0, h + 8.0)),
                     Transform::from_xyz(0.0, 0.0, 0.5),
                 ));
-                // Neon frame: four edge bars.
-                let frame = Color::srgb(0.25, 0.75, 0.95);
+                // Neon frame: four edge bars (pulsed by FrameGlow).
                 for (fx, fy, fw, fh) in [
                     (0.0, h / 2.0 + 5.0, w + 16.0, 3.0),
                     (0.0, -h / 2.0 - 5.0, w + 16.0, 3.0),
@@ -101,8 +130,9 @@ pub fn setup_board_visuals(
                     (w / 2.0 + 6.5, 0.0, 3.0, h + 13.0),
                 ] {
                     parent.spawn((
-                        Sprite::from_color(frame, Vec2::new(fw, fh)),
+                        Sprite::from_color(FRAME_BASE_COLOR, Vec2::new(fw, fh)),
                         Transform::from_xyz(fx, fy, 0.6),
+                        FrameBar,
                     ));
                 }
 
@@ -428,6 +458,34 @@ fn sync_danger_bar(
             } else {
                 Color::srgba(0.95, 0.15, 0.2, pulse)
             };
+        }
+    }
+}
+
+/// Decay the frame glow and paint the frame bars accordingly: the bars
+/// blend from their base cyan toward the glow color and swell slightly.
+fn sync_frame_glow(
+    time: Res<Time>,
+    mut boards: Query<(&mut FrameGlow, &Children)>,
+    mut bars: Query<(&mut Sprite, &mut Transform), With<FrameBar>>,
+) {
+    use bevy::color::Mix;
+    for (mut glow, children) in &mut boards {
+        glow.t = (glow.t - 2.6 * time.delta_secs()).max(0.0);
+        let t = glow.t * glow.t; // ease-out: snappy attack, soft tail
+        for child in children.iter() {
+            let Ok((mut sprite, mut tf)) = bars.get_mut(child) else {
+                continue;
+            };
+            sprite.color = FRAME_BASE_COLOR.mix(&glow.color, t.min(1.0));
+            let swell = 1.0 + t * 1.8;
+            // Bars are thin in exactly one axis; swell that axis only.
+            let size = sprite.custom_size.unwrap_or(Vec2::ONE);
+            if size.x < size.y {
+                tf.scale = Vec3::new(swell, 1.0, 1.0);
+            } else {
+                tf.scale = Vec3::new(1.0, swell, 1.0);
+            }
         }
     }
 }
