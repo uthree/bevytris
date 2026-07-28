@@ -7,8 +7,12 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
 ## Features
 
 - **Marathon mode** — classic single-player, guideline gravity curve, 10 lines per level
-- **VS CPU mode** — battle a computer opponent (Easy / Normal / Hard) with
-  garbage attack & cancellation rules modeled after modern versus games
+- **VS CPU mode** — a 30-stage ladder of computer opponents with distinct
+  personalities (Balanced / Rusher / Thinker), human-like blunder rates that
+  fade out as stages climb, garbage attack & cancellation rules modeled
+  after modern versus games, **first-to-2 rounds** (boss stages 10/20/30 are
+  first-to-3), and an **S/A/B/C/D grade** on every stage clear based on
+  dominance, attack-per-minute and style. Progress and best grades persist.
 - **Guideline-compliant mechanics**
   - [Super Rotation System (SRS)](https://tetrisch.github.io/main/srs.html) with full JLSTZ / I wall-kick tables
   - 7-bag randomizer, hold, 5-piece preview, ghost piece

@@ -6,7 +6,7 @@ use bevy::prelude::*;
 use crate::core::board::{Cell, BOARD_WIDTH, VISIBLE_HEIGHT};
 use crate::core::game::gravity_seconds;
 use crate::core::piece::{cells, PieceKind, Rot};
-use crate::session::{BoardIndex, Countdown, GameSession};
+use crate::session::{BoardIndex, Countdown, CpuControlled, GameSession, MatchState};
 use crate::state::{AppState, GameMode, PlayState};
 
 /// Rows rendered above the visible field so pieces peek over the skyline.
@@ -131,6 +131,10 @@ struct DangerBar;
 #[derive(Component)]
 struct CountdownText;
 
+/// Center-top line with stage, opponent archetype, round and match score.
+#[derive(Component)]
+struct MatchHudText;
+
 pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
@@ -144,6 +148,7 @@ impl Plugin for RenderPlugin {
                 sync_danger_bar,
                 sync_countdown,
                 sync_frame_glow,
+                sync_match_hud,
                 update_board_kick,
             )
                 .run_if(in_state(AppState::Playing)),
@@ -157,7 +162,7 @@ pub fn setup_board_visuals(
     mode: Res<GameMode>,
     boards: Query<(Entity, &BoardIndex), With<GameSession>>,
 ) {
-    let vs = matches!(*mode, GameMode::VsCpu(_));
+    let vs = matches!(*mode, GameMode::VsCpu { .. });
     let cell = if vs { 26.0 } else { 30.0 };
 
     for (entity, index) in &boards {
@@ -320,6 +325,41 @@ pub fn setup_board_visuals(
         CountdownText,
         DespawnOnExit(AppState::Playing),
     ));
+
+    // Match header (stage / round / score) for VS mode.
+    if vs {
+        commands.spawn((
+            Text2d::new(""),
+            TextFont { font_size: FontSize::Px(24.0), ..default() },
+            TextColor(Color::srgb(0.85, 0.9, 1.0)),
+            Transform::from_xyz(0.0, 332.0, 30.0),
+            MatchHudText,
+            DespawnOnExit(AppState::Playing),
+        ));
+    }
+}
+
+fn sync_match_hud(
+    match_state: Option<Res<MatchState>>,
+    cpus: Query<&CpuControlled>,
+    mut texts: Query<&mut Text2d, With<MatchHudText>>,
+) {
+    let Ok(mut text) = texts.single_mut() else {
+        return;
+    };
+    let Some(ms) = match_state else { return };
+    let Some(stage) = ms.stage else { return };
+    let archetype = cpus
+        .single()
+        .map(|c| c.profile.archetype.label())
+        .unwrap_or("");
+    let line = format!(
+        "STAGE {stage:02} {archetype}   ROUND {}   YOU {} - {} CPU   (FIRST TO {})",
+        ms.round, ms.player_wins, ms.cpu_wins, ms.wins_needed
+    );
+    if **text != line {
+        **text = line;
+    }
 }
 
 fn cell_pos(cell: f32, x: i8, y: i8, board_h: f32) -> Vec2 {

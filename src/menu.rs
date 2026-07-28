@@ -7,13 +7,18 @@ use bevy::prelude::*;
 
 use crate::audio::{PlaySfx, Sfx};
 use crate::config::{key_label, save_settings, Action, GameSettings};
-use crate::session::{GameSession, HumanControlled, SessionResult};
-use crate::state::{AppState, CpuDifficulty, GameMode, PlayState};
+use crate::core::ai::{AiProfile, MAX_STAGE};
+use crate::progress::Progress;
+use crate::session::{GameSession, HumanControlled, LastRound, MatchState, SessionResult, StageClear};
+use crate::state::{AppState, GameMode, PlayState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
     Marathon,
-    Vs(CpuDifficulty),
+    /// Open the stage picker.
+    VsSelect,
+    /// Start a VS match on this stage.
+    Stage(u32),
     Settings,
     Quit,
     Bind(Action),
@@ -33,6 +38,10 @@ struct MenuItem {
 
 #[derive(Component)]
 struct MenuItemLabel;
+
+/// Footer line on the stage select screen describing the focused stage.
+#[derive(Component)]
+struct StageFooter;
 
 #[derive(Resource, Default)]
 struct MenuCursor(usize);
@@ -58,8 +67,10 @@ impl Plugin for MenuPlugin {
                 |mut next: ResMut<NextState<AppState>>| next.set(AppState::Playing),
             )
             .add_systems(OnEnter(AppState::Settings), setup_settings)
+            .add_systems(OnEnter(AppState::StageSelect), setup_stage_select)
             .add_systems(OnExit(AppState::Settings), persist_settings)
             .add_systems(OnEnter(PlayState::Paused), setup_pause_overlay)
+            .add_systems(OnEnter(PlayState::RoundOver), setup_round_overlay)
             .add_systems(OnEnter(PlayState::Finished), setup_result_overlay)
             .add_systems(
                 Update,
@@ -68,8 +79,13 @@ impl Plugin for MenuPlugin {
                     menu_mouse,
                     highlight_items,
                     refresh_settings_labels,
+                    refresh_stage_footer.run_if(in_state(AppState::StageSelect)),
                 )
-                    .run_if(in_state(AppState::Title).or_else(in_state(AppState::Settings))),
+                    .run_if(
+                        in_state(AppState::Title)
+                            .or_else(in_state(AppState::Settings))
+                            .or_else(in_state(AppState::StageSelect)),
+                    ),
             )
             .add_systems(
                 Update,
@@ -133,12 +149,12 @@ fn item_bundle(index: usize, action: MenuAction, label: String, width: f32) -> i
 
 fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>) {
     cursor.0 = 0;
-    let mut items = vec![(MenuAction::Marathon, "MARATHON".to_string())];
-    for d in [CpuDifficulty::Easy, CpuDifficulty::Normal, CpuDifficulty::Hard] {
-        items.push((MenuAction::Vs(d), format!("VS CPU - {}", d.label())));
-    }
-    items.push((MenuAction::Settings, "SETTINGS".to_string()));
-    items.push((MenuAction::Quit, "QUIT".to_string()));
+    let items = vec![
+        (MenuAction::Marathon, "MARATHON".to_string()),
+        (MenuAction::VsSelect, "VS CPU".to_string()),
+        (MenuAction::Settings, "SETTINGS".to_string()),
+        (MenuAction::Quit, "QUIT".to_string()),
+    ];
     commands
         .spawn((root_node(), DespawnOnExit(AppState::Title)))
         .with_children(|parent| {
@@ -171,6 +187,146 @@ fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>) {
                 },
             ));
         });
+}
+
+const STAGE_COLUMNS: usize = 6;
+
+fn setup_stage_select(
+    mut commands: Commands,
+    mut cursor: ResMut<MenuCursor>,
+    progress: Res<Progress>,
+) {
+    // Focus the newest unlocked stage.
+    cursor.0 = (progress.unlocked.clamp(1, MAX_STAGE) - 1) as usize;
+
+    commands
+        .spawn((root_node(), DespawnOnExit(AppState::StageSelect)))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("SELECT STAGE"),
+                TextFont {
+                    font_size: FontSize::Px(44.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.3, 0.85, 1.0)),
+                Node {
+                    margin: UiRect::bottom(px(14)),
+                    ..default()
+                },
+            ));
+            parent
+                .spawn(Node {
+                    width: px(STAGE_COLUMNS as f32 * 92.0),
+                    flex_wrap: FlexWrap::Wrap,
+                    justify_content: JustifyContent::Center,
+                    row_gap: px(8),
+                    column_gap: px(8),
+                    ..default()
+                })
+                .with_children(|grid| {
+                    for i in 0..MAX_STAGE as usize {
+                        let stage = (i + 1) as u32;
+                        let unlocked = progress.is_unlocked(stage);
+                        let grade = progress.grades.get(&stage).copied();
+                        let label = if !unlocked {
+                            format!("{stage:02}  -")
+                        } else {
+                            match grade {
+                                Some(g) => format!("{stage:02}  {}", g.letter()),
+                                None => format!("{stage:02}"),
+                            }
+                        };
+                        let text_color = if !unlocked {
+                            Color::srgba(0.5, 0.55, 0.65, 0.5)
+                        } else {
+                            match grade {
+                                Some(g) => g.color(),
+                                None => Color::srgb(0.9, 0.93, 1.0),
+                            }
+                        };
+                        grid.spawn((
+                            Button,
+                            MenuItem {
+                                index: i,
+                                action: MenuAction::Stage(stage),
+                            },
+                            Node {
+                                width: px(84),
+                                height: px(52),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
+                                border: UiRect::all(px(2)),
+                                border_radius: BorderRadius::all(px(8)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgba(0.08, 0.1, 0.16, 0.85)),
+                            BorderColor::all(Color::NONE),
+                            children![(
+                                Text::new(label),
+                                MenuItemLabel,
+                                TextFont {
+                                    font_size: FontSize::Px(20.0),
+                                    ..default()
+                                },
+                                TextColor(text_color),
+                            )],
+                        ));
+                    }
+                });
+            parent.spawn((
+                Text::new(""),
+                StageFooter,
+                TextFont {
+                    font_size: FontSize::Px(20.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.8, 0.85, 0.95)),
+                Node {
+                    margin: UiRect::top(px(18)),
+                    ..default()
+                },
+            ));
+            parent.spawn((
+                Text::new("Arrows: select    ENTER: start    ESC: back"),
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.45, 0.5, 0.6)),
+                Node {
+                    margin: UiRect::top(px(8)),
+                    ..default()
+                },
+            ));
+        });
+}
+
+fn refresh_stage_footer(
+    cursor: Res<MenuCursor>,
+    progress: Res<Progress>,
+    mut texts: Query<&mut Text, With<StageFooter>>,
+) {
+    let Ok(mut text) = texts.single_mut() else {
+        return;
+    };
+    let stage = (cursor.0 as u32 + 1).clamp(1, MAX_STAGE);
+    let profile = AiProfile::for_stage(stage);
+    let first_to = if stage % 10 == 0 { 3 } else { 2 };
+    let status = if !progress.is_unlocked(stage) {
+        "LOCKED".to_string()
+    } else {
+        match progress.grades.get(&stage) {
+            Some(g) => format!("BEST: {}", g.letter()),
+            None => "NOT CLEARED".to_string(),
+        }
+    };
+    let line = format!(
+        "STAGE {stage:02}   TYPE: {}   FIRST TO {first_to}   {status}",
+        profile.archetype.label()
+    );
+    if **text != line {
+        **text = line;
+    }
 }
 
 fn setup_settings(mut commands: Commands, mut cursor: ResMut<MenuCursor>, mut rebinding: ResMut<Rebinding>) {
@@ -290,20 +446,37 @@ fn menu_keyboard_nav(
     if count == 0 {
         return;
     }
+    // The stage picker is a grid: vertical steps jump a whole row and
+    // left/right move the cursor instead of adjusting values.
+    let grid = *activate.app_state.get() == AppState::StageSelect;
+    let step = if grid { STAGE_COLUMNS } else { 1 };
+
     let mut moved = false;
     if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS) {
-        cursor.0 = (cursor.0 + 1) % count;
+        cursor.0 = (cursor.0 + step) % count;
         moved = true;
     }
     if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
-        cursor.0 = (cursor.0 + count - 1) % count;
+        cursor.0 = (cursor.0 + count - step) % count;
         moved = true;
+    }
+    if grid {
+        if keys.just_pressed(KeyCode::ArrowRight) {
+            cursor.0 = (cursor.0 + 1) % count;
+            moved = true;
+        }
+        if keys.just_pressed(KeyCode::ArrowLeft) {
+            cursor.0 = (cursor.0 + count - 1) % count;
+            moved = true;
+        }
     }
     if moved {
         sfx.write(PlaySfx::quiet(Sfx::MenuMove));
     }
 
-    let adjust = if keys.just_pressed(KeyCode::ArrowRight) {
+    let adjust = if grid {
+        0
+    } else if keys.just_pressed(KeyCode::ArrowRight) {
         1
     } else if keys.just_pressed(KeyCode::ArrowLeft) {
         -1
@@ -357,6 +530,7 @@ struct MenuActivateParams<'w> {
     rebinding: ResMut<'w, Rebinding>,
     exit: MessageWriter<'w, AppExit>,
     app_state: Res<'w, State<AppState>>,
+    progress: Res<'w, Progress>,
 }
 
 fn run_menu_action(
@@ -368,7 +542,10 @@ fn run_menu_action(
     mut sfx: MessageWriter<PlaySfx>,
 ) {
     if back {
-        if *p.app_state.get() == AppState::Settings {
+        if matches!(
+            *p.app_state.get(),
+            AppState::Settings | AppState::StageSelect
+        ) {
             sfx.write(PlaySfx::new(Sfx::MenuBack));
             p.next_app.set(AppState::Title);
         }
@@ -419,10 +596,18 @@ fn run_menu_action(
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
             p.next_app.set(AppState::Playing);
         }
-        MenuAction::Vs(difficulty) => {
-            *p.mode = GameMode::VsCpu(difficulty);
+        MenuAction::VsSelect => {
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
-            p.next_app.set(AppState::Playing);
+            p.next_app.set(AppState::StageSelect);
+        }
+        MenuAction::Stage(stage) => {
+            if p.progress.is_unlocked(stage) {
+                *p.mode = GameMode::VsCpu { stage };
+                sfx.write(PlaySfx::new(Sfx::MenuSelect));
+                p.next_app.set(AppState::Playing);
+            } else {
+                sfx.write(PlaySfx::new(Sfx::RotateFail));
+            }
         }
         MenuAction::Settings => {
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
@@ -544,29 +729,108 @@ fn setup_pause_overlay(mut commands: Commands, settings: Res<GameSettings>) {
         });
 }
 
-fn setup_result_overlay(
+/// Intermission between rounds of a first-to-n match.
+fn setup_round_overlay(
     mut commands: Commands,
-    result: Option<Res<SessionResult>>,
-    players: Query<&GameSession, With<HumanControlled>>,
+    last: Option<Res<LastRound>>,
+    match_state: Option<Res<MatchState>>,
 ) {
-    let (headline, color) = match result.as_deref() {
-        Some(SessionResult::VsWin { winner: 0 }) => ("YOU WIN!", Color::srgb(1.0, 0.9, 0.3)),
-        Some(SessionResult::VsWin { .. }) => ("YOU LOSE...", Color::srgb(0.9, 0.3, 0.3)),
-        _ => ("GAME OVER", Color::srgb(0.9, 0.4, 0.4)),
+    let won = matches!(last.as_deref(), Some(LastRound { winner: 0 }));
+    let (headline, color) = if won {
+        ("ROUND WIN!", Color::srgb(1.0, 0.9, 0.3))
+    } else {
+        ("ROUND LOST", Color::srgb(0.9, 0.35, 0.35))
     };
-    let stats = players.single().ok().map(|s| {
-        let g = &s.game;
+    let score = match_state.map(|ms| {
         format!(
-            "SCORE {}    LEVEL {}    LINES {}    MAX COMBO {}",
-            g.score, g.level, g.lines, g.stats.max_combo
+            "YOU {} - {} CPU    (FIRST TO {})",
+            ms.player_wins, ms.cpu_wins, ms.wins_needed
         )
     });
     commands
+        .spawn((overlay_root(), DespawnOnExit(PlayState::RoundOver)))
+        .with_children(|parent| {
+            parent.spawn(overlay_text(headline, 58.0, color));
+            if let Some(score) = score {
+                parent.spawn(overlay_text(&score, 26.0, Color::srgb(0.9, 0.93, 1.0)));
+            }
+            parent.spawn(overlay_text(
+                "next round...    ENTER: skip",
+                18.0,
+                Color::srgb(0.6, 0.7, 0.8),
+            ));
+        });
+}
+
+fn setup_result_overlay(
+    mut commands: Commands,
+    result: Option<Res<SessionResult>>,
+    stage_clear: Option<Res<StageClear>>,
+    match_state: Option<Res<MatchState>>,
+    mode: Res<GameMode>,
+    players: Query<&GameSession, With<HumanControlled>>,
+) {
+    let stage = match *mode {
+        GameMode::VsCpu { stage } => Some(stage),
+        GameMode::Single => None,
+    };
+    let (headline, color) = match (result.as_deref(), stage) {
+        (Some(SessionResult::VsWin { winner: 0 }), Some(s)) => {
+            (format!("STAGE {s:02} CLEAR!"), Color::srgb(1.0, 0.9, 0.3))
+        }
+        (Some(SessionResult::VsWin { .. }), Some(s)) => {
+            (format!("STAGE {s:02} FAILED..."), Color::srgb(0.9, 0.3, 0.3))
+        }
+        _ => ("GAME OVER".to_string(), Color::srgb(0.9, 0.4, 0.4)),
+    };
+
+    // VS matches report the whole-match aggregate; marathon reports the run.
+    let stats = if let Some(ms) = match_state.as_ref().filter(|_| stage.is_some()) {
+        Some(format!(
+            "ROUNDS {}-{}    ATTACK {}    TETRIS {}    T-SPIN {}    COMBO {}    PC {}",
+            ms.player_wins,
+            ms.cpu_wins,
+            ms.agg.attack,
+            ms.agg.tetrises,
+            ms.agg.tspins,
+            ms.agg.max_combo,
+            ms.agg.perfect_clears,
+        ))
+    } else {
+        players.single().ok().map(|s| {
+            let g = &s.game;
+            format!(
+                "SCORE {}    LEVEL {}    LINES {}    MAX COMBO {}",
+                g.score, g.level, g.lines, g.stats.max_combo
+            )
+        })
+    };
+
+    commands
         .spawn((overlay_root(), DespawnOnExit(PlayState::Finished)))
         .with_children(|parent| {
-            parent.spawn(overlay_text(headline, 72.0, color));
+            parent.spawn(overlay_text(&headline, 64.0, color));
+            if let Some(clear) = stage_clear.as_deref() {
+                parent.spawn(overlay_text("RANK", 20.0, Color::srgb(0.6, 0.7, 0.8)));
+                parent.spawn((
+                    Text::new(clear.grade.letter()),
+                    TextFont {
+                        font_size: FontSize::Px(110.0),
+                        ..default()
+                    },
+                    TextColor(clear.grade.color()),
+                    TextShadow::default(),
+                ));
+                if clear.new_best {
+                    parent.spawn(overlay_text(
+                        "NEW BEST!",
+                        24.0,
+                        Color::srgb(0.5, 1.0, 0.6),
+                    ));
+                }
+            }
             if let Some(stats) = stats {
-                parent.spawn(overlay_text(&stats, 22.0, Color::srgb(0.85, 0.9, 1.0)));
+                parent.spawn(overlay_text(&stats, 21.0, Color::srgb(0.85, 0.9, 1.0)));
             }
             parent.spawn(overlay_text(
                 "R / ENTER: play again    Q: title",

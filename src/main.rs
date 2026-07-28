@@ -9,6 +9,7 @@ mod audio;
 mod config;
 mod effects;
 mod menu;
+mod progress;
 mod render;
 mod session;
 mod state;
@@ -18,7 +19,7 @@ pub(crate) mod core {
     pub use bevytris_core::*;
 }
 
-use state::{AppState, CpuDifficulty, GameMode, PlayState};
+use state::{AppState, GameMode, PlayState};
 
 fn main() -> AppExit {
     App::new()
@@ -33,19 +34,26 @@ fn main() -> AppExit {
         }))
         .insert_resource(ClearColor(Color::srgb(0.02, 0.025, 0.06)))
         .insert_resource(config::load_settings())
-        // Dev helpers: BEVYTRIS_SCREEN=settings|playing skips the title menu,
-        // BEVYTRIS_MODE=vs-easy|vs-normal|vs-hard preselects the game mode.
+        // Dev helpers: BEVYTRIS_SCREEN=settings|stages|playing skips the
+        // title menu, BEVYTRIS_MODE=vs-stage-N|vs-easy|vs-normal|vs-hard
+        // preselects the game mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages.
         .insert_state(match std::env::var("BEVYTRIS_SCREEN").as_deref() {
             Ok("settings") => AppState::Settings,
+            Ok("stages") => AppState::StageSelect,
             Ok("playing") => AppState::Playing,
             _ => AppState::Title,
         })
         .insert_resource(match std::env::var("BEVYTRIS_MODE").as_deref() {
-            Ok("vs-easy") => GameMode::VsCpu(CpuDifficulty::Easy),
-            Ok("vs-normal") => GameMode::VsCpu(CpuDifficulty::Normal),
-            Ok("vs-hard") => GameMode::VsCpu(CpuDifficulty::Hard),
+            Ok("vs-easy") => GameMode::VsCpu { stage: 5 },
+            Ok("vs-normal") => GameMode::VsCpu { stage: 15 },
+            Ok("vs-hard") => GameMode::VsCpu { stage: 25 },
+            Ok(mode) => match mode.strip_prefix("vs-stage-").and_then(|n| n.parse().ok()) {
+                Some(stage) => GameMode::VsCpu { stage },
+                None => GameMode::Single,
+            },
             _ => GameMode::Single,
         })
+        .insert_resource(progress::load_progress_with_env())
         .add_sub_state::<PlayState>()
         .add_plugins((
             audio::GameAudioPlugin,

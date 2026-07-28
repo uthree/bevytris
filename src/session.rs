@@ -1,5 +1,6 @@
 //! Game session orchestration: board entities, human input (DAS/ARR),
-//! the CPU driver, garbage routing between boards and win/lose detection.
+//! the CPU driver, garbage routing, and the first-to-n round/match flow
+//! with stage grading.
 
 use bevy::prelude::*;
 use rand::rngs::StdRng;
@@ -8,8 +9,9 @@ use rand::{Rng, SeedableRng};
 use crate::audio::{PlaySfx, Sfx};
 use crate::config::{Action, GameSettings};
 use crate::core::ai::{self, AiProfile, Plan};
-use crate::core::game::{Game, GameEvent};
-use crate::state::{AppState, CpuDifficulty, GameMode, PlayState};
+use crate::core::game::{Game, GameEvent, Stats};
+use crate::progress::{Grade, Progress};
+use crate::state::{AppState, GameMode, PlayState};
 
 /// One playfield (either the human's or the CPU's).
 #[derive(Component)]
@@ -34,13 +36,33 @@ pub struct DasState {
 
 #[derive(Component)]
 pub struct CpuControlled {
-    profile: AiProfile,
+    pub profile: AiProfile,
     rng: StdRng,
     plan: Option<Plan>,
     /// `stats.pieces` value the current plan was made for.
     planned_piece: Option<u32>,
     hold_done: bool,
     timer: f32,
+}
+
+impl CpuControlled {
+    fn new(profile: AiProfile, seed: u64) -> Self {
+        Self {
+            profile,
+            rng: StdRng::seed_from_u64(seed ^ 0xC0FFEE),
+            plan: None,
+            planned_piece: None,
+            hold_done: false,
+            timer: profile.think_time,
+        }
+    }
+
+    fn reset_for_round(&mut self) {
+        self.plan = None;
+        self.planned_piece = None;
+        self.hold_done = false;
+        self.timer = self.profile.think_time;
+    }
 }
 
 /// Raw game events re-published as Bevy messages for effects/audio/UI.
@@ -54,12 +76,84 @@ pub struct BoardEvent {
     pub event: GameEvent,
 }
 
+/// Final outcome of the whole match.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionResult {
     /// Single player topped out.
     SoloOver,
-    /// VS: which board index won.
+    /// VS: which board index won the match.
     VsWin { winner: usize },
+}
+
+/// Who took the round that just ended (drives the RoundOver overlay).
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct LastRound {
+    pub winner: usize,
+}
+
+/// Set when the player clears a stage; consumed by the result overlay.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct StageClear {
+    /// Kept for symmetry/logging; the overlay derives the stage from
+    /// `GameMode` so it can also label failed attempts.
+    #[allow(dead_code)]
+    pub stage: u32,
+    pub grade: Grade,
+    pub new_best: bool,
+}
+
+/// Player statistics accumulated across all rounds of a match.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MatchAggregate {
+    pub attack: u32,
+    pub tetrises: u32,
+    pub tspins: u32,
+    pub max_combo: u32,
+    pub perfect_clears: u32,
+    pub time: f64,
+}
+
+impl MatchAggregate {
+    fn absorb(&mut self, stats: &Stats) {
+        self.attack += stats.attack_sent;
+        self.tetrises += stats.tetrises;
+        self.tspins += stats.tspins;
+        self.max_combo = self.max_combo.max(stats.max_combo);
+        self.perfect_clears += stats.perfect_clears;
+        self.time += stats.time;
+    }
+}
+
+/// First-to-n match bookkeeping.
+#[derive(Resource, Debug, Clone)]
+pub struct MatchState {
+    pub stage: Option<u32>,
+    pub wins_needed: u32,
+    pub player_wins: u32,
+    pub cpu_wins: u32,
+    /// 1-based round counter.
+    pub round: u32,
+    pub agg: MatchAggregate,
+}
+
+impl MatchState {
+    fn new(mode: GameMode) -> Self {
+        let (stage, wins_needed) = match mode {
+            GameMode::Single => (None, 1),
+            // Boss stages (10/20/30) are first-to-3, the rest first-to-2.
+            GameMode::VsCpu { stage } => {
+                (Some(stage), if stage % 10 == 0 { 3 } else { 2 })
+            }
+        };
+        Self {
+            stage,
+            wins_needed,
+            player_wins: 0,
+            cpu_wins: 0,
+            round: 1,
+            agg: MatchAggregate::default(),
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -67,6 +161,9 @@ pub struct Countdown {
     timer: Timer,
     remaining: u32,
 }
+
+#[derive(Resource)]
+struct RoundOverTimer(Timer);
 
 pub struct SessionPlugin;
 
@@ -78,6 +175,7 @@ impl Plugin for SessionPlugin {
                 OnEnter(AppState::Playing),
                 (spawn_session, crate::render::setup_board_visuals).chain(),
             )
+            .add_systems(OnEnter(PlayState::Countdown), start_countdown)
             .add_systems(
                 Update,
                 countdown_tick.run_if(in_state(PlayState::Countdown)),
@@ -88,6 +186,11 @@ impl Plugin for SessionPlugin {
                     .chain()
                     .run_if(in_state(PlayState::Running)),
             )
+            .add_systems(OnEnter(PlayState::RoundOver), round_over_enter)
+            .add_systems(
+                Update,
+                round_over_tick.run_if(in_state(PlayState::RoundOver)),
+            )
             .add_systems(
                 Update,
                 pause_toggle.run_if(in_state(PlayState::Running).or_else(in_state(PlayState::Paused))),
@@ -95,17 +198,15 @@ impl Plugin for SessionPlugin {
     }
 }
 
-fn spawn_session(mut commands: Commands, mode: Res<GameMode>, mut sfx: MessageWriter<PlaySfx>) {
+fn spawn_session(mut commands: Commands, mode: Res<GameMode>) {
     let seed: u64 = rand::rng().random();
     // Both players get the same piece sequence (standard for versus play).
     let start_level = 1;
 
     commands.remove_resource::<SessionResult>();
-    commands.insert_resource(Countdown {
-        timer: Timer::from_seconds(0.8, TimerMode::Repeating),
-        remaining: 3,
-    });
-    sfx.write(PlaySfx::new(Sfx::Countdown));
+    commands.remove_resource::<LastRound>();
+    commands.remove_resource::<StageClear>();
+    commands.insert_resource(MatchState::new(*mode));
 
     commands.spawn((
         GameSession { game: Game::new(seed, start_level) },
@@ -117,28 +218,25 @@ fn spawn_session(mut commands: Commands, mode: Res<GameMode>, mut sfx: MessageWr
         Visibility::default(),
     ));
 
-    if let GameMode::VsCpu(difficulty) = *mode {
-        let profile = match difficulty {
-            CpuDifficulty::Easy => AiProfile::easy(),
-            CpuDifficulty::Normal => AiProfile::normal(),
-            CpuDifficulty::Hard => AiProfile::hard(),
-        };
+    if let GameMode::VsCpu { stage } = *mode {
+        let profile = AiProfile::for_stage(stage);
         commands.spawn((
             GameSession { game: Game::new(seed, start_level) },
             BoardIndex(1),
-            CpuControlled {
-                profile,
-                rng: StdRng::seed_from_u64(seed ^ 0xC0FFEE),
-                plan: None,
-                planned_piece: None,
-                hold_done: false,
-                timer: profile.think_time,
-            },
+            CpuControlled::new(profile, seed),
             DespawnOnExit(AppState::Playing),
             Transform::default(),
             Visibility::default(),
         ));
     }
+}
+
+fn start_countdown(mut commands: Commands, mut sfx: MessageWriter<PlaySfx>) {
+    commands.insert_resource(Countdown {
+        timer: Timer::from_seconds(0.8, TimerMode::Repeating),
+        remaining: 3,
+    });
+    sfx.write(PlaySfx::new(Sfx::Countdown));
 }
 
 fn countdown_tick(
@@ -189,7 +287,6 @@ fn human_input(
     keys: Res<ButtonInput<KeyCode>>,
     settings: Res<GameSettings>,
     mut query: Query<(&mut GameSession, &mut DasState), With<HumanControlled>>,
-    mut sfx: MessageWriter<PlaySfx>,
 ) {
     let Ok((mut session, mut das)) = query.single_mut() else {
         return;
@@ -218,6 +315,7 @@ fn human_input(
         das.arr_acc = 0.0;
         game.move_horizontal(1);
     }
+
     // Keys already held when control resumes (countdown end, unpause) never
     // fire just_pressed; pick them up with a fully charged DAS so holding a
     // direction through the countdown slides the piece immediately.
@@ -274,7 +372,6 @@ fn human_input(
     if keys.just_pressed(settings.key_for(Action::HardDrop)) {
         game.hard_drop();
     }
-    let _ = &mut sfx; // sfx for inputs are driven by BoardEvents in tick_games
 }
 
 fn cpu_drive(
@@ -365,6 +462,42 @@ fn cpu_drive(
     }
 }
 
+/// Arcade-style grade for a won stage.
+fn compute_grade(ms: &MatchState) -> Grade {
+    let mut pts = 0.0f32;
+    // Dominance: dropping no rounds is worth a lot.
+    pts += if ms.cpu_wins == 0 {
+        35.0
+    } else if ms.cpu_wins == 1 {
+        18.0
+    } else {
+        8.0
+    };
+    // Attack per minute.
+    let minutes = (ms.agg.time / 60.0).max(0.05) as f32;
+    let apm = ms.agg.attack as f32 / minutes;
+    pts += (apm * 1.1).min(35.0);
+    // Style: big clears, spins, combos, perfect clears.
+    let style = ms.agg.tetrises * 5
+        + ms.agg.tspins * 7
+        + ms.agg.max_combo * 2
+        + ms.agg.perfect_clears * 12;
+    pts += (style as f32).min(30.0);
+
+    if pts >= 85.0 {
+        Grade::S
+    } else if pts >= 65.0 {
+        Grade::A
+    } else if pts >= 45.0 {
+        Grade::B
+    } else if pts >= 28.0 {
+        Grade::C
+    } else {
+        Grade::D
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn tick_games(
     time: Res<Time>,
     mut query: Query<(Entity, &BoardIndex, &mut GameSession)>,
@@ -372,14 +505,14 @@ fn tick_games(
     mut next: ResMut<NextState<PlayState>>,
     mut commands: Commands,
     mode: Res<GameMode>,
+    mut match_state: ResMut<MatchState>,
+    mut progress: ResMut<Progress>,
     result: Option<Res<SessionResult>>,
 ) {
     // Advance simulations and gather events.
     let mut outgoing: Vec<(usize, u32)> = Vec::new();
-    let mut boards: Vec<(Entity, usize)> = Vec::new();
     for (entity, index, mut session) in &mut query {
         session.game.tick(time.delta_secs());
-        boards.push((entity, index.0));
         for event in session.game.take_events() {
             if let GameEvent::Cleared(clear) = &event {
                 if clear.attack > 0 {
@@ -403,7 +536,7 @@ fn tick_games(
         }
     }
 
-    // Win / lose detection (only once).
+    // Round end detection (only once per round).
     if result.is_some() {
         return;
     }
@@ -415,21 +548,155 @@ fn tick_games(
     if dead.is_empty() {
         return;
     }
-    let verdict = match *mode {
-        GameMode::Single => SessionResult::SoloOver,
-        GameMode::VsCpu(_) => {
-            // If both died the same frame, the human loses ties generously:
-            // call it a win for the board that survived, or player win on tie.
-            let winner = if dead.contains(&0) && dead.contains(&1) {
-                0
-            } else if dead.contains(&0) {
-                1
-            } else {
-                0
-            };
-            SessionResult::VsWin { winner }
+
+    // Bank the player's stats for this round.
+    if let Some((_, _, player)) = query.iter().find(|(_, i, _)| i.0 == 0) {
+        match_state.agg.absorb(&player.game.stats);
+    }
+
+    match *mode {
+        GameMode::Single => {
+            commands.insert_resource(SessionResult::SoloOver);
+            next.set(PlayState::Finished);
         }
-    };
-    commands.insert_resource(verdict);
-    next.set(PlayState::Finished);
+        GameMode::VsCpu { stage } => {
+            // Ties go to the player, generously.
+            let winner = if dead.contains(&1) { 0 } else { 1 };
+            if winner == 0 {
+                match_state.player_wins += 1;
+            } else {
+                match_state.cpu_wins += 1;
+            }
+            commands.insert_resource(LastRound { winner });
+
+            let decided = match_state.player_wins >= match_state.wins_needed
+                || match_state.cpu_wins >= match_state.wins_needed;
+            if decided {
+                let match_winner = if match_state.player_wins >= match_state.wins_needed {
+                    0
+                } else {
+                    1
+                };
+                commands.insert_resource(SessionResult::VsWin { winner: match_winner });
+                if match_winner == 0 {
+                    let grade = compute_grade(&match_state);
+                    let new_best = progress.record_clear(stage, grade);
+                    commands.insert_resource(StageClear { stage, grade, new_best });
+                }
+                next.set(PlayState::Finished);
+            } else {
+                next.set(PlayState::RoundOver);
+            }
+        }
+    }
+}
+
+fn round_over_enter(
+    mut commands: Commands,
+    last: Option<Res<LastRound>>,
+    mut sfx: MessageWriter<PlaySfx>,
+) {
+    commands.insert_resource(RoundOverTimer(Timer::from_seconds(2.8, TimerMode::Once)));
+    if let Some(last) = last {
+        sfx.write(if last.winner == 0 {
+            PlaySfx::new(Sfx::LevelUp)
+        } else {
+            PlaySfx { sfx: Sfx::GameOver, gain: 0.55 }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(player_wins: u32, cpu_wins: u32, agg: MatchAggregate) -> MatchState {
+        MatchState {
+            stage: Some(10),
+            wins_needed: player_wins.max(1),
+            player_wins,
+            cpu_wins,
+            round: player_wins + cpu_wins,
+            agg,
+        }
+    }
+
+    #[test]
+    fn dominant_fast_stylish_earns_s() {
+        let agg = MatchAggregate {
+            attack: 64,          // 32 APM over 2 minutes
+            tetrises: 2,
+            tspins: 1,
+            max_combo: 3,
+            perfect_clears: 0,
+            time: 120.0,
+        };
+        assert_eq!(compute_grade(&state(2, 0, agg)), Grade::S);
+    }
+
+    #[test]
+    fn scrappy_slow_win_earns_low_grade() {
+        let agg = MatchAggregate {
+            attack: 6, // ~1.2 APM over 5 minutes
+            time: 300.0,
+            ..Default::default()
+        };
+        let grade = compute_grade(&state(3, 2, agg));
+        assert!(matches!(grade, Grade::D | Grade::C), "got {grade:?}");
+    }
+
+    #[test]
+    fn grades_improve_with_dominance() {
+        let agg = MatchAggregate {
+            attack: 30,
+            tetrises: 1,
+            time: 120.0,
+            ..Default::default()
+        };
+        let sweep = compute_grade(&state(2, 0, agg));
+        let close = compute_grade(&state(2, 1, agg));
+        assert!(
+            sweep == close || sweep.better_than(close),
+            "sweep {sweep:?} vs close {close:?}"
+        );
+    }
+}
+
+/// Wait out the intermission (or let the player skip it), then reset both
+/// boards for the next round.
+#[allow(clippy::too_many_arguments)]
+fn round_over_tick(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<GameSettings>,
+    mut timer: ResMut<RoundOverTimer>,
+    mut match_state: ResMut<MatchState>,
+    mut boards: Query<(
+        &mut GameSession,
+        Option<&mut CpuControlled>,
+        Option<&mut DasState>,
+    )>,
+    mut next: ResMut<NextState<PlayState>>,
+    mut commands: Commands,
+) {
+    let skip = keys.just_pressed(KeyCode::Enter)
+        || keys.just_pressed(settings.key_for(Action::HardDrop));
+    if !timer.0.tick(time.delta()).is_finished() && !skip {
+        return;
+    }
+
+    let seed: u64 = rand::rng().random();
+    for (mut session, cpu, das) in &mut boards {
+        session.game = Game::new(seed, 1);
+        if let Some(mut cpu) = cpu {
+            cpu.reset_for_round();
+        }
+        if let Some(mut das) = das {
+            *das = DasState::default();
+        }
+    }
+    match_state.round += 1;
+    commands.remove_resource::<RoundOverTimer>();
+    commands.remove_resource::<LastRound>();
+    next.set(PlayState::Countdown);
 }

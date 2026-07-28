@@ -87,6 +87,7 @@ pub struct Stats {
     pub tspins: u32,
     pub max_combo: u32,
     pub attack_sent: u32,
+    pub perfect_clears: u32,
     pub time: f64,
 }
 
@@ -497,6 +498,7 @@ impl Game {
 
         let perfect_clear = self.board.is_empty();
         if perfect_clear {
+            self.stats.perfect_clears += 1;
             let pc_bonus: u64 = match lines {
                 1 => 800,
                 2 => 1200,

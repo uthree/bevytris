@@ -3,7 +3,7 @@
 //! human-like timing; this module is pure and synchronous.
 
 use rand::rngs::StdRng;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 
 use super::board::{ActivePiece, Board, BOARD_HEIGHT, BOARD_WIDTH, VISIBLE_HEIGHT};
 use super::piece::{PieceKind, Rot};
@@ -18,6 +18,37 @@ pub struct Plan {
     pub score: f32,
 }
 
+/// Highest selectable stage.
+pub const MAX_STAGE: u32 = 30;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Archetype {
+    /// All-round parameters.
+    Balanced,
+    /// Fast hands, sloppy evaluation.
+    Rusher,
+    /// Slow hands, sharp evaluation (earlier lookahead).
+    Thinker,
+}
+
+impl Archetype {
+    pub fn label(self) -> &'static str {
+        match self {
+            Archetype::Balanced => "BALANCED",
+            Archetype::Rusher => "RUSHER",
+            Archetype::Thinker => "THINKER",
+        }
+    }
+
+    fn for_stage(stage: u32) -> Archetype {
+        match stage % 7 {
+            3 => Archetype::Rusher,
+            5 => Archetype::Thinker,
+            _ => Archetype::Balanced,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AiProfile {
     /// Look at the next piece too (depth 2) instead of greedy depth 1.
@@ -30,39 +61,76 @@ pub struct AiProfile {
     pub action_interval: f32,
     /// Extra thinking pause after a piece spawns.
     pub think_time: f32,
+    /// Probability of committing to a knowingly suboptimal placement.
+    pub mistake_rate: f32,
+    pub archetype: Archetype,
 }
 
 impl AiProfile {
-    pub fn easy() -> Self {
-        Self {
-            lookahead: false,
-            uses_hold: false,
-            eval_noise: 6.0,
-            action_interval: 0.22,
-            // Must stay below LOCK_DELAY (0.5 s) or a piece spawning onto a
-            // tall stack locks before the CPU makes a single input.
-            think_time: 0.45,
+    /// Difficulty ladder: smooth skill curves over stages 1..=30 with
+    /// deterministic per-stage jitter and periodic archetypes so
+    /// consecutive stages feel like different opponents, not the same one
+    /// with a bigger number.
+    pub fn for_stage(stage: u32) -> Self {
+        let stage = stage.clamp(1, MAX_STAGE);
+        let t = (stage - 1) as f32 / (MAX_STAGE - 1) as f32;
+        let ease = t * t * (3.0 - 2.0 * t); // smoothstep skill ramp
+
+        let mut profile = Self {
+            lookahead: stage >= 14,
+            uses_hold: stage >= 6,
+            eval_noise: 9.0 * (1.0 - ease).powf(1.4),
+            action_interval: 0.30 - 0.27 * ease,
+            // NB: must stay below LOCK_DELAY (0.5 s) or a piece spawning
+            // onto a tall stack locks before the CPU makes a single input.
+            think_time: 0.45 - 0.39 * ease,
+            mistake_rate: 0.32 * (1.0 - ease).powf(1.2),
+            archetype: Archetype::for_stage(stage),
+        };
+
+        // Deterministic jitter (±12%) so the ladder isn't perfectly linear.
+        let mut jr = StdRng::seed_from_u64(stage as u64 * 7919 + 13);
+        let mut jitter = |v: f32| v * jr.random_range(0.88..1.12);
+        profile.eval_noise = jitter(profile.eval_noise);
+        profile.action_interval = jitter(profile.action_interval).max(0.03);
+        profile.think_time = jitter(profile.think_time).clamp(0.05, 0.45);
+        profile.mistake_rate = jitter(profile.mistake_rate).clamp(0.0, 0.5);
+
+        match profile.archetype {
+            Archetype::Rusher => {
+                profile.action_interval *= 0.55;
+                profile.think_time *= 0.7;
+                profile.eval_noise *= 1.6;
+                profile.mistake_rate = (profile.mistake_rate * 1.3).min(0.5);
+            }
+            Archetype::Thinker => {
+                profile.action_interval *= 1.35;
+                profile.think_time = (profile.think_time * 1.4).min(0.45);
+                profile.eval_noise *= 0.45;
+                profile.mistake_rate *= 0.5;
+                profile.lookahead = profile.lookahead || stage >= 10;
+            }
+            Archetype::Balanced => {}
         }
+
+        // The final stretch plays essentially perfectly.
+        if stage >= 26 {
+            profile.eval_noise = 0.0;
+            profile.mistake_rate = 0.0;
+        }
+        profile
+    }
+
+    pub fn easy() -> Self {
+        Self::for_stage(4)
     }
 
     pub fn normal() -> Self {
-        Self {
-            lookahead: false,
-            uses_hold: true,
-            eval_noise: 1.2,
-            action_interval: 0.11,
-            think_time: 0.28,
-        }
+        Self::for_stage(15)
     }
 
     pub fn hard() -> Self {
-        Self {
-            lookahead: true,
-            uses_hold: true,
-            eval_noise: 0.0,
-            action_interval: 0.05,
-            think_time: 0.12,
-        }
+        Self::for_stage(28)
     }
 }
 
@@ -213,14 +281,14 @@ pub fn plan(
     profile: &AiProfile,
     rng: &mut StdRng,
 ) -> Option<Plan> {
-    let mut best: Option<Plan> = None;
+    let mut candidates: Vec<Plan> = Vec::with_capacity(96);
 
     // Danger is judged on the CURRENT board plus queued garbage, so a clear
     // that reduces the stack is not penalized for leaving "low danger".
     let base_height = *board.column_heights().iter().max().unwrap_or(&0) as f32;
     let danger = base_height + incoming.min(8) as f32;
 
-    let mut consider = |kind: PieceKind, use_hold: bool, follow: Option<PieceKind>, best: &mut Option<Plan>| {
+    let mut consider = |kind: PieceKind, use_hold: bool, follow: Option<PieceKind>, out: &mut Vec<Plan>| {
         for sim in simulate_placements(board, kind) {
             // Never choose a placement that rests entirely above the skyline
             // (instant lock-out).
@@ -256,29 +324,41 @@ pub fn plan(
             if incoming > 0 {
                 score += sim.lines as f32 * (4.0 + 2.0 * incoming.min(8) as f32);
             }
-            if best.as_ref().is_none_or(|b| score > b.score) {
-                *best = Some(Plan { use_hold, rot: sim.rot, x: sim.x, score });
-            }
+            out.push(Plan { use_hold, rot: sim.rot, x: sim.x, score });
         }
     };
 
-    consider(current, false, next, &mut best);
+    consider(current, false, next, &mut candidates);
     if profile.uses_hold {
         // Holding swaps in either the held piece or (if empty) the next one;
         // in the latter case the true follow-up piece is the second preview.
         match hold {
-            Some(h) if h != current => consider(h, true, next, &mut best),
+            Some(h) if h != current => consider(h, true, next, &mut candidates),
             None => {
                 if let Some(n) = next {
                     if n != current {
-                        consider(n, true, next2, &mut best);
+                        consider(n, true, next2, &mut candidates);
                     }
                 }
             }
             _ => {}
         }
     }
-    best
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+
+    // Human-like blunder: sometimes commit to a decent-but-not-best spot.
+    // Never blunder when the stack (plus pending garbage) is threatening.
+    let mut pick = 0;
+    if profile.mistake_rate > 0.0 && danger < 12.0 && candidates.len() > 1 {
+        if rng.random::<f32>() < profile.mistake_rate {
+            let k = candidates.len().min(4);
+            pick = rng.random_range(1..k.max(2));
+        }
+    }
+    candidates.get(pick).or_else(|| candidates.first()).copied()
 }
 
 #[cfg(test)]
@@ -286,6 +366,55 @@ mod tests {
     use super::*;
     use crate::board::Cell;
     use rand::SeedableRng;
+
+    #[test]
+    fn stage_ladder_gets_harder() {
+        let s1 = AiProfile::for_stage(1);
+        let s15 = AiProfile::for_stage(15);
+        let s30 = AiProfile::for_stage(30);
+        // Later stages act faster, think faster and blunder less.
+        assert!(s1.action_interval > s15.action_interval);
+        assert!(s15.action_interval > s30.action_interval);
+        assert!(s1.eval_noise > s15.eval_noise);
+        assert!(s1.mistake_rate > s15.mistake_rate);
+        assert_eq!(s30.eval_noise, 0.0);
+        assert_eq!(s30.mistake_rate, 0.0);
+        assert!(s30.lookahead && s30.uses_hold);
+        assert!(!s1.lookahead && !s1.uses_hold);
+        // Think time never reaches the lock delay (0.5 s).
+        for stage in 1..=MAX_STAGE {
+            let p = AiProfile::for_stage(stage);
+            assert!(p.think_time < 0.5, "stage {stage} think_time {}", p.think_time);
+            assert!(p.action_interval >= 0.02);
+        }
+    }
+
+    #[test]
+    fn mistakes_never_fire_in_danger() {
+        // With a tall stack the profile's mistake rate must be ignored:
+        // plan() picks the top-scored placement deterministically.
+        let mut board = Board::new();
+        for x in 0..BOARD_WIDTH {
+            for y in 0..14 {
+                if x != 4 {
+                    board.set_cell(x, y, Some(Cell::Garbage));
+                }
+            }
+        }
+        let mut profile = AiProfile::for_stage(1);
+        profile.mistake_rate = 1.0; // always blunder if allowed
+        profile.eval_noise = 0.0; // isolate the mistake mechanism
+        let mut reference: Option<(bool, super::super::piece::Rot, i8)> = None;
+        for seed in 0..8 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let p = plan(&board, PieceKind::I, None, None, None, 0, &profile, &mut rng).unwrap();
+            let key = (p.use_hold, p.rot, p.x);
+            match &reference {
+                None => reference = Some(key),
+                Some(r) => assert_eq!(*r, key, "danger picks must be deterministic"),
+            }
+        }
+    }
 
     #[test]
     fn finds_a_placement_on_empty_board() {
