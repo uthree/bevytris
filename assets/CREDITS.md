@@ -8,7 +8,7 @@
 - Source: https://opengameart.org/content/512-sound-effects-8-bit-style
 - License: **CC0 1.0** (public domain dedication), as stated on the source page.
 - Files: all `assets/sfx/*.wav` (27 sounds, renamed after their in-game role;
-  e.g. `hard_drop.wav` is the pack's `sfx_sounds_impact8.wav`).
+  e.g. `hard_drop.wav` is the pack's `sfx_exp_shortest_hard2.wav`).
 - Modifications: mixed down to mono where needed, trailing silence trimmed,
   peak-normalized to -1 dBFS, re-encoded as 16-bit PCM WAV. The combo chime
   (`combo.wav`, from `sfx_coin_single3.wav`) is additionally pitch-shifted

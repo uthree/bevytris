@@ -81,14 +81,16 @@ impl SfxBank {
     /// ticks stay subtle, rewards hit hard); speed != 1.0 pitch-shifts.
     fn params(&self, sfx: Sfx) -> (Handle<AudioSource>, f32, f32) {
         match sfx {
-            Sfx::Move => (self.move_tick.clone(), 0.5, 1.0),
-            Sfx::Rotate => (self.rotate.clone(), 0.55, 1.0),
-            Sfx::RotateFail => (self.rotate_fail.clone(), 0.5, 1.0),
-            Sfx::SoftDropTick => (self.soft_drop.clone(), 0.35, 1.0),
-            Sfx::HardDrop => (self.hard_drop.clone(), 0.9, 1.0),
-            Sfx::Lock => (self.lock.clone(), 0.6, 1.0),
-            Sfx::Hold => (self.hold.clone(), 0.6, 1.0),
-            Sfx::HoldFail => (self.hold_fail.clone(), 0.55, 1.0),
+            // Action sounds are noise-based and sit well below the melodic
+            // reward sounds — the loudness contrast is intentional.
+            Sfx::Move => (self.move_tick.clone(), 0.4, 1.0),
+            Sfx::Rotate => (self.rotate.clone(), 0.42, 1.0),
+            Sfx::RotateFail => (self.rotate_fail.clone(), 0.45, 1.0),
+            Sfx::SoftDropTick => (self.soft_drop.clone(), 0.28, 1.0),
+            Sfx::HardDrop => (self.hard_drop.clone(), 0.8, 1.0),
+            Sfx::Lock => (self.lock.clone(), 0.5, 1.0),
+            Sfx::Hold => (self.hold.clone(), 0.5, 1.0),
+            Sfx::HoldFail => (self.hold_fail.clone(), 0.5, 1.0),
             Sfx::Clear(n) => {
                 let i = (n.clamp(1, 4) - 1) as usize;
                 (self.clears[i].clone(), 0.85 + i as f32 * 0.05, 1.0)
@@ -110,9 +112,9 @@ impl SfxBank {
             Sfx::GameOver => (self.game_over.clone(), 0.9, 1.0),
             Sfx::Defeat => (self.defeat.clone(), 1.0, 1.0),
             Sfx::Win => (self.win.clone(), 1.0, 1.0),
-            Sfx::MenuMove => (self.menu_move.clone(), 0.5, 1.0),
+            Sfx::MenuMove => (self.menu_move.clone(), 0.4, 1.0),
             Sfx::MenuSelect => (self.menu_select.clone(), 0.7, 1.0),
-            Sfx::MenuBack => (self.menu_back.clone(), 0.6, 1.0),
+            Sfx::MenuBack => (self.menu_back.clone(), 0.5, 1.0),
         }
     }
 }
