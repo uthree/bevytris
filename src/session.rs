@@ -359,6 +359,7 @@ fn human_input(
     }
 
     // --- Everything else ---------------------------------------------------
+    game.soft_drop_factor = settings.sdf_factor();
     game.set_soft_drop(keys.pressed(settings.key_for(Action::SoftDrop)));
     if keys.just_pressed(settings.key_for(Action::RotateCw)) {
         game.rotate(true);

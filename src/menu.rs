@@ -24,6 +24,7 @@ enum MenuAction {
     Bind(Action),
     AdjustDas,
     AdjustArr,
+    AdjustSdf,
     AdjustMaster,
     AdjustBgm,
     AdjustSfx,
@@ -362,6 +363,7 @@ fn setup_settings(mut commands: Commands, mut cursor: ResMut<MenuCursor>, mut re
             for action in [
                 MenuAction::AdjustDas,
                 MenuAction::AdjustArr,
+                MenuAction::AdjustSdf,
                 MenuAction::AdjustMaster,
                 MenuAction::AdjustBgm,
                 MenuAction::AdjustSfx,
@@ -398,6 +400,7 @@ fn settings_label(action: MenuAction, settings: &GameSettings, rebinding: &Rebin
         }
         MenuAction::AdjustDas => format!("{:<12} {} ms", "DAS", settings.das_ms),
         MenuAction::AdjustArr => format!("{:<12} {} ms", "ARR", settings.arr_ms),
+        MenuAction::AdjustSdf => format!("{:<12} {}", "Soft Drop", settings.sdf_label()),
         MenuAction::AdjustMaster => format!("{:<12} {}/10", "Master Vol", settings.master_volume),
         MenuAction::AdjustBgm => format!("{:<12} {}/10", "BGM Vol", settings.bgm_volume),
         MenuAction::AdjustSfx => format!("{:<12} {}/10", "SFX Vol", settings.sfx_volume),
@@ -569,6 +572,10 @@ fn run_menu_action(
             }
             MenuAction::AdjustArr => {
                 s.arr_ms = (s.arr_ms as i32 + adjust * 5).clamp(0, 150) as u32;
+                true
+            }
+            MenuAction::AdjustSdf => {
+                s.adjust_sdf(adjust);
                 true
             }
             MenuAction::AdjustMaster => {

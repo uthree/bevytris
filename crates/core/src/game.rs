@@ -14,6 +14,7 @@ use super::srs::kicks;
 
 pub const LOCK_DELAY: f32 = 0.5;
 pub const MAX_LOCK_RESETS: u32 = 15;
+/// Guideline default; the frontend may override per player (SDF setting).
 pub const SOFT_DROP_FACTOR: f32 = 20.0;
 pub const PREVIEW_COUNT: usize = 5;
 pub const LINES_PER_LEVEL: u32 = 10;
@@ -120,6 +121,9 @@ pub struct Game {
     /// piece moved/fell afterwards. Drives T-spin detection.
     last_rotation_kick: Option<usize>,
     pub soft_dropping: bool,
+    /// Soft-drop gravity multiplier (SDF). Very large values effectively
+    /// teleport the piece to the stack while soft drop is held.
+    pub soft_drop_factor: f32,
 
     /// Pending garbage batches: (rows, hole column).
     pub incoming: VecDeque<(u32, i8)>,
@@ -158,6 +162,7 @@ impl Game {
             touched_down: false,
             last_rotation_kick: None,
             soft_dropping: false,
+            soft_drop_factor: SOFT_DROP_FACTOR,
             incoming: VecDeque::new(),
             garbage_rng: StdRng::seed_from_u64(seed ^ 0x6761_7262_6167_65),
             game_over: false,
@@ -199,7 +204,7 @@ impl Game {
 
         let mut sec_per_row = gravity_seconds(self.level);
         if self.soft_dropping {
-            sec_per_row /= SOFT_DROP_FACTOR;
+            sec_per_row /= self.soft_drop_factor.max(1.0);
         }
         self.gravity_acc += dt / sec_per_row.max(1e-6);
         // One frame can never need more than the board height in steps.
@@ -863,6 +868,18 @@ mod tests {
             game.tick(1.0 / 60.0);
         }
         assert!(game.stats.pieces > pieces_before);
+    }
+
+    #[test]
+    fn high_sdf_reaches_the_floor_within_a_tick() {
+        let mut game = Game::new(1, 1);
+        game.soft_drop_factor = 1_000_000.0;
+        game.set_soft_drop(true);
+        game.tick(1.0 / 60.0);
+        assert!(
+            !game.board.fits(&game.active.shifted(0, -1)),
+            "piece should be grounded after one tick at MAX SDF"
+        );
     }
 
     #[test]

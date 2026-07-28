@@ -98,7 +98,16 @@ struct SettingsFile {
     sfx_volume: u32,
     #[serde(default)]
     vsync: bool,
+    #[serde(default = "default_sdf")]
+    sdf: u32,
 }
+
+fn default_sdf() -> u32 {
+    20
+}
+
+/// Sentinel meaning "instant" soft drop.
+pub const SDF_MAX: u32 = 999;
 
 /// Live settings resource.
 #[derive(Resource, Debug, Clone)]
@@ -114,6 +123,9 @@ pub struct GameSettings {
     pub sfx_volume: u32,
     /// Off by default: vsync adds a frame or two of input latency.
     pub vsync: bool,
+    /// Soft drop factor: gravity multiplier while soft-dropping.
+    /// 5..=40 in steps of 5, or SDF_MAX for instant.
+    pub sdf: u32,
 }
 
 impl Default for GameSettings {
@@ -135,6 +147,7 @@ impl Default for GameSettings {
             bgm_volume: 6,
             sfx_volume: 8,
             vsync: false,
+            sdf: 20,
         }
     }
 }
@@ -155,6 +168,34 @@ impl GameSettings {
             self.bindings.insert(other, previous);
         }
         self.bindings.insert(action, key);
+    }
+
+    /// Gravity multiplier the core should use while soft-dropping.
+    pub fn sdf_factor(&self) -> f32 {
+        if self.sdf >= SDF_MAX {
+            1_000_000.0
+        } else {
+            self.sdf as f32
+        }
+    }
+
+    /// Step the SDF setting through 5,10,...,40,MAX.
+    pub fn adjust_sdf(&mut self, dir: i32) {
+        self.sdf = match (self.sdf, dir.signum()) {
+            (SDF_MAX, 1) => SDF_MAX,
+            (SDF_MAX, _) => 40,
+            (40, 1) => SDF_MAX,
+            (v, 1) => (v + 5).min(40),
+            (v, _) => v.saturating_sub(5).max(5),
+        };
+    }
+
+    pub fn sdf_label(&self) -> String {
+        if self.sdf >= SDF_MAX {
+            "MAX".to_string()
+        } else {
+            format!("{}x", self.sdf)
+        }
     }
 
     pub fn bgm_linear(&self) -> f32 {
@@ -178,6 +219,7 @@ impl GameSettings {
             bgm_volume: self.bgm_volume,
             sfx_volume: self.sfx_volume,
             vsync: self.vsync,
+            sdf: self.sdf,
         }
     }
 
@@ -194,6 +236,11 @@ impl GameSettings {
         settings.bgm_volume = file.bgm_volume.min(10);
         settings.sfx_volume = file.sfx_volume.min(10);
         settings.vsync = file.vsync;
+        settings.sdf = if file.sdf >= SDF_MAX {
+            SDF_MAX
+        } else {
+            (file.sdf.clamp(5, 40) / 5) * 5
+        };
         settings
     }
 }
