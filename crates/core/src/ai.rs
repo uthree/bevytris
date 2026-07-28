@@ -63,6 +63,12 @@ pub struct AiProfile {
     pub think_time: f32,
     /// Probability of committing to a knowingly suboptimal placement.
     pub mistake_rate: f32,
+    /// 0.0 = pure survival evaluation (classic Dellacherie: any clear is
+    /// good). 1.0 = attack-oriented: clears are valued by the garbage they
+    /// send, zero-attack singles are penalized and a tetris well is worth
+    /// keeping. High stages ramp this up so they stop wasting the stack on
+    /// harmless single clears.
+    pub attack_focus: f32,
     pub archetype: Archetype,
 }
 
@@ -85,6 +91,7 @@ impl AiProfile {
             // onto a tall stack locks before the CPU makes a single input.
             think_time: 0.45 - 0.39 * ease,
             mistake_rate: 0.32 * (1.0 - ease).powf(1.2),
+            attack_focus: ((stage as f32 - 9.0) / 16.0).clamp(0.0, 1.0),
             archetype: Archetype::for_stage(stage),
         };
 
@@ -102,6 +109,8 @@ impl AiProfile {
                 profile.think_time *= 0.7;
                 profile.eval_noise *= 1.6;
                 profile.mistake_rate = (profile.mistake_rate * 1.3).min(0.5);
+                // Rushers spam whatever clears fastest.
+                profile.attack_focus *= 0.85;
             }
             Archetype::Thinker => {
                 profile.action_interval *= 1.35;
@@ -109,6 +118,7 @@ impl AiProfile {
                 profile.eval_noise *= 0.45;
                 profile.mistake_rate *= 0.5;
                 profile.lookahead = profile.lookahead || stage >= 10;
+                profile.attack_focus = (profile.attack_focus + 0.15).min(1.0);
             }
             Archetype::Balanced => {}
         }
@@ -192,8 +202,11 @@ fn simulate_placements(board: &Board, kind: PieceKind) -> Vec<Simulated> {
     out
 }
 
-/// Dellacherie's evaluation, a classic strong single-piece heuristic.
-fn evaluate(sim: &Simulated) -> f32 {
+/// Board evaluation. Base is Dellacherie's classic survival heuristic;
+/// `attack_focus` blends the line-clear term toward VS efficiency: clears
+/// are valued by the garbage they send (single = 0 attack = slightly bad),
+/// and the deep-well penalty is relaxed so a tetris well can be kept open.
+fn evaluate(sim: &Simulated, attack_focus: f32) -> f32 {
     let b = &sim.board;
 
     let mut row_transitions = 0i32;
@@ -214,6 +227,7 @@ fn evaluate(sim: &Simulated) -> f32 {
     let mut col_transitions = 0i32;
     let mut holes = 0i32;
     let mut wells = 0i32;
+    let mut max_well = 0i32;
     for x in 0..BOARD_WIDTH {
         let mut prev = true; // floor counts as filled
         let mut covered = false;
@@ -243,6 +257,7 @@ fn evaluate(sim: &Simulated) -> f32 {
             if open && left && right {
                 depth += 1;
                 wells += depth;
+                max_well = max_well.max(depth);
             } else if !open {
                 depth = 0;
             } else {
@@ -251,16 +266,40 @@ fn evaluate(sim: &Simulated) -> f32 {
         }
     }
 
-    -4.500 * sim.landing_height + 3.418 * sim.eroded - 3.218 * row_transitions as f32
+    // Line-clear value: survival play rewards any erosion of the stack;
+    // attack play pays by garbage sent and dings zero-attack singles.
+    let attack: u32 = match sim.lines {
+        2 => 1,
+        3 => 2,
+        4 => 4,
+        _ => 0,
+    };
+    let survival_clear = 3.418 * sim.eroded;
+    let attack_clear =
+        attack as f32 * 12.0 - if sim.lines == 1 { 12.0 } else { 0.0 };
+    let clear_term = survival_clear * (1.0 - attack_focus) + attack_clear * attack_focus;
+
+    // Keeping one deep well open is the whole point of tetris play: the
+    // cumulative well penalty relaxes as attack focus rises, and a clean
+    // board (no holes) earns an explicit bonus for a tetris-ready well.
+    let well_weight = 3.386 * (1.0 - 0.55 * attack_focus);
+    let well_bonus = if holes == 0 {
+        attack_focus * 4.5 * max_well.min(4) as f32
+    } else {
+        0.0
+    };
+
+    -4.500 * sim.landing_height + clear_term - 3.218 * row_transitions as f32
         - 9.348 * col_transitions as f32
         - 7.899 * holes as f32
-        - 3.386 * wells as f32
+        - well_weight * wells as f32
+        + well_bonus
 }
 
-fn best_score_for(board: &Board, kind: PieceKind) -> f32 {
+fn best_score_for(board: &Board, kind: PieceKind, attack_focus: f32) -> f32 {
     simulate_placements(board, kind)
         .iter()
-        .map(evaluate)
+        .map(|sim| evaluate(sim, attack_focus))
         .fold(f32::NEG_INFINITY, f32::max)
 }
 
@@ -295,7 +334,7 @@ pub fn plan(
             if sim.min_y >= VISIBLE_HEIGHT {
                 continue;
             }
-            let mut score = evaluate(&sim);
+            let mut score = evaluate(&sim, profile.attack_focus);
             // A placement that walls off the spawn area kills us next piece.
             let spawn_blocked = (3..=6)
                 .any(|x| sim.board.cell(x, 20).is_some() || sim.board.cell(x, 21).is_some());
@@ -304,7 +343,8 @@ pub fn plan(
             }
             if profile.lookahead {
                 if let Some(next_kind) = follow {
-                    let follow_score = best_score_for(&sim.board, next_kind);
+                    let follow_score =
+                        best_score_for(&sim.board, next_kind, profile.attack_focus);
                     if follow_score.is_finite() {
                         score += 0.6 * follow_score;
                     } else {
@@ -381,6 +421,10 @@ mod tests {
         assert_eq!(s30.mistake_rate, 0.0);
         assert!(s30.lookahead && s30.uses_hold);
         assert!(!s1.lookahead && !s1.uses_hold);
+        // Attack orientation ramps in for the late ladder.
+        assert_eq!(s1.attack_focus, 0.0);
+        assert!(s15.attack_focus > 0.0 && s15.attack_focus < 1.0);
+        assert_eq!(s30.attack_focus, 1.0);
         // Think time never reaches the lock delay (0.5 s).
         for stage in 1..=MAX_STAGE {
             let p = AiProfile::for_stage(stage);
@@ -433,10 +477,25 @@ mod tests {
         assert!(plan.is_some());
     }
 
+    /// Deterministic profile with a chosen attack focus.
+    fn exact_profile(attack_focus: f32) -> AiProfile {
+        AiProfile {
+            lookahead: false,
+            uses_hold: false,
+            eval_noise: 0.0,
+            action_interval: 0.05,
+            think_time: 0.1,
+            mistake_rate: 0.0,
+            attack_focus,
+            archetype: Archetype::Balanced,
+        }
+    }
+
     #[test]
     fn prefers_completing_a_line() {
         // Row 0 filled except a single-column slot at x=9: a vertical I
         // there clears a line; anything else leaves a bumpy mess.
+        // (Survival evaluation, attack_focus 0.)
         let mut board = Board::new();
         for x in 0..9 {
             for y in 0..1 {
@@ -444,7 +503,7 @@ mod tests {
             }
         }
         let mut rng = StdRng::seed_from_u64(1);
-        let p = plan(&board, PieceKind::I, None, None, None, 0, &AiProfile::hard(), &mut rng).unwrap();
+        let p = plan(&board, PieceKind::I, None, None, None, 0, &exact_profile(0.0), &mut rng).unwrap();
         // Vertical I in box column 2 → box x must be 7 to fill column 9.
         // Horizontal I flat on the floor also plausible; accept either a
         // clear-producing move: simulate and require lines cleared > 0 OR
@@ -457,6 +516,27 @@ mod tests {
         b.lock(&piece);
         let cleared = b.clear_full_rows().len();
         assert!(cleared > 0, "AI should clear the ready line, plan={p:?}");
+    }
+
+    #[test]
+    fn attack_focused_ai_skips_pointless_singles() {
+        // Same single-ready setup, but a fully attack-focused profile:
+        // a single sends no garbage, so the AI should stack instead and
+        // keep the well open for a bigger clear.
+        let mut board = Board::new();
+        for x in 0..9 {
+            board.set_cell(x, 0, Some(Cell::Garbage));
+        }
+        let mut rng = StdRng::seed_from_u64(1);
+        let p = plan(&board, PieceKind::I, None, None, None, 0, &exact_profile(1.0), &mut rng).unwrap();
+        let mut piece = ActivePiece { kind: PieceKind::I, rot: p.rot, x: p.x, y: BOARD_HEIGHT - 4 };
+        while board.fits(&piece.shifted(0, -1)) {
+            piece = piece.shifted(0, -1);
+        }
+        let mut b = board.clone();
+        b.lock(&piece);
+        let cleared = b.clear_full_rows().len();
+        assert_eq!(cleared, 0, "attack-focused AI should not spend the well on a single, plan={p:?}");
     }
 
     #[test]
