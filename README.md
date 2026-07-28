@@ -26,9 +26,9 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
   particles, hard-drop light trails, line-clear light bars, shockwave rings,
   screen shake, banners, confetti, starfield over a hand-painted space
   backdrop
-- **Audio** — CC0 chiptune BGM by Juhani Junkala (random track per match,
-  victory jingle included); all sound effects are procedurally synthesized
-  in code at startup
+- **Audio** — CC0 chiptune BGM and 8-bit sound effects by Juhani Junkala
+  (random BGM track per match, victory jingle included); combo chimes climb
+  a pentatonic scale as the combo counter grows
 
 ## Download
 
@@ -80,8 +80,8 @@ Settings are stored as RON at the platform config directory, e.g.
   SRS kicks, 7-bag, gravity/lockdown, scoring, garbage, and the CPU opponent's
   placement search (Dellacherie-style evaluation). Fully unit-tested.
 - `src/` — the Bevy app: rendering, input (DAS/ARR), menus, settings
-  persistence, particles/shake/banner effects, and the procedural audio
-  synthesizer (WAV generated in memory at startup).
+  persistence, particles/shake/banner effects, and audio playback (CC0
+  sample banks, with runtime pitch-shifting for combo chimes).
 
 ## Credits & licenses
 
@@ -90,6 +90,8 @@ See [assets/CREDITS.md](assets/CREDITS.md) for full details.
 - **Code**: licensed under [Apache-2.0](LICENSE).
 - **Music**: ["Retro Game Music Pack" (5 Chiptunes: Action)](https://opengameart.org/content/5-chiptunes-action)
   by **Juhani Junkala** (SubspaceAudio) — **CC0**. Converted to OGG Vorbis.
+- **Sound effects**: ["512 Sound Effects (8-bit style)"](https://opengameart.org/content/512-sound-effects-8-bit-style)
+  by **Juhani Junkala** (SubspaceAudio) — **CC0**. Trimmed and normalized.
 - **Background art**: ["Space Background"](https://opengameart.org/content/space-background-1)
   by **Westbeam** — **CC0/WTFPL**.
 - **Font**: [Misaki Font (美咲フォント)](https://littlelimit.net/misaki.htm)

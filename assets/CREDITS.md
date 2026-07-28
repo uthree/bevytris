@@ -1,5 +1,20 @@
 # Third-party asset credits
 
+## Sound effects (`assets/sfx/`)
+
+**"The Essential Retro Video Game Sound Effects Collection [512 sounds]"**
+(a.k.a. "512 Sound Effects (8-bit style)") by **Juhani Junkala** (SubspaceAudio)
+
+- Source: https://opengameart.org/content/512-sound-effects-8-bit-style
+- License: **CC0 1.0** (public domain dedication), as stated on the source page.
+- Files: all `assets/sfx/*.wav` (27 sounds, renamed after their in-game role;
+  e.g. `hard_drop.wav` is the pack's `sfx_sounds_impact8.wav`).
+- Modifications: mixed down to mono where needed, trailing silence trimmed,
+  peak-normalized to -1 dBFS, re-encoded as 16-bit PCM WAV. The combo chime
+  (`combo.wav`, from `sfx_coin_single3.wav`) is additionally pitch-shifted
+  at runtime as combos climb.
+- Although CC0 requires no attribution, we credit the author with pleasure.
+
 ## Music (`assets/music/`)
 
 **"Retro Game Music Pack" (5 Chiptunes: Action)** by **Juhani Junkala** (SubspaceAudio)
@@ -42,5 +57,5 @@ Bevy's bundled default font (a **Fira Mono** subset © Mozilla Foundation,
 
 ## Everything else
 
-All sound effects, particle/glow textures and other visuals are generated
-procedurally by code in this repository and carry the repository license.
+Particle/glow textures and other visuals are generated procedurally by code
+in this repository and carry the repository license.

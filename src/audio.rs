@@ -1,6 +1,7 @@
-//! Audio: sound effects are procedurally synthesized at startup into
-//! in-memory WAV files; BGM streams from CC0 tracks by Juhani Junkala
-//! (see assets/CREDITS.md).
+//! Audio: sound effects come from Juhani Junkala's CC0 "512 Sound Effects
+//! (8-bit style)" collection (assets/sfx, peak-normalized; see
+//! assets/CREDITS.md), BGM streams from his CC0 "Retro Game Music Pack".
+//! Combo sounds are one coin sample pitched up a pentatonic step per combo.
 
 use bevy::audio::{AudioSource, PlaybackSettings, Volume};
 use bevy::prelude::*;
@@ -9,188 +10,6 @@ use rand::seq::IndexedRandom;
 use crate::config::GameSettings;
 use crate::session::SessionResult;
 use crate::state::{AppState, PlayState};
-
-const SAMPLE_RATE: u32 = 44_100;
-
-// ---------------------------------------------------------------------------
-// Synthesis primitives
-// ---------------------------------------------------------------------------
-
-fn sine(phase: f32) -> f32 {
-    (phase * std::f32::consts::TAU).sin()
-}
-
-fn square(phase: f32, duty: f32) -> f32 {
-    if phase.fract() < duty { 1.0 } else { -1.0 }
-}
-
-fn triangle(phase: f32) -> f32 {
-    let p = phase.fract();
-    if p < 0.5 { 4.0 * p - 1.0 } else { 3.0 - 4.0 * p }
-}
-
-/// Deterministic white noise (xorshift), independent of the `rand` crate.
-struct Noise(u32);
-
-impl Noise {
-    fn new() -> Self {
-        Noise(0x1234_5678)
-    }
-    fn next(&mut self) -> f32 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.0 = x;
-        (x as f32 / u32::MAX as f32) * 2.0 - 1.0
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Wave {
-    Sine,
-    Square(f32),
-    Triangle,
-    Noise,
-}
-
-/// A single synthesized tone: frequency glides exponentially from
-/// `freq_start` to `freq_end`, amplitude follows attack/decay envelope.
-struct Tone {
-    wave: Wave,
-    freq_start: f32,
-    freq_end: f32,
-    amp: f32,
-    duration: f32,
-    attack: f32,
-    /// Exponential decay rate; higher = snappier.
-    decay: f32,
-}
-
-impl Tone {
-    fn render(&self, out: &mut Vec<f32>, at: f32) {
-        let start = (at * SAMPLE_RATE as f32) as usize;
-        let count = (self.duration * SAMPLE_RATE as f32) as usize;
-        if out.len() < start + count {
-            out.resize(start + count, 0.0);
-        }
-        let mut noise = Noise::new();
-        let mut phase = 0.0f32;
-        for i in 0..count {
-            let t = i as f32 / count as f32;
-            let freq = self.freq_start * (self.freq_end / self.freq_start).powf(t);
-            phase += freq / SAMPLE_RATE as f32;
-            let raw = match self.wave {
-                Wave::Sine => sine(phase),
-                Wave::Square(duty) => square(phase, duty),
-                Wave::Triangle => triangle(phase),
-                Wave::Noise => noise.next(),
-            };
-            let secs = i as f32 / SAMPLE_RATE as f32;
-            let env_attack = if self.attack > 0.0 {
-                (secs / self.attack).min(1.0)
-            } else {
-                1.0
-            };
-            let env_decay = (-self.decay * t).exp();
-            // Short release ramp so clips never click at the end.
-            let env_tail = ((1.0 - t) * 20.0).min(1.0);
-            out[start + i] += raw * self.amp * env_attack * env_decay * env_tail;
-        }
-    }
-}
-
-/// Encode f32 samples (-1..1) as a 16-bit mono RIFF/WAVE file.
-fn encode_wav(samples: &[f32]) -> Vec<u8> {
-    let data_len = (samples.len() * 2) as u32;
-    let mut bytes = Vec::with_capacity(44 + data_len as usize);
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
-    bytes.extend_from_slice(b"WAVE");
-    bytes.extend_from_slice(b"fmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes()); // chunk size
-    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
-    bytes.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
-    bytes.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes()); // byte rate
-    bytes.extend_from_slice(&2u16.to_le_bytes()); // block align
-    bytes.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_len.to_le_bytes());
-    for &s in samples {
-        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    bytes
-}
-
-fn soft_clip(samples: &mut [f32]) {
-    for s in samples.iter_mut() {
-        *s = (*s).tanh();
-    }
-}
-
-fn to_source(samples: &mut Vec<f32>) -> AudioSource {
-    soft_clip(samples);
-    AudioSource {
-        bytes: encode_wav(samples).into(),
-    }
-}
-
-/// Note frequency from semitone offset relative to A4 (440 Hz).
-fn note(semi: i32) -> f32 {
-    440.0 * 2f32.powf(semi as f32 / 12.0)
-}
-
-// ---------------------------------------------------------------------------
-// Sound effect construction
-// ---------------------------------------------------------------------------
-
-fn blip(wave: Wave, f0: f32, f1: f32, dur: f32, amp: f32) -> Vec<f32> {
-    let mut buf = Vec::new();
-    Tone {
-        wave,
-        freq_start: f0,
-        freq_end: f1,
-        amp,
-        duration: dur,
-        attack: 0.002,
-        decay: 3.0,
-    }
-    .render(&mut buf, 0.0);
-    buf
-}
-
-/// A fast arpeggio of square-wave notes (the classic "line clear" sparkle).
-fn arpeggio(semis: &[i32], step: f32, note_len: f32, amp: f32, octave_double: bool) -> Vec<f32> {
-    let mut buf = Vec::new();
-    for (i, &s) in semis.iter().enumerate() {
-        let at = i as f32 * step;
-        Tone {
-            wave: Wave::Square(0.5),
-            freq_start: note(s),
-            freq_end: note(s),
-            amp,
-            duration: note_len,
-            attack: 0.002,
-            decay: 2.5,
-        }
-        .render(&mut buf, at);
-        if octave_double {
-            Tone {
-                wave: Wave::Square(0.25),
-                freq_start: note(s + 12),
-                freq_end: note(s + 12),
-                amp: amp * 0.4,
-                duration: note_len,
-                attack: 0.002,
-                decay: 2.5,
-            }
-            .render(&mut buf, at);
-        }
-    }
-    buf
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sfx {
@@ -206,6 +25,7 @@ pub enum Sfx {
     TSpin,
     PerfectClear,
     B2b,
+    /// Coin chime pitched up a pentatonic step per combo count.
     Combo(u32),
     LevelUp,
     GarbageWarn,
@@ -221,6 +41,12 @@ pub enum Sfx {
     MenuBack,
 }
 
+/// Semitone ladder for combo chimes (major pentatonic, two octaves):
+/// combo 1 plays the root, combo 11+ caps at +2 octaves.
+const COMBO_SEMITONES: [f32; 11] = [
+    0.0, 2.0, 4.0, 7.0, 9.0, 12.0, 14.0, 16.0, 19.0, 21.0, 24.0,
+];
+
 #[derive(Resource)]
 pub struct SfxBank {
     move_tick: Handle<AudioSource>,
@@ -235,7 +61,7 @@ pub struct SfxBank {
     tspin: Handle<AudioSource>,
     perfect: Handle<AudioSource>,
     b2b: Handle<AudioSource>,
-    combos: Vec<Handle<AudioSource>>,
+    combo: Handle<AudioSource>,
     level_up: Handle<AudioSource>,
     garbage_warn: Handle<AudioSource>,
     garbage_rise: Handle<AudioSource>,
@@ -250,210 +76,78 @@ pub struct SfxBank {
 }
 
 impl SfxBank {
-    fn get(&self, sfx: Sfx) -> Handle<AudioSource> {
+    /// Handle, base gain and playback speed for one effect. The samples on
+    /// disk are peak-normalized, so base gains re-balance them (movement
+    /// ticks stay subtle, rewards hit hard); speed != 1.0 pitch-shifts.
+    fn params(&self, sfx: Sfx) -> (Handle<AudioSource>, f32, f32) {
         match sfx {
-            Sfx::Move => self.move_tick.clone(),
-            Sfx::Rotate => self.rotate.clone(),
-            Sfx::RotateFail => self.rotate_fail.clone(),
-            Sfx::SoftDropTick => self.soft_drop.clone(),
-            Sfx::HardDrop => self.hard_drop.clone(),
-            Sfx::Lock => self.lock.clone(),
-            Sfx::Hold => self.hold.clone(),
-            Sfx::HoldFail => self.hold_fail.clone(),
-            Sfx::Clear(n) => self.clears[(n.clamp(1, 4) - 1) as usize].clone(),
-            Sfx::TSpin => self.tspin.clone(),
-            Sfx::PerfectClear => self.perfect.clone(),
-            Sfx::B2b => self.b2b.clone(),
-            Sfx::Combo(n) => {
-                let i = (n as usize).min(self.combos.len() - 1);
-                self.combos[i].clone()
+            Sfx::Move => (self.move_tick.clone(), 0.5, 1.0),
+            Sfx::Rotate => (self.rotate.clone(), 0.55, 1.0),
+            Sfx::RotateFail => (self.rotate_fail.clone(), 0.5, 1.0),
+            Sfx::SoftDropTick => (self.soft_drop.clone(), 0.35, 1.0),
+            Sfx::HardDrop => (self.hard_drop.clone(), 0.9, 1.0),
+            Sfx::Lock => (self.lock.clone(), 0.6, 1.0),
+            Sfx::Hold => (self.hold.clone(), 0.6, 1.0),
+            Sfx::HoldFail => (self.hold_fail.clone(), 0.55, 1.0),
+            Sfx::Clear(n) => {
+                let i = (n.clamp(1, 4) - 1) as usize;
+                (self.clears[i].clone(), 0.85 + i as f32 * 0.05, 1.0)
             }
-            Sfx::LevelUp => self.level_up.clone(),
-            Sfx::GarbageWarn => self.garbage_warn.clone(),
-            Sfx::GarbageRise => self.garbage_rise.clone(),
-            Sfx::Countdown => self.countdown.clone(),
-            Sfx::Go => self.go.clone(),
-            Sfx::GameOver => self.game_over.clone(),
-            Sfx::Defeat => self.defeat.clone(),
-            Sfx::Win => self.win.clone(),
-            Sfx::MenuMove => self.menu_move.clone(),
-            Sfx::MenuSelect => self.menu_select.clone(),
-            Sfx::MenuBack => self.menu_back.clone(),
+            Sfx::TSpin => (self.tspin.clone(), 0.9, 1.0),
+            Sfx::PerfectClear => (self.perfect.clone(), 1.0, 1.0),
+            Sfx::B2b => (self.b2b.clone(), 0.6, 1.0),
+            Sfx::Combo(n) => {
+                let i = (n.max(1) as usize - 1).min(COMBO_SEMITONES.len() - 1);
+                let speed = 2f32.powf(COMBO_SEMITONES[i] / 12.0);
+                let gain = (0.85 + 0.05 * n as f32).min(1.2);
+                (self.combo.clone(), gain, speed)
+            }
+            Sfx::LevelUp => (self.level_up.clone(), 0.9, 1.0),
+            Sfx::GarbageWarn => (self.garbage_warn.clone(), 0.7, 1.0),
+            Sfx::GarbageRise => (self.garbage_rise.clone(), 0.85, 1.0),
+            Sfx::Countdown => (self.countdown.clone(), 0.7, 1.0),
+            Sfx::Go => (self.go.clone(), 0.9, 1.0),
+            Sfx::GameOver => (self.game_over.clone(), 0.9, 1.0),
+            Sfx::Defeat => (self.defeat.clone(), 1.0, 1.0),
+            Sfx::Win => (self.win.clone(), 1.0, 1.0),
+            Sfx::MenuMove => (self.menu_move.clone(), 0.5, 1.0),
+            Sfx::MenuSelect => (self.menu_select.clone(), 0.7, 1.0),
+            Sfx::MenuBack => (self.menu_back.clone(), 0.6, 1.0),
         }
     }
 }
 
-fn build_sfx_bank(assets: &mut Assets<AudioSource>) -> SfxBank {
-    let mut add = |mut samples: Vec<f32>| assets.add(to_source(&mut samples));
-
-    // Movement: tiny dry tick.
-    let move_tick = add(blip(Wave::Square(0.5), 880.0, 880.0, 0.03, 0.25));
-    let soft_drop = add(blip(Wave::Square(0.5), 660.0, 660.0, 0.02, 0.15));
-    let rotate = add(blip(Wave::Sine, 500.0, 900.0, 0.06, 0.35));
-    let rotate_fail = add(blip(Wave::Square(0.5), 180.0, 150.0, 0.08, 0.3));
-
-    // Hard drop: noise burst + falling thump.
-    let hard_drop = add({
-        let mut buf = blip(Wave::Noise, 1000.0, 1000.0, 0.06, 0.5);
-        Tone {
-            wave: Wave::Sine,
-            freq_start: 300.0,
-            freq_end: 60.0,
-            amp: 0.8,
-            duration: 0.12,
-            attack: 0.001,
-            decay: 4.0,
-        }
-        .render(&mut buf, 0.0);
-        buf
-    });
-
-    let lock = add({
-        let mut buf = blip(Wave::Noise, 0.0, 0.0, 0.03, 0.3);
-        Tone {
-            wave: Wave::Square(0.5),
-            freq_start: 320.0,
-            freq_end: 320.0,
-            amp: 0.3,
-            duration: 0.04,
-            attack: 0.001,
-            decay: 5.0,
-        }
-        .render(&mut buf, 0.0);
-        buf
-    });
-
-    let hold = add(blip(Wave::Triangle, 900.0, 350.0, 0.1, 0.4));
-    let hold_fail = add(blip(Wave::Square(0.5), 220.0, 200.0, 0.09, 0.3));
-
-    // Line clears: increasingly triumphant arpeggios (A minor pentatonic).
-    let clears = [
-        add(arpeggio(&[3, 10], 0.05, 0.12, 0.4, false)),
-        add(arpeggio(&[3, 10, 15], 0.05, 0.12, 0.4, false)),
-        add(arpeggio(&[3, 10, 15, 19], 0.05, 0.14, 0.4, false)),
-        add({
-            // TETRIS! big two-octave fanfare.
-            let mut buf = arpeggio(&[3, 7, 10, 15, 19, 22, 27], 0.055, 0.22, 0.45, true);
-            Tone {
-                wave: Wave::Noise,
-                freq_start: 0.0,
-                freq_end: 0.0,
-                amp: 0.15,
-                duration: 0.25,
-                attack: 0.01,
-                decay: 6.0,
-            }
-            .render(&mut buf, 0.0);
-            buf
-        }),
-    ];
-
-    // T-spin: glittery chromatic sparkle.
-    let tspin = add(arpeggio(&[15, 19, 24, 27, 31], 0.04, 0.15, 0.4, true));
-    let perfect = add(arpeggio(&[3, 10, 15, 19, 22, 27, 31, 34], 0.07, 0.3, 0.45, true));
-    let b2b = add(arpeggio(&[19, 24], 0.05, 0.18, 0.35, true));
-
-    // Combo ladder: single blip rising through a pentatonic scale.
-    let pentatonic = [0, 3, 5, 7, 10, 12, 15, 17, 19, 22, 24, 27];
-    let combos = pentatonic
-        .iter()
-        .map(|&s| add(blip(Wave::Square(0.5), note(s + 12), note(s + 12), 0.09, 0.4)))
-        .collect();
-
-    let level_up = add(arpeggio(&[0, 4, 7, 12, 16, 19, 24], 0.06, 0.25, 0.4, false));
-    let garbage_warn = add(blip(Wave::Square(0.3), 140.0, 110.0, 0.25, 0.4));
-    let garbage_rise = add({
-        let mut buf = blip(Wave::Noise, 0.0, 0.0, 0.2, 0.35);
-        Tone {
-            wave: Wave::Triangle,
-            freq_start: 80.0,
-            freq_end: 160.0,
-            amp: 0.5,
-            duration: 0.22,
-            attack: 0.01,
-            decay: 2.0,
-        }
-        .render(&mut buf, 0.0);
-        buf
-    });
-
-    let countdown = add(blip(Wave::Square(0.5), 660.0, 660.0, 0.12, 0.4));
-    let go = add(arpeggio(&[12, 16, 19], 0.04, 0.3, 0.45, true));
-
-    let game_over = add({
-        let mut buf = Vec::new();
-        for (i, s) in [7, 3, 0, -5, -9].iter().enumerate() {
-            Tone {
-                wave: Wave::Triangle,
-                freq_start: note(*s),
-                freq_end: note(*s) * 0.97,
-                amp: 0.4,
-                duration: 0.3,
-                attack: 0.01,
-                decay: 1.5,
-            }
-            .render(&mut buf, i as f32 * 0.22);
-        }
-        buf
-    });
-
-    // Heavy sub-bass boom with a noise rumble tail.
-    let defeat = add({
-        let mut buf = blip(Wave::Noise, 0.0, 0.0, 0.7, 0.45);
-        Tone {
-            wave: Wave::Sine,
-            freq_start: 72.0,
-            freq_end: 27.0,
-            amp: 0.95,
-            duration: 1.0,
-            attack: 0.004,
-            decay: 2.0,
-        }
-        .render(&mut buf, 0.0);
-        Tone {
-            wave: Wave::Square(0.5),
-            freq_start: 110.0,
-            freq_end: 50.0,
-            amp: 0.22,
-            duration: 0.45,
-            attack: 0.005,
-            decay: 3.0,
-        }
-        .render(&mut buf, 0.04);
-        buf
-    });
-
-    let win = add(arpeggio(&[0, 4, 7, 12, 12, 16, 19, 24], 0.09, 0.35, 0.45, true));
-
-    let menu_move = add(blip(Wave::Square(0.5), 700.0, 700.0, 0.03, 0.2));
-    let menu_select = add(arpeggio(&[12, 19], 0.05, 0.12, 0.35, false));
-    let menu_back = add(arpeggio(&[19, 12], 0.05, 0.12, 0.35, false));
-
+fn build_sfx_bank(asset_server: &AssetServer) -> SfxBank {
     SfxBank {
-        move_tick,
-        rotate,
-        rotate_fail,
-        soft_drop,
-        hard_drop,
-        lock,
-        hold,
-        hold_fail,
-        clears,
-        tspin,
-        perfect,
-        b2b,
-        combos,
-        level_up,
-        garbage_warn,
-        garbage_rise,
-        countdown,
-        go,
-        game_over,
-        defeat,
-        win,
-        menu_move,
-        menu_select,
-        menu_back,
+        move_tick: asset_server.load("sfx/move.wav"),
+        rotate: asset_server.load("sfx/rotate.wav"),
+        rotate_fail: asset_server.load("sfx/rotate_fail.wav"),
+        soft_drop: asset_server.load("sfx/soft_drop.wav"),
+        hard_drop: asset_server.load("sfx/hard_drop.wav"),
+        lock: asset_server.load("sfx/lock.wav"),
+        hold: asset_server.load("sfx/hold.wav"),
+        hold_fail: asset_server.load("sfx/hold_fail.wav"),
+        clears: [
+            asset_server.load("sfx/clear1.wav"),
+            asset_server.load("sfx/clear2.wav"),
+            asset_server.load("sfx/clear3.wav"),
+            asset_server.load("sfx/clear4.wav"),
+        ],
+        tspin: asset_server.load("sfx/tspin.wav"),
+        perfect: asset_server.load("sfx/perfect.wav"),
+        b2b: asset_server.load("sfx/b2b.wav"),
+        combo: asset_server.load("sfx/combo.wav"),
+        level_up: asset_server.load("sfx/level_up.wav"),
+        garbage_warn: asset_server.load("sfx/garbage_warn.wav"),
+        garbage_rise: asset_server.load("sfx/garbage_rise.wav"),
+        countdown: asset_server.load("sfx/countdown.wav"),
+        go: asset_server.load("sfx/go.wav"),
+        game_over: asset_server.load("sfx/game_over.wav"),
+        defeat: asset_server.load("sfx/defeat.wav"),
+        win: asset_server.load("sfx/win.wav"),
+        menu_move: asset_server.load("sfx/menu_move.wav"),
+        menu_select: asset_server.load("sfx/menu_select.wav"),
+        menu_back: asset_server.load("sfx/menu_back.wav"),
     }
 }
 
@@ -503,11 +197,10 @@ impl Plugin for GameAudioPlugin {
         // schedule, which bevy_state places BEFORE PreStartup — so the banks
         // must already exist when the app starts or the title BGM misses
         // launch. Build them here, at plugin-build time (this plugin must be
-        // added after DefaultPlugins, which registers these resources).
-        let world = app.world_mut();
-        let sfx = build_sfx_bank(&mut world.resource_mut::<Assets<AudioSource>>());
-        let asset_server = world.resource::<AssetServer>();
-        let bgm = BgmBank {
+        // added after DefaultPlugins, which registers the AssetServer).
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(build_sfx_bank(&asset_server));
+        app.insert_resource(BgmBank {
             title: asset_server.load("music/title.ogg"),
             game: vec![
                 asset_server.load("music/level1.ogg"),
@@ -515,9 +208,7 @@ impl Plugin for GameAudioPlugin {
                 asset_server.load("music/level3.ogg"),
             ],
             victory: asset_server.load("music/ending.ogg"),
-        };
-        world.insert_resource(sfx);
-        world.insert_resource(bgm);
+        });
 
         app.add_message::<PlaySfx>()
             .init_resource::<CurrentBgm>()
@@ -538,13 +229,16 @@ fn play_sfx(
 ) {
     let base = settings.sfx_linear();
     for msg in reader.read() {
-        let volume = base * msg.gain;
+        let (handle, gain, speed) = bank.params(msg.sfx);
+        let volume = base * gain * msg.gain;
         if volume <= 0.001 {
             continue;
         }
         commands.spawn((
-            AudioPlayer::new(bank.get(msg.sfx)),
-            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume)),
+            AudioPlayer::new(handle),
+            PlaybackSettings::DESPAWN
+                .with_volume(Volume::Linear(volume))
+                .with_speed(speed),
         ));
     }
 }
