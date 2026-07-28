@@ -78,10 +78,12 @@ fn main() -> AppExit {
 /// `TextFont::default()` in the game renders pixel-style.
 fn use_misaki_font(mut fonts: ResMut<Assets<Font>>) {
     let bytes = include_bytes!("../assets/fonts/misaki_gothic_2nd.ttf");
-    fonts.insert(
+    if let Err(err) = fonts.insert(
         Handle::<Font>::default().id(),
         Font::from_bytes(bytes.to_vec()),
-    );
+    ) {
+        warn!("failed to install Misaki font, using engine default: {err:?}");
+    }
 }
 
 fn present_mode(vsync: bool) -> PresentMode {

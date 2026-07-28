@@ -30,6 +30,13 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
   victory jingle included); all sound effects are procedurally synthesized
   in code at startup
 
+## Download
+
+Prebuilt binaries for macOS (Apple Silicon / Intel), Linux and Windows are
+on the [Releases](https://github.com/uthree/bevytris/releases) page.
+Extract the archive and run the `bevytris` binary — keep the bundled
+`assets/` folder next to the executable.
+
 ## Building & running
 
 Requires a recent stable Rust toolchain (edition 2024).

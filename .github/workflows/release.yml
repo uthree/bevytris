@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Run tests (rules engine)
+        run: cargo test -p bevytris-core
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          PKG=bevytris-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir -p dist/$PKG
+          cp target/${{ matrix.target }}/release/bevytris dist/$PKG/
+          cp -R assets dist/$PKG/assets
+          cp README.md LICENSE dist/$PKG/
+          tar -C dist -czf $PKG.tar.gz $PKG
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pkg = "bevytris-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path dist/$pkg | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/bevytris.exe" "dist/$pkg/"
+          Copy-Item -Recurse assets "dist/$pkg/assets"
+          Copy-Item README.md,LICENSE "dist/$pkg/"
+          Compress-Archive -Path "dist/$pkg" -DestinationPath "$pkg.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            Guideline-flavored Tetris clone built with Rust + Bevy.
+
+            **How to run**: download the archive for your platform, extract it,
+            and run the `bevytris` binary. Keep the bundled `assets/` folder
+            next to the executable.
+
+            - Marathon mode & a 30-stage VS CPU ladder (first-to-n rounds, S-D grades)
+            - SRS, 7-bag, hold, T-spins, B2B, combos, guideline scoring
+            - Rebindable keys, DAS/ARR/SDF tuning, VSync & fullscreen toggles (F11)
+            - HDR bloom, particles, shockwaves, board inertia, Misaki pixel font
+            - CC0 chiptune BGM by Juhani Junkala; all SFX procedurally synthesized
+
+            Full third-party credits in `assets/CREDITS.md`.
+          files: |
+            *.tar.gz
+            *.zip
