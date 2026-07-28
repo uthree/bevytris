@@ -587,7 +587,7 @@ fn map_events_to_effects(
                 if own_input {
                     shake.add(0.06);
                     if let Ok(mut kick) = kicks.get_mut(msg.board) {
-                        kick.impulse(Vec2::new(*dx as f32 * 16.0, 0.0));
+                        kick.impulse(Vec2::new(*dx as f32 * 24.0, 0.0));
                     }
                 }
             }
@@ -596,7 +596,7 @@ fn map_events_to_effects(
                 // leaned while the key is held (impulses repeat at ARR rate).
                 if own_input {
                     if let Ok(mut kick) = kicks.get_mut(msg.board) {
-                        kick.impulse(Vec2::new(*dx as f32 * 46.0, 0.0));
+                        kick.impulse(Vec2::new(*dx as f32 * 85.0, 0.0));
                     }
                 }
             }
@@ -604,13 +604,18 @@ fn map_events_to_effects(
                 play(Sfx::Rotate, if *kicked { 1.0 } else { 0.7 } * gain);
                 if own_input {
                     shake.add(if *kicked { 0.10 } else { 0.07 });
-                    if let Ok(mut k) = kicks.get_mut(msg.board) {
-                        // Reaction torque: piece spins CW, board recoils CCW.
-                        k.spin(if *cw { 0.95 } else { -0.95 });
-                        // Wall kicks shove the piece; the board recoils the
-                        // opposite way.
-                        if kick.0 != 0 {
-                            k.impulse(Vec2::new(-kick.0 as f32 * 34.0, 0.0));
+                    // Board recoil only for kicked rotations (spins tucked
+                    // into a slot, T-spin style) — reacting to every plain
+                    // rotation reads as noise.
+                    if *kicked {
+                        if let Ok(mut k) = kicks.get_mut(msg.board) {
+                            // Reaction torque: piece spins CW, board CCW.
+                            k.spin(if *cw { 1.2 } else { -1.2 });
+                            // The wall kick shoves the piece; the board
+                            // recoils the opposite way.
+                            if kick.0 != 0 {
+                                k.impulse(Vec2::new(-kick.0 as f32 * 55.0, 0.0));
+                            }
                         }
                     }
                 }
@@ -629,7 +634,7 @@ fn map_events_to_effects(
                     shake.add(0.10 + *distance as f32 * 0.003);
                     if let Ok(mut kick) = kicks.get_mut(msg.board) {
                         // The board takes the hit and dips.
-                        kick.impulse(Vec2::new(0.0, -(85.0 + *distance as f32 * 3.0)));
+                        kick.impulse(Vec2::new(0.0, -(115.0 + *distance as f32 * 4.0)));
                     }
                 }
             }
@@ -877,7 +882,7 @@ fn map_events_to_effects(
                 // The rising garbage shoves the board upward (both boards —
                 // it reads as the stack physically pushing in).
                 if let Ok(mut kick) = kicks.get_mut(msg.board) {
-                    kick.impulse(Vec2::new(0.0, 55.0 + *rows as f32 * 6.0));
+                    kick.impulse(Vec2::new(0.0, 75.0 + *rows as f32 * 8.0));
                 }
                 if index.0 == 0 {
                     shake.add(0.1 + *rows as f32 * 0.04);
@@ -887,8 +892,8 @@ fn map_events_to_effects(
                 play(Sfx::GameOver, gain);
                 shake.add(0.55);
                 if let Ok(mut kick) = kicks.get_mut(msg.board) {
-                    kick.impulse(Vec2::new(0.0, -150.0));
-                    kick.spin(1.4);
+                    kick.impulse(Vec2::new(0.0, -200.0));
+                    kick.spin(1.8);
                 }
                 spawn_flash(&mut commands, Color::srgb(1.0, 0.3, 0.2), 0.3, 0.6);
                 // Board "explodes": scatter particles over the whole field.

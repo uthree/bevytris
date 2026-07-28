@@ -79,10 +79,12 @@ impl BoardKick {
 
 fn update_board_kick(time: Res<Time>, mut boards: Query<(&mut BoardKick, &mut Transform)>) {
     // Underdamped spring: lively single overshoot, then settle.
-    const K: f32 = 220.0;
-    const C: f32 = 12.0;
-    const K_ROT: f32 = 420.0;
-    const C_ROT: f32 = 16.0;
+    // Tuned stiff for a snappy response (~3.3 Hz positional, ~4.2 Hz
+    // rotational); impulses in effects.rs are sized against these.
+    const K: f32 = 420.0;
+    const C: f32 = 16.0;
+    const K_ROT: f32 = 700.0;
+    const C_ROT: f32 = 22.0;
     let dt = time.delta_secs().min(0.05);
     for (mut kick, mut tf) in &mut boards {
         let acc = -K * kick.offset - C * kick.vel;
