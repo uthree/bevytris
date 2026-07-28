@@ -10,7 +10,9 @@
 - Files: all `assets/sfx/*.wav` (27 sounds, renamed after their in-game role;
   e.g. `hard_drop.wav` is the pack's `sfx_exp_shortest_hard2.wav`).
 - Modifications: mixed down to mono where needed, trailing silence trimmed,
-  peak-normalized to -1 dBFS, re-encoded as 16-bit PCM WAV. The combo chime
+  peak-normalized to -1 dBFS, re-encoded as 16-bit PCM WAV. The movement and
+  drop sounds (`move.wav`, `soft_drop.wav`, `hard_drop.wav`) are steeply
+  high-passed (2.5-3 kHz) to sit light in the mix. The combo chime
   (`combo.wav`, from `sfx_coin_single3.wav`) is additionally pitch-shifted
   at runtime as combos climb.
 - Although CC0 requires no attribution, we credit the author with pleasure.
