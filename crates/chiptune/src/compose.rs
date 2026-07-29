@@ -357,37 +357,31 @@ enum BlockRole {
     Break,
 }
 
-/// Versus and the fanfare: two chord blocks and one breakdown across the
-/// ten-block form. Often enough to shape the piece, rare enough that the
-/// tune is what you mostly hear — a match is not the place to stop
-/// playing the melody.
-const FORM_DRIVEN: [BlockRole; 10] = [
-    BlockRole::Full,
-    BlockRole::Full,
-    BlockRole::Chords,
-    BlockRole::Full,
-    BlockRole::Full,
-    BlockRole::Break,
-    BlockRole::Full,
-    BlockRole::Chords,
-    BlockRole::Full,
-    BlockRole::Full,
-];
-
-/// The solo and menu profiles put the harmony out front instead: four
-/// chord blocks, the first of them early, so the chords are something
-/// the piece is *about* rather than a place it visits twice.
-const FORM_CHORDAL: [BlockRole; 10] = [
-    BlockRole::Full,
-    BlockRole::Chords,
-    BlockRole::Full,
-    BlockRole::Chords,
-    BlockRole::Full,
-    BlockRole::Break,
-    BlockRole::Chords,
-    BlockRole::Full,
-    BlockRole::Chords,
-    BlockRole::Full,
+/// The section orders a piece can be built out of.
+///
+/// Every one of them opens and closes on A, uses all three sections, and
+/// gives A more than half the blocks — the return of the first thing you
+/// heard is what a listener is actually tracking over eighty bars, and
+/// the closing block is the final chorus, which wants the main tune
+/// rather than whatever B was doing.
+///
+/// The lengths differ on purpose. Two pieces with different material but
+/// the same eighty-bar clock still feel like the same song shape; a
+/// twelve-block form is a genuinely longer arc, and a session that hears
+/// both is hearing two pieces rather than one piece twice.
+const FORMS: [&[usize]; 6] = [
+    // A A B A C A B A C A — statement, departure, statement.
+    &[0, 0, 1, 0, 2, 0, 1, 0, 2, 0],
+    // A B A B C A B A C A — verse/chorus alternation from the top.
+    &[0, 1, 0, 1, 2, 0, 1, 0, 2, 0],
+    // A A B B A C C A B A — sections in pairs, which lets B and C settle
+    // instead of passing through.
+    &[0, 0, 1, 1, 0, 2, 2, 0, 1, 0],
+    // A B B A C A A B C A
+    &[0, 1, 1, 0, 2, 0, 0, 1, 2, 0],
+    // Twelve blocks: the long arc, with C held back until the middle.
+    &[0, 0, 1, 0, 1, 2, 0, 2, 1, 0, 2, 0],
+    &[0, 1, 0, 2, 0, 1, 1, 0, 2, 2, 1, 0],
 ];
 
 /// How often a piece strums its chord blocks rather than holding them.
@@ -404,11 +398,76 @@ fn strum_chance(profile: Profile) -> f32 {
     }
 }
 
-fn form_roles(profile: Profile) -> &'static [BlockRole; 10] {
+/// How many blocks of the form hand themselves over to the harmony,
+/// inclusive. Versus and the fanfare stay driven: a match is not the
+/// place to keep stopping the melody. The solo and menu profiles put the
+/// chords out front instead, so the harmony is something the piece is
+/// *about* rather than a place it visits twice.
+fn chord_budget(profile: Profile) -> (i32, i32) {
     match profile {
-        Profile::VsIntense | Profile::Victory => &FORM_DRIVEN,
-        Profile::SoloCalm | Profile::Zen | Profile::Ambient => &FORM_CHORDAL,
+        Profile::VsIntense | Profile::Victory => (1, 2),
+        Profile::SoloCalm | Profile::Zen | Profile::Ambient => (3, 4),
     }
+}
+
+/// Give one block away to `role`, out of the candidates in `from`.
+///
+/// Specials are spread out where there is room: a block that still has
+/// the tune between two that do not is what makes the tune's return
+/// audible. Two in a row is allowed only once nothing else is left,
+/// which is the only reason this can't just reject and retry.
+fn place_role(role: BlockRole, from: &[usize], roles: &mut [BlockRole], rng: &mut Rng) {
+    let open: Vec<usize> = from
+        .iter()
+        .copied()
+        .filter(|&i| roles[i] == BlockRole::Full)
+        .collect();
+    let spread: Vec<usize> = open
+        .iter()
+        .copied()
+        .filter(|&i| roles[i - 1] == BlockRole::Full && roles[i + 1] == BlockRole::Full)
+        .collect();
+    let pool = if spread.is_empty() { &open } else { &spread };
+    if pool.is_empty() {
+        return;
+    }
+    roles[*rng.pick(pool)] = role;
+}
+
+/// Roll where this piece stops playing the tune.
+///
+/// This used to be one of two hand-written tables, so every versus piece
+/// in the game broke down in the same two bars. The shape of the form is
+/// the loudest thing about a piece after its key, and it was the one
+/// thing that never varied.
+fn roll_roles(profile: Profile, blocks: usize, rng: &mut Rng) -> Vec<BlockRole> {
+    let mut roles = vec![BlockRole::Full; blocks];
+    let (lo, hi) = chord_budget(profile);
+    let chords = rng.range(lo, hi) as usize;
+    // A second breakdown only in the long form; in the short one it
+    // costs a third of the melody.
+    let breaks = if blocks >= 12 && rng.chance(0.4) { 2 } else { 1 };
+    // Block 0 has to state the tune, and the last block is the final
+    // chorus, which forces every layer back on anyway.
+    let slots: Vec<usize> = (1..blocks - 1).collect();
+    // The breakdown belongs in the second half: it is the air before the
+    // last chorus, not a hole near the top of the piece. It stays clear
+    // of the second-to-last block, whose last bar is the run-up fill into
+    // the final chorus — that bar is loud by design, and a block that
+    // drops everything and then plays the biggest fill in the piece is
+    // not a breakdown, it is a break that changed its mind.
+    let late: Vec<usize> = slots
+        .iter()
+        .copied()
+        .filter(|&i| i * 2 >= blocks && i + 2 < blocks)
+        .collect();
+    for _ in 0..breaks {
+        place_role(BlockRole::Break, &late, &mut roles, rng);
+    }
+    for _ in 0..chords {
+        place_role(BlockRole::Chords, &slots, &mut roles, rng);
+    }
+    roles
 }
 
 struct Material {
@@ -492,17 +551,66 @@ fn roll_meter(profile: Profile, rng: &mut Rng) -> Meter {
     [Meter::Four, Meter::Three, Meter::Six][rng.weighted(&w)]
 }
 
-/// Antecedent/consequent plan: motif 0 opens three of the four phrases,
-/// which is the cheapest possible guarantee of audible repetition.
-const MELODY_PLAN: [(usize, Transform); 8] = [
-    (0, Transform::None),
-    (1, Transform::None),
-    (0, Transform::None),
-    (2, Transform::None),
-    (0, Transform::None),
-    (1, Transform::Up),
-    (3, Transform::None),
-    (2, Transform::Cadence),
+/// Antecedent/consequent plans: which motif each bar of a section sings,
+/// and what is done to it.
+///
+/// Every plan starts on motif 0 and brings it back at least twice more,
+/// which is the cheapest possible guarantee of audible repetition; every
+/// plan sequences a motif up a third somewhere in the second half, which
+/// is where the phrase peaks; and every plan closes on a cadence.
+/// Everything else is free, and each section of a piece draws its own —
+/// so B does not merely put new chords under the order A already sang.
+const PLANS: [[(usize, Transform); 8]; 5] = [
+    [
+        (0, Transform::None),
+        (1, Transform::None),
+        (0, Transform::None),
+        (2, Transform::None),
+        (0, Transform::None),
+        (1, Transform::Up),
+        (3, Transform::None),
+        (2, Transform::Cadence),
+    ],
+    [
+        (0, Transform::None),
+        (0, Transform::None),
+        (1, Transform::None),
+        (2, Transform::None),
+        (0, Transform::None),
+        (0, Transform::Up),
+        (1, Transform::None),
+        (3, Transform::Cadence),
+    ],
+    [
+        (0, Transform::None),
+        (1, Transform::None),
+        (2, Transform::None),
+        (0, Transform::None),
+        (0, Transform::None),
+        (1, Transform::Up),
+        (2, Transform::None),
+        (1, Transform::Cadence),
+    ],
+    [
+        (0, Transform::None),
+        (1, Transform::None),
+        (0, Transform::None),
+        (1, Transform::None),
+        (2, Transform::None),
+        (0, Transform::Up),
+        (3, Transform::None),
+        (1, Transform::Cadence),
+    ],
+    [
+        (0, Transform::None),
+        (2, Transform::None),
+        (0, Transform::None),
+        (3, Transform::None),
+        (0, Transform::None),
+        (2, Transform::Up),
+        (1, Transform::None),
+        (3, Transform::Cadence),
+    ],
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -564,9 +672,13 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
     let mut sections = Vec::new();
     for _ in 0..3 {
         let base = *rng.pick(loops);
+        // The consequent phrase may take a second progression. Four bars
+        // stated twice under two different cadences is the plainest thing
+        // eight bars of harmony can be, and the bank is right there.
+        let answer = if rng.chance(0.45) { *rng.pick(loops) } else { base };
         let mut chords = [Chord::new(0); 8];
         for (i, c) in chords.iter_mut().enumerate() {
-            *c = Chord::new(base[i % 4]);
+            *c = Chord::new(if i < 4 { base[i] } else { answer[i % 4] });
         }
         // Scheduled cadences: half at the end of the antecedent phrase,
         // authentic at the end of the consequent.
@@ -577,12 +689,15 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         chords[3].ext = Ext::Seventh;
         extend(&mut chords, profile, &mut rng);
 
-        let melody = (0..8)
-            .map(|bar| {
-                let (mi, tf) = MELODY_PLAN[bar];
-                realize(&motifs[mi], tf, chords[bar], meter)
-            })
-            .collect();
+        // Each section sings its own plan, and each bar knows what the
+        // one before it ended on so the line can carry over the bar line.
+        let plan = rng.pick(&PLANS);
+        let mut melody: Vec<Vec<MelNote>> = Vec::with_capacity(8);
+        for bar in 0..8 {
+            let (mi, tf) = plan[bar];
+            let prev = melody.last().and_then(|b: &Vec<MelNote>| b.last()).map(|n| n.deg);
+            melody.push(realize(&motifs[mi], tf, chords[bar], meter, prev));
+        }
 
         sections.push(Section {
             chords,
@@ -592,13 +707,16 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         });
     }
 
+    // Three sections of material carry the whole form, with section A
+    // returning more often than not — under 30% new material, which is
+    // where real songs sit.
+    let form = rng.pick(&FORMS).to_vec();
+    let roles = roll_roles(profile, form.len(), &mut rng);
+
     Material {
         sections,
-        // Three sections of material carry eighty bars, with section A
-        // returning every other block — 30% new material, which is where
-        // real songs sit.
-        form: vec![0, 0, 1, 0, 2, 0, 1, 0, 2, 0],
-        roles: form_roles(profile).to_vec(),
+        form,
+        roles,
         rhythms_used,
     }
 }
@@ -656,26 +774,51 @@ const CONTOUR_CENTER: i32 = 3;
 /// own — so a motif arches rather than wanders.
 fn contour(rng: &mut Rng, n: usize, smoothness: f32) -> Vec<i32> {
     let s = smoothness.clamp(0.0, 1.0);
-    // Smoothness moves weight out of the wide intervals and into seconds.
-    // The three pairs always sum to 1: seconds 0.60 -> 0.88, thirds
-    // 0.32 -> 0.12, fifths 0.08 -> 0.
+    // Smoothness moves weight out of the wide intervals and into seconds:
+    // seconds 0.60 -> 0.88, thirds 0.32 -> 0.12, fourths and fifths
+    // 0.08 -> 0.
+    //
+    // The repeat is not a fifth wheel. Every corpus anyone has counted
+    // has a repeated note as one of the commonest melodic "intervals",
+    // and a walk forbidden from staying put is the single clearest tell
+    // of a generated line: it has to be going somewhere on every onset,
+    // so it never lets a note simply land.
+    let same = 0.15;
     let second = 0.30 + 0.14 * s;
     let third = 0.16 - 0.10 * s;
-    let fifth = 0.04 - 0.04 * s;
-    let weights = [second, second, third, third, fifth, fifth];
+    let fourth = 0.02 - 0.02 * s;
+    let fifth = 0.02 - 0.02 * s;
+    let weights = [
+        same, second, second, third, third, fourth, fourth, fifth, fifth,
+    ];
 
     let mut out = Vec::with_capacity(n);
     let mut d = *rng.pick(&[0, 2, 4]);
+    // The last move that actually went somewhere, so a leap can be
+    // answered even if a repeated note comes between.
+    let mut last_move = 0i32;
     for _ in 0..n {
         out.push(d);
         let mut step: i32 = match rng.weighted(&weights) {
-            0 => -1,
-            1 => 1,
-            2 => -2,
-            3 => 2,
-            4 => -4,
+            0 => 0,
+            1 => -1,
+            2 => 1,
+            3 => -2,
+            4 => 2,
+            5 => -3,
+            6 => 3,
+            7 => -4,
             _ => 4,
         };
+        // Post-skip reversal: a leap is answered by a step back the other
+        // way. Of all the melodic regularities that have been measured
+        // this is the strongest, and it is what makes a leap sound like
+        // a gesture with a consequence rather than like the line coming
+        // apart. Only leaps ask for it — a run of seconds is already a
+        // line and should be allowed to keep going.
+        if last_move.abs() >= 2 && step != 0 && rng.chance(0.55 + 0.25 * s) {
+            step = -last_move.signum();
+        }
         // The further the walk has drifted from the middle, the likelier
         // the next move is inward. A walk that only ever turns at the
         // edges reads as wandering; one that leans home reads as a line.
@@ -690,33 +833,132 @@ fn contour(rng: &mut Rng, n: usize, smoothness: f32) -> Vec<i32> {
         if d + step > CONTOUR_HIGH || d + step < CONTOUR_LOW {
             step = -step;
         }
+        if step != 0 {
+            last_move = step;
+        }
         d = (d + step).clamp(CONTOUR_LOW, CONTOUR_HIGH);
     }
     out
 }
 
+/// How far apart two notes either side of a bar line may sit before the
+/// seam stops sounding like a melody continuing and starts sounding like
+/// two melodies taking turns. A fifth is the widest interval the contour
+/// itself will write, so anything past it can only have come from the
+/// join.
+const SEAM_MAX: i32 = 4;
+
+/// What the join is allowed to transpose a bar by: a third or a fifth,
+/// either direction. Both are sequences, which is a thing melodies do on
+/// purpose; anything else would be a different melody.
+const SEAM_SHIFTS: [i32; 5] = [0, -2, 2, -4, 4];
+
+/// How far outside the contour's own register a linked bar may sit. This
+/// is what stops the join from chasing: without it a bar that ended high
+/// pulls the next one up, that one ends higher still, and eight bars
+/// later the tune is shrieking.
+const LINK_SLACK: i32 = 2;
+
+/// The nearest chord tone strictly `dir`-wards of `from`, as long as it
+/// stays inside the melodic register. `None` when there is nowhere to go,
+/// in which case the note it was called for keeps the pitch it had.
+fn next_chord_tone(chord: Chord, from: i32, dir: i32) -> Option<i32> {
+    (1..=4)
+        .map(|k| from + dir * k)
+        .filter(|c| (CONTOUR_LOW - LINK_SLACK..=CONTOUR_HIGH + LINK_SLACK).contains(c))
+        .find(|c| chord.contains(*c))
+}
+
 /// Turn a motif into the actual notes of one bar over `chord`.
-fn realize(motif: &Motif, tf: Transform, chord: Chord, meter: Meter) -> Vec<MelNote> {
+///
+/// `prev_last` is the degree the bar before this one ended on, if there
+/// was one.
+fn realize(
+    motif: &Motif,
+    tf: Transform,
+    chord: Chord,
+    meter: Meter,
+    prev_last: Option<i32>,
+) -> Vec<MelNote> {
     let rhythm = rhythm_bank(meter)[motif.rhythm];
-    let shift = match tf {
+    let plan_shift = match tf {
         Transform::None | Transform::Cadence => 0,
         Transform::Up => 2,
     };
+    // Voice-lead across the bar line. A motif starts wherever its own
+    // contour happens to start, so a bar that ended high followed by one
+    // that starts low used to drop an octave in a single move — inside
+    // the bars the walk is careful, and every eight of those care was
+    // thrown away at the join.
+    //
+    // The fix has to keep the motif recognizable, so the only thing
+    // allowed to change is the register it is sung in — exactly the
+    // transposition `Transform::Up` already applies, which is to say a
+    // sequence. Nothing moves unless the seam is genuinely too wide, and
+    // nothing moves far enough to leave the melodic register.
+    let link = match prev_last {
+        Some(prev) if (motif.contour[0] + plan_shift - prev).abs() > SEAM_MAX => {
+            let first = motif.contour[0] + plan_shift;
+            let lo = motif.contour.iter().min().copied().unwrap_or(0) + plan_shift;
+            let hi = motif.contour.iter().max().copied().unwrap_or(0) + plan_shift;
+            SEAM_SHIFTS
+                .into_iter()
+                .filter(|s| lo + s >= CONTOUR_LOW - LINK_SLACK)
+                .filter(|s| hi + s <= CONTOUR_HIGH + LINK_SLACK)
+                .min_by_key(|s| ((first + s - prev).abs(), s.abs()))
+                .unwrap_or(0)
+        }
+        _ => 0,
+    };
+    let shift = plan_shift + link;
     let mut out = Vec::with_capacity(rhythm.len());
+    let mut prev: Option<(i32, i32)> = None;
     for (i, &(step, len)) in rhythm.iter().enumerate() {
-        let mut deg = motif.contour[i.min(motif.contour.len() - 1)] + shift;
+        let raw = motif.contour[i.min(motif.contour.len() - 1)] + shift;
+        let mut deg = raw;
         let prio = meter.prio(step);
         // Strong beats must be chord tones: this single rule is the
         // difference between "a melody over the changes" and "notes".
         if prio == 0 {
-            deg = chord.snap(deg);
+            deg = chord.snap(raw);
+            // Snapping is also what can collapse a line onto one note.
+            // Several of the rhythm cells put every onset on a beat, so
+            // every note in the bar is snapped, and a narrow walk over
+            // one of those comes out as the same chord tone struck four
+            // times — the tune stops being a line and starts being a
+            // pulse. Where the walk did mean to move, let it: to the
+            // next chord tone along, in the direction it was going.
+            if let Some((p_deg, p_raw)) = prev
+                && deg == p_deg
+                && raw != p_raw
+            {
+                let dir = if raw > p_raw { 1 } else { -1 };
+                deg = next_chord_tone(chord, deg, dir).unwrap_or(deg);
+            }
         }
+        prev = Some((deg, raw));
         out.push(MelNote {
             step,
             len,
             deg,
             prio,
         });
+    }
+    // Fill a third stepwise. Snapping the strong beats to the chord can
+    // leave a weak note sitting outside the two notes it comes between,
+    // so a line that wanted to walk up a third jumps past its own
+    // destination and comes back. Where the outer two are a third apart
+    // there is exactly one note in the middle, and putting the weak note
+    // there is what a passing tone is.
+    for i in 1..out.len().saturating_sub(1) {
+        if out[i].prio == 0 {
+            continue;
+        }
+        let (a, b) = (out[i - 1].deg, out[i + 1].deg);
+        let between = (out[i].deg - a).signum() == (b - out[i].deg).signum();
+        if (b - a).abs() == 2 && !between {
+            out[i].deg = a + (b - a).signum();
+        }
     }
     if tf == Transform::Cadence {
         // Land the phrase on the tonic, in whatever octave it was already
@@ -2359,6 +2601,35 @@ mod tests {
     }
 
     #[test]
+    fn snapping_does_not_hammer_one_note() {
+        // Rhythm cell 0 puts all four onsets on the beat, so every note
+        // in the bar is snapped to the chord. A walk that moves inside a
+        // third then lands on the same tone every time, and the tune
+        // comes out as a pulse rather than a line.
+        let chord = Chord::new(0);
+        let motif = Motif {
+            rhythm: 0,
+            contour: vec![4, 5, 4, 5],
+        };
+        let out = realize(&motif, Transform::None, chord, Meter::Four, None);
+        assert_eq!(out.len(), RHYTHMS_4_4[0].len());
+        for w in out.windows(2) {
+            assert_ne!(w[0].deg, w[1].deg, "the line collapsed onto one note");
+        }
+        // Without giving up the rule that put it on the chord.
+        for n in &out {
+            assert!(chord.contains(n.deg), "degree {} left the chord", n.deg);
+        }
+        // A walk that really does repeat a note keeps its repeat.
+        let flat = Motif {
+            rhythm: 0,
+            contour: vec![4, 4, 4, 4],
+        };
+        let out = realize(&flat, Transform::None, chord, Meter::Four, None);
+        assert!(out.iter().all(|n| n.deg == 4), "a held note was moved");
+    }
+
+    #[test]
     fn material_is_reused_not_re_rolled() {
         // The form must revisit sections: eighty bars of music from
         // twenty-four bars of material keeps new material inside the
@@ -2464,6 +2735,105 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_melody_is_allowed_to_repeat_a_note() {
+        // A walk that has to move on every onset never lets a note land,
+        // which is the clearest tell of a generated line.
+        let mut rng = Rng::new(0x5A1E);
+        let mut same = 0.0;
+        let mut total = 0.0;
+        for _ in 0..2_000 {
+            let c = contour(&mut rng, 8, 0.7);
+            for w in c.windows(2) {
+                total += 1.0;
+                if w[0] == w[1] {
+                    same += 1.0;
+                }
+            }
+        }
+        let share = same / total;
+        assert!(
+            (0.05..0.35).contains(&share),
+            "repeated notes were {:.0}% of the line",
+            share * 100.0
+        );
+    }
+
+    #[test]
+    fn a_leap_is_answered_by_a_step_back() {
+        // Post-skip reversal. The melody may leap, but a leap that keeps
+        // going the same way twice is how a line stops sounding like one.
+        let mut rng = Rng::new(0x1EA0);
+        let mut answered = 0.0;
+        let mut leaps = 0.0;
+        for smooth in [0.3, 0.6, 0.9] {
+            for _ in 0..1_500 {
+                let c = contour(&mut rng, 12, smooth);
+                for i in 1..c.len() - 1 {
+                    let leap = c[i] - c[i - 1];
+                    if leap.abs() < 2 {
+                        continue;
+                    }
+                    // The answer is the next move that goes anywhere.
+                    let Some(next) = c[i + 1..].iter().map(|d| d - c[i]).find(|d| *d != 0) else {
+                        continue;
+                    };
+                    leaps += 1.0;
+                    if next.signum() != leap.signum() {
+                        answered += 1.0;
+                    }
+                }
+            }
+        }
+        assert!(leaps > 500.0, "the test barely saw a leap");
+        let share = answered / leaps;
+        assert!(share > 0.6, "only {:.0}% of leaps turned back", share * 100.0);
+    }
+
+    #[test]
+    fn the_line_carries_over_the_bar_line() {
+        // Inside a bar the walk is careful; the join used to throw that
+        // away, because a motif starts wherever its own contour starts.
+        let mut rng = Rng::new(0x5EA1);
+        let mut linked = 0.0;
+        let mut free = 0.0;
+        let mut linked_wide = 0;
+        let mut free_wide = 0;
+        let mut n = 0.0;
+        for i in 0..400 {
+            let motif = Motif {
+                rhythm: i % RHYTHMS_4_4.len(),
+                contour: contour(&mut rng, RHYTHMS_4_4[i % RHYTHMS_4_4.len()].len(), 0.6),
+            };
+            let chord = Chord::new((i % 7) as i32);
+            for prev in CONTOUR_LOW..=CONTOUR_HIGH {
+                let a = realize(&motif, Transform::None, chord, Meter::Four, None);
+                let b = realize(&motif, Transform::None, chord, Meter::Four, Some(prev));
+                let (fs, ls) = ((a[0].deg - prev).abs(), (b[0].deg - prev).abs());
+                free += fs as f32;
+                linked += ls as f32;
+                free_wide += (fs > SEAM_MAX) as i32;
+                linked_wide += (ls > SEAM_MAX) as i32;
+                n += 1.0;
+            }
+        }
+        // The seams that were already inside a fifth are left alone, so
+        // the mean only moves a little. The tail is the point: a join
+        // wider than anything the contour itself would write has to be
+        // most of the way gone.
+        assert!(free_wide > 500, "the test never saw a wide seam");
+        assert!(
+            linked_wide * 4 < free_wide,
+            "wide seams barely moved: {free_wide} -> {linked_wide}"
+        );
+        assert!(
+            linked / n < (free / n) * 0.95,
+            "the bar line is no smoother: {:.2} -> {:.2}",
+            free / n,
+            linked / n
+        );
+    }
+
     /// Mean melody onsets per bar for a profile, over many seeds.
     fn mean_onsets(profile: Profile) -> f32 {
         let mut total = 0.0;
@@ -2480,10 +2850,18 @@ mod tests {
         total / bars
     }
 
-    /// Plan one whole form and report, per block, how many notes each
-    /// instrument played.
-    fn blocks_of(profile: Profile, intensity: f32) -> Vec<Vec<(Inst, usize)>> {
-        let mut c = Composer::new(0x5EED);
+    /// Plan one whole form and report the roles it rolled plus, per
+    /// block, how many notes each instrument played.
+    fn blocks_of(profile: Profile, intensity: f32) -> (Vec<BlockRole>, Vec<Vec<(Inst, usize)>>) {
+        blocks_of_seed(0x5EED, profile, intensity)
+    }
+
+    fn blocks_of_seed(
+        seed: u64,
+        profile: Profile,
+        intensity: f32,
+    ) -> (Vec<BlockRole>, Vec<Vec<(Inst, usize)>>) {
+        let mut c = Composer::new(seed);
         c.set_profile(profile, intensity);
         let ctx = Context {
             profile,
@@ -2491,9 +2869,10 @@ mod tests {
             elapsed: 600.0,
             ..Default::default()
         };
-        let blocks = c.material.form.len();
+        let roles = c.material.roles.clone();
         let mut out = Vec::new();
-        (0..blocks)
+        let blocks = roles
+            .iter()
             .map(|_| {
                 let start = out.len();
                 for _ in 0..BARS_PER_SECTION {
@@ -2508,7 +2887,8 @@ mod tests {
                 }
                 insts
             })
-            .collect()
+            .collect();
+        (roles, blocks)
     }
 
     /// How many notes `pred` matched in a block.
@@ -2522,12 +2902,12 @@ mod tests {
 
     #[test]
     fn the_chord_blocks_rest_the_melody_and_hold_a_real_chord() {
-        let blocks = blocks_of(Profile::VsIntense, 0.7);
+        let (roles, blocks) = blocks_of(Profile::VsIntense, 0.7);
         let melody = |i: Inst| i.is_melody();
         let full_snares = count(&blocks[0], |i| i.is_snare());
         let full_hats = count(&blocks[0], |i| i == Inst::Hat || i == Inst::Shaker);
 
-        for (i, role) in form_roles(Profile::VsIntense).iter().enumerate() {
+        for (i, role) in roles.iter().enumerate() {
             let b = &blocks[i];
             let has = |want: Inst| b.iter().any(|(x, _)| *x == want);
             match role {
@@ -2595,7 +2975,7 @@ mod tests {
         );
 
         // And the second instrument really is what the later blocks use.
-        let blocks = blocks_of(Profile::SoloCalm, 0.6);
+        let (_, blocks) = blocks_of(Profile::SoloCalm, 0.6);
         let melodies = |b: &Vec<(Inst, usize)>| -> Vec<Inst> {
             b.iter()
                 .map(|(i, _)| *i)
@@ -2693,37 +3073,81 @@ mod tests {
 
     #[test]
     fn every_form_ends_on_a_full_block() {
+        // Swept over seeds now that the form is rolled rather than picked
+        // from one of two tables: these are the properties every roll has
+        // to come out with, whichever shape it lands on.
         for profile in Profile::ALL {
-            let roles = form_roles(profile);
-            // The last block is the final chorus, which forces every
-            // layer on. A rest or a chord block there would be
-            // overridden anyway, so the roles must not put one there.
-            assert_eq!(roles[roles.len() - 1], BlockRole::Full, "{profile:?}");
-            // And there has to be some contrast in there at all.
-            assert!(roles.contains(&BlockRole::Chords), "{profile:?}");
-            assert!(roles.contains(&BlockRole::Break), "{profile:?}");
-            // Something has to still play the tune.
-            let full = roles.iter().filter(|r| **r == BlockRole::Full).count();
-            assert!(
-                full >= 5,
-                "{profile:?} only has {full} blocks with a melody"
-            );
+            for seed in 0..40u64 {
+                let m = build_material(seed, profile, Meter::Four, default_smoothness(profile));
+                let roles = &m.roles;
+                let what = format!("{profile:?} seed {seed}");
+                assert_eq!(roles.len(), m.form.len(), "{what}: a block with no role");
+                // Block 0 states the tune, and the last block is the
+                // final chorus, which forces every layer on. A rest or a
+                // chord block at either end would be wasted.
+                assert_eq!(roles[0], BlockRole::Full, "{what}");
+                assert_eq!(roles[roles.len() - 1], BlockRole::Full, "{what}");
+                // And there has to be some contrast in there at all.
+                assert!(roles.contains(&BlockRole::Chords), "{what}");
+                assert!(roles.contains(&BlockRole::Break), "{what}");
+                // The breakdown is the air before the last chorus, not a
+                // hole near the top of the piece — and not the block that
+                // owes the piece a run-up fill either.
+                for (i, r) in roles.iter().enumerate() {
+                    if *r == BlockRole::Break {
+                        assert!(i * 2 >= roles.len(), "{what}: early breakdown at {i}");
+                        assert!(i + 2 < roles.len(), "{what}: breakdown on the run-up at {i}");
+                    }
+                }
+                // Something has to still play the tune.
+                let full = roles.iter().filter(|r| **r == BlockRole::Full).count();
+                assert!(full >= 5, "{what} only has {full} blocks with a melody");
+            }
         }
+    }
+
+    #[test]
+    fn the_form_itself_varies_between_pieces() {
+        // The thing this whole exercise was for: two pieces should not
+        // break down in the same bar just because they share a profile.
+        let mut shapes = HashSet::new();
+        let mut lengths = HashSet::new();
+        for seed in 0..40u64 {
+            let m = build_material(
+                seed,
+                Profile::VsIntense,
+                Meter::Four,
+                default_smoothness(Profile::VsIntense),
+            );
+            lengths.insert(m.form.len());
+            shapes.insert(format!("{:?}{:?}", m.form, m.roles));
+        }
+        assert!(
+            shapes.len() >= 20,
+            "only {} distinct forms in 40 pieces",
+            shapes.len()
+        );
+        assert!(lengths.len() > 1, "every piece is the same length");
     }
 
     #[test]
     fn the_solo_profiles_give_the_chords_more_room_than_versus() {
         let chordy = |p: Profile| {
-            form_roles(p)
-                .iter()
-                .filter(|r| **r == BlockRole::Chords)
-                .count()
+            let mut total = 0.0;
+            for seed in 0..40u64 {
+                let m = build_material(seed, p, Meter::Four, default_smoothness(p));
+                total += m.roles.iter().filter(|r| **r == BlockRole::Chords).count() as f32
+                    / m.roles.len() as f32;
+            }
+            total / 40.0
         };
         assert!(
             chordy(Profile::SoloCalm) > chordy(Profile::VsIntense),
             "solo should be the chord-forward one"
         );
-        assert_eq!(chordy(Profile::Zen), chordy(Profile::SoloCalm));
+        // Both calm profiles draw from the same budget, so they land in
+        // the same place over a spread of seeds.
+        assert!((chordy(Profile::Zen) - chordy(Profile::SoloCalm)).abs() < 0.05);
     }
 
     #[test]
