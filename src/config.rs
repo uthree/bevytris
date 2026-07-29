@@ -35,6 +35,107 @@ impl Action {
 
 }
 
+/// CPU playstyle selector for custom matches; maps onto the AI archetypes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CpuStyle {
+    /// Use the archetype the ladder assigns to the chosen level.
+    #[default]
+    Auto,
+    Balanced,
+    Rusher,
+    Thinker,
+    Spinner,
+}
+
+impl CpuStyle {
+    const ORDER: [CpuStyle; 5] = [
+        CpuStyle::Auto,
+        CpuStyle::Balanced,
+        CpuStyle::Rusher,
+        CpuStyle::Thinker,
+        CpuStyle::Spinner,
+    ];
+
+    pub fn archetype(self) -> Option<crate::core::ai::Archetype> {
+        use crate::core::ai::Archetype;
+        match self {
+            CpuStyle::Auto => None,
+            CpuStyle::Balanced => Some(Archetype::Balanced),
+            CpuStyle::Rusher => Some(Archetype::Rusher),
+            CpuStyle::Thinker => Some(Archetype::Thinker),
+            CpuStyle::Spinner => Some(Archetype::Spinner),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CpuStyle::Auto => "AUTO",
+            CpuStyle::Balanced => "BALANCED",
+            CpuStyle::Rusher => "RUSHER",
+            CpuStyle::Thinker => "THINKER",
+            CpuStyle::Spinner => "SPINNER",
+        }
+    }
+
+    pub fn cycled(self, dir: i32) -> Self {
+        let i = Self::ORDER.iter().position(|c| *c == self).unwrap_or(0) as i32;
+        Self::ORDER[(i + dir).rem_euclid(Self::ORDER.len() as i32) as usize]
+    }
+}
+
+/// Rule sheet for a custom match, persisted with the settings so the
+/// last-used setup comes back next launch.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomMatchConfig {
+    /// CPU skill on the 1..=30 ladder.
+    pub cpu_level: u32,
+    pub cpu_style: CpuStyle,
+    /// Rounds needed to take the match (1..=5).
+    pub wins_needed: u32,
+    /// Zone gauges for both players.
+    pub zone: bool,
+    /// Seconds before the attack ramp starts; 0 disables margin time.
+    pub margin_secs: u32,
+    /// 0 = timed gravity ramp (like VS); 1..=20 = fixed gravity level.
+    pub speed_level: u32,
+    /// Attack handicaps, percent of normal garbage sent (50..=200).
+    pub player_attack_pct: u32,
+    pub cpu_attack_pct: u32,
+    /// Cheese rows pre-stacked on both boards (0..=8).
+    pub start_garbage: u32,
+}
+
+impl Default for CustomMatchConfig {
+    fn default() -> Self {
+        Self {
+            cpu_level: 15,
+            cpu_style: CpuStyle::Auto,
+            wins_needed: 2,
+            zone: false,
+            margin_secs: 90,
+            speed_level: 0,
+            player_attack_pct: 100,
+            cpu_attack_pct: 100,
+            start_garbage: 0,
+        }
+    }
+}
+
+impl CustomMatchConfig {
+    /// Clamp every field into its legal range (files can say anything).
+    fn sanitized(mut self) -> Self {
+        self.cpu_level = self.cpu_level.clamp(1, crate::core::ai::MAX_STAGE);
+        self.wins_needed = self.wins_needed.clamp(1, 5);
+        self.margin_secs = self.margin_secs.min(300);
+        self.speed_level = self.speed_level.min(20);
+        self.player_attack_pct = self.player_attack_pct.clamp(50, 200);
+        self.cpu_attack_pct = self.cpu_attack_pct.clamp(50, 200);
+        self.start_garbage = self.start_garbage.min(8);
+        self
+    }
+}
+
 /// All key codes offered for rebinding; also the parse table for the
 /// serialized Debug-string form.
 pub fn bindable_keys() -> Vec<KeyCode> {
@@ -95,6 +196,8 @@ struct SettingsFile {
     fullscreen: bool,
     #[serde(default)]
     language: crate::i18n::LangChoice,
+    #[serde(default)]
+    custom: CustomMatchConfig,
 }
 
 fn default_sdf() -> u32 {
@@ -125,6 +228,8 @@ pub struct GameSettings {
     pub fullscreen: bool,
     /// UI language: follow the OS or force one.
     pub language: crate::i18n::LangChoice,
+    /// Last-used custom match rule sheet.
+    pub custom: CustomMatchConfig,
 }
 
 impl Default for GameSettings {
@@ -150,6 +255,7 @@ impl Default for GameSettings {
             sdf: 20,
             fullscreen: false,
             language: crate::i18n::LangChoice::Auto,
+            custom: CustomMatchConfig::default(),
         }
     }
 }
@@ -224,6 +330,7 @@ impl GameSettings {
             sdf: self.sdf,
             fullscreen: self.fullscreen,
             language: self.language,
+            custom: self.custom,
         }
     }
 
@@ -264,6 +371,7 @@ impl GameSettings {
         };
         settings.fullscreen = file.fullscreen;
         settings.language = file.language;
+        settings.custom = file.custom.sanitized();
         settings
     }
 }

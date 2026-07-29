@@ -36,6 +36,19 @@ enum MenuAction {
     ZoneSelect,
     /// Start a zone battle against this stage's CPU profile.
     ZoneStage(u32),
+    /// Open the custom match rule sheet.
+    CustomSetup,
+    /// Start a match under the current rule sheet.
+    CustomStart,
+    CustomCpuLevel,
+    CustomStyle,
+    CustomFirstTo,
+    CustomZone,
+    CustomMargin,
+    CustomSpeed,
+    CustomPlayerAtk,
+    CustomCpuAtk,
+    CustomGarbage,
     Settings,
     Quit,
     Bind(Action),
@@ -96,6 +109,7 @@ impl Plugin for MenuPlugin {
             .add_systems(OnEnter(AppState::SoloSelect), setup_solo_select)
             .add_systems(OnEnter(AppState::ZoneSelect), setup_zone_select)
             .add_systems(OnEnter(AppState::StageSelect), setup_stage_select)
+            .add_systems(OnEnter(AppState::CustomSetup), setup_custom)
             .add_systems(OnExit(AppState::Settings), persist_settings)
             .add_systems(OnEnter(PlayState::Paused), setup_pause_overlay)
             .add_systems(OnEnter(PlayState::RoundOver), setup_round_overlay)
@@ -119,7 +133,8 @@ impl Plugin for MenuPlugin {
                             .or_else(in_state(AppState::Settings))
                             .or_else(in_state(AppState::SoloSelect))
                             .or_else(in_state(AppState::ZoneSelect))
-                            .or_else(in_state(AppState::StageSelect)),
+                            .or_else(in_state(AppState::StageSelect))
+                            .or_else(in_state(AppState::CustomSetup)),
                     ),
             )
             .add_systems(
@@ -138,8 +153,9 @@ impl Plugin for MenuPlugin {
             )
             .add_systems(
                 Update,
-                (settings_scroll_wheel, settings_keep_cursor_visible)
-                    .run_if(in_state(AppState::Settings)),
+                (settings_scroll_wheel, settings_keep_cursor_visible).run_if(
+                    in_state(AppState::Settings).or_else(in_state(AppState::CustomSetup)),
+                ),
             );
     }
 }
@@ -194,6 +210,7 @@ fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: R
         (MenuAction::SoloSelect, s.solo.to_string()),
         (MenuAction::VsSelect, s.vs_cpu.to_string()),
         (MenuAction::ZoneSelect, s.zone_battle.to_string()),
+        (MenuAction::CustomSetup, s.custom_match.to_string()),
         (MenuAction::Settings, s.settings.to_string()),
         (MenuAction::Quit, s.quit.to_string()),
     ];
@@ -313,6 +330,7 @@ fn action_description(action: MenuAction, progress: &Progress, s: &Strings) -> O
         MenuAction::SoloSelect => s.desc_solo.to_string(),
         MenuAction::VsSelect => s.desc_vs.to_string(),
         MenuAction::ZoneSelect => s.desc_zone.to_string(),
+        MenuAction::CustomSetup => s.desc_custom.to_string(),
         MenuAction::Settings => s.desc_settings.to_string(),
         MenuAction::Quit => s.desc_quit.to_string(),
         MenuAction::Marathon => s.desc_marathon.to_string(),
@@ -678,6 +696,77 @@ fn setup_settings(
         });
 }
 
+/// Custom match rule sheet: opponent and rules rows, then START.
+fn setup_custom(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: Res<Locale>) {
+    let s = locale.s();
+    cursor.0 = 0;
+    commands
+        .spawn((root_node(), DespawnOnExit(AppState::CustomSetup)))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new(s.custom_match),
+                TextFont {
+                    font_size: FontSize::Px(40.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.3, 0.85, 1.0)),
+                Node {
+                    margin: UiRect::bottom(px(12)),
+                    ..default()
+                },
+            ));
+            parent
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: px(6),
+                        max_height: px(470),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ScrollPosition::default(),
+                    SettingsScroll,
+                ))
+                .with_children(|list| {
+                    let mut index = 0;
+                    list.spawn(section_heading(s.sec_cm_cpu));
+                    for action in [MenuAction::CustomCpuLevel, MenuAction::CustomStyle] {
+                        list.spawn(item_bundle(index, action, String::new(), 420.0));
+                        index += 1;
+                    }
+                    list.spawn(section_heading(s.sec_cm_rules));
+                    for action in [
+                        MenuAction::CustomFirstTo,
+                        MenuAction::CustomZone,
+                        MenuAction::CustomMargin,
+                        MenuAction::CustomSpeed,
+                        MenuAction::CustomPlayerAtk,
+                        MenuAction::CustomCpuAtk,
+                        MenuAction::CustomGarbage,
+                    ] {
+                        list.spawn(item_bundle(index, action, String::new(), 420.0));
+                        index += 1;
+                    }
+                    list.spawn(item_bundle(index, MenuAction::CustomStart, String::new(), 420.0));
+                    index += 1;
+                    list.spawn(item_bundle(index, MenuAction::Back, String::new(), 420.0));
+                });
+            parent.spawn((
+                Text::new(s.cm_hint),
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.45, 0.5, 0.6)),
+                Node {
+                    margin: UiRect::top(px(16)),
+                    ..default()
+                },
+            ));
+        });
+}
+
 /// Mouse wheel scrolls the settings list.
 fn settings_scroll_wheel(
     mut wheels: MessageReader<MouseWheel>,
@@ -770,6 +859,53 @@ fn settings_label(
             s.fullscreen,
             if settings.fullscreen { "ON" } else { "OFF" }
         ),
+        MenuAction::CustomCpuLevel => {
+            format!("{:<12} {:02} / 30", s.cm_cpu_level, settings.custom.cpu_level)
+        }
+        MenuAction::CustomStyle => {
+            let value = match settings.custom.cpu_style {
+                crate::config::CpuStyle::Auto => format!(
+                    "AUTO ({})",
+                    AiProfile::for_stage(settings.custom.cpu_level).archetype.label()
+                ),
+                style => style.label().to_string(),
+            };
+            format!("{:<12} {}", s.cm_style, value)
+        }
+        MenuAction::CustomFirstTo => {
+            format!("{:<12} {}", s.cm_first_to, settings.custom.wins_needed)
+        }
+        MenuAction::CustomZone => format!(
+            "{:<12} {}",
+            s.cm_zone,
+            if settings.custom.zone { "ON" } else { "OFF" }
+        ),
+        MenuAction::CustomMargin => {
+            let value = if settings.custom.margin_secs == 0 {
+                "OFF".to_string()
+            } else {
+                format!("{}s", settings.custom.margin_secs)
+            };
+            format!("{:<12} {}", s.cm_margin, value)
+        }
+        MenuAction::CustomSpeed => {
+            let value = if settings.custom.speed_level == 0 {
+                s.cm_speed_auto.to_string()
+            } else {
+                format!("LV {}", settings.custom.speed_level)
+            };
+            format!("{:<12} {}", s.cm_speed, value)
+        }
+        MenuAction::CustomPlayerAtk => {
+            format!("{:<12} {}%", s.cm_player_atk, settings.custom.player_attack_pct)
+        }
+        MenuAction::CustomCpuAtk => {
+            format!("{:<12} {}%", s.cm_cpu_atk, settings.custom.cpu_attack_pct)
+        }
+        MenuAction::CustomGarbage => {
+            format!("{:<12} {}", s.cm_garbage, settings.custom.start_garbage)
+        }
+        MenuAction::CustomStart => s.cm_start.to_string(),
         MenuAction::Back => s.back.to_string(),
         _ => return None,
     })
@@ -935,6 +1071,7 @@ fn run_menu_action(
                 | AppState::SoloSelect
                 | AppState::ZoneSelect
                 | AppState::StageSelect
+                | AppState::CustomSetup
         ) {
             sfx.write(PlaySfx::new(Sfx::MenuBack));
             p.next_app.set(AppState::Title);
@@ -980,6 +1117,51 @@ fn run_menu_action(
             }
             MenuAction::ToggleFullscreen => {
                 s.fullscreen = !s.fullscreen;
+                true
+            }
+            MenuAction::CustomCpuLevel => {
+                s.custom.cpu_level =
+                    (s.custom.cpu_level as i32 + adjust).clamp(1, MAX_STAGE as i32) as u32;
+                true
+            }
+            MenuAction::CustomStyle => {
+                s.custom.cpu_style = s.custom.cpu_style.cycled(adjust);
+                true
+            }
+            MenuAction::CustomFirstTo => {
+                s.custom.wins_needed = (s.custom.wins_needed as i32 + adjust).clamp(1, 5) as u32;
+                true
+            }
+            MenuAction::CustomZone => {
+                s.custom.zone = !s.custom.zone;
+                true
+            }
+            MenuAction::CustomMargin => {
+                const STEPS: [u32; 5] = [0, 60, 90, 120, 180];
+                let i = STEPS
+                    .iter()
+                    .position(|&m| m == s.custom.margin_secs)
+                    .unwrap_or(0) as i32;
+                s.custom.margin_secs =
+                    STEPS[(i + adjust).rem_euclid(STEPS.len() as i32) as usize];
+                true
+            }
+            MenuAction::CustomSpeed => {
+                s.custom.speed_level = (s.custom.speed_level as i32 + adjust).clamp(0, 20) as u32;
+                true
+            }
+            MenuAction::CustomPlayerAtk => {
+                s.custom.player_attack_pct =
+                    (s.custom.player_attack_pct as i32 + adjust * 25).clamp(50, 200) as u32;
+                true
+            }
+            MenuAction::CustomCpuAtk => {
+                s.custom.cpu_attack_pct =
+                    (s.custom.cpu_attack_pct as i32 + adjust * 25).clamp(50, 200) as u32;
+                true
+            }
+            MenuAction::CustomGarbage => {
+                s.custom.start_garbage = (s.custom.start_garbage as i32 + adjust).clamp(0, 8) as u32;
                 true
             }
             _ => false,
@@ -1041,6 +1223,27 @@ fn run_menu_action(
             } else {
                 sfx.write(PlaySfx::new(Sfx::RotateFail));
             }
+        }
+        MenuAction::CustomSetup => {
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            p.next_app.set(AppState::CustomSetup);
+        }
+        MenuAction::CustomStart => {
+            *p.mode = GameMode::Custom;
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            p.next_app.set(AppState::Playing);
+        }
+        MenuAction::CustomZone => {
+            // Enter toggles too (same as left/right).
+            p.settings.custom.zone = !p.settings.custom.zone;
+            save_settings(&p.settings);
+            sfx.write(PlaySfx::quiet(Sfx::MenuMove));
+        }
+        MenuAction::CustomStyle => {
+            // Enter cycles forward, same as pressing right.
+            p.settings.custom.cpu_style = p.settings.custom.cpu_style.cycled(1);
+            save_settings(&p.settings);
+            sfx.write(PlaySfx::quiet(Sfx::MenuMove));
         }
         MenuAction::Settings => {
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
@@ -1248,7 +1451,10 @@ fn setup_result_overlay(
         _ => None,
     };
     let stage = stage_label.map(|(_, s)| s);
-    let vs_match = stage_label.is_some();
+    let vs_match = matches!(
+        *mode,
+        GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } | GameMode::Custom
+    );
     let (headline, color) = match (result.as_deref(), stage_label) {
         (Some(SessionResult::RaceDone), _) => (t.finish.to_string(), Color::srgb(1.0, 0.9, 0.3)),
         (Some(SessionResult::VsWin { winner: 0 }), Some((prefix, s))) => (
@@ -1259,6 +1465,13 @@ fn setup_result_overlay(
             t.stage_failed.replace("{stage}", &format!("{prefix} {s:02}")),
             Color::srgb(0.9, 0.3, 0.3),
         ),
+        // Custom matches have no stage to clear: plain win/lose.
+        (Some(SessionResult::VsWin { winner: 0 }), None) if vs_match => {
+            (t.match_win.to_string(), Color::srgb(1.0, 0.9, 0.3))
+        }
+        (Some(SessionResult::VsWin { .. }), None) if vs_match => {
+            (t.match_lose.to_string(), Color::srgb(0.9, 0.3, 0.3))
+        }
         _ => (t.game_over.to_string(), Color::srgb(0.9, 0.4, 0.4)),
     };
 

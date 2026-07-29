@@ -58,15 +58,16 @@ fn main() -> AppExit {
         .insert_resource(ClearColor(Color::srgb(0.02, 0.025, 0.06)))
         .insert_resource(i18n::Locale(settings.language.resolve()))
         .insert_resource(settings)
-        // Dev helpers: BEVYTRIS_SCREEN=settings|solo|stages|zones|playing
-        // skips the title menu, BEVYTRIS_MODE=sprint|dig|zone|vs-stage-N|
-        // vs-easy|vs-normal|vs-hard preselects the game mode,
-        // BEVYTRIS_UNLOCK_ALL=1 opens all stages.
+        // Dev helpers: BEVYTRIS_SCREEN=settings|solo|stages|zones|custom|
+        // playing skips the title menu, BEVYTRIS_MODE=sprint|dig|zone|
+        // custom|vs-stage-N|vs-easy|vs-normal|vs-hard preselects the game
+        // mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages.
         .insert_state(match std::env::var("BEVYTRIS_SCREEN").as_deref() {
             Ok("settings") => AppState::Settings,
             Ok("solo") => AppState::SoloSelect,
             Ok("stages") => AppState::StageSelect,
             Ok("zones") => AppState::ZoneSelect,
+            Ok("custom") => AppState::CustomSetup,
             Ok("playing") => AppState::Playing,
             _ => AppState::Title,
         })
@@ -74,6 +75,7 @@ fn main() -> AppExit {
             Ok("sprint") => GameMode::Sprint,
             Ok("dig") => GameMode::Dig,
             Ok("zone") => GameMode::ZoneBattle { stage: 15 },
+            Ok("custom") => GameMode::Custom,
             Ok("vs-easy") => GameMode::VsCpu { stage: 5 },
             Ok("vs-normal") => GameMode::VsCpu { stage: 15 },
             Ok("vs-hard") => GameMode::VsCpu { stage: 25 },

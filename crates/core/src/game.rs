@@ -248,6 +248,17 @@ impl Game {
         self.incoming.iter().map(|(n, _)| n).sum()
     }
 
+    /// Back-to-back armed: the next difficult clear will chain.
+    pub fn b2b_armed(&self) -> bool {
+        self.b2b_armed
+    }
+
+    /// Combo counter as the game tracks it: -1 when the previous lock did
+    /// not clear lines, otherwise the 0-based streak position.
+    pub fn combo(&self) -> i32 {
+        self.combo
+    }
+
     /// Margin-time attack multiplier: x1 until `margin_time`, then x1.5,
     /// stepping up every 30 s (x2, x3) and capping at x4. Long rounds
     /// escalate until somebody falls.
@@ -499,6 +510,24 @@ impl Game {
         self.lock_active();
     }
 
+    /// Drop the active piece to its ghost position WITHOUT locking — the
+    /// CPU's stand-in for a human holding max-SDF soft drop. Keeping the
+    /// piece live lets a rotation follow (spins, tucks).
+    pub fn sonic_drop(&mut self) {
+        if self.game_over {
+            return;
+        }
+        let target = self.ghost();
+        let distance = self.active.y - target.y;
+        if distance > 0 {
+            self.active = target;
+            self.last_rotation_kick = None;
+            self.score += distance as u64;
+            self.events.push(GameEvent::SoftDropStep);
+            self.note_descent();
+        }
+    }
+
     pub fn hold(&mut self) {
         if self.game_over {
             return;
@@ -557,46 +586,8 @@ impl Game {
         self.events.push(GameEvent::TopOut);
     }
 
-    /// (filled corners, filled "front" corners) around a locked T piece.
-    fn t_corner_counts(&self) -> (u32, u32) {
-        let p = &self.active;
-        let corners = [(0, 0), (2, 0), (0, 2), (2, 2)];
-        // Corners adjacent to the flat "nose" of the T for each rotation.
-        let front: [(i8, i8); 2] = match p.rot {
-            Rot::R0 => [(0, 2), (2, 2)],
-            Rot::R1 => [(2, 2), (2, 0)],
-            Rot::R2 => [(0, 0), (2, 0)],
-            Rot::R3 => [(0, 0), (0, 2)],
-        };
-        let mut filled = 0;
-        let mut front_filled = 0;
-        for (cx, cy) in corners {
-            if self.board.is_blocked(p.x + cx, p.y + cy) {
-                filled += 1;
-                if front.contains(&(cx, cy)) {
-                    front_filled += 1;
-                }
-            }
-        }
-        (filled, front_filled)
-    }
-
     fn detect_tspin(&self) -> Option<ClearKind> {
-        if self.active.kind != PieceKind::T {
-            return None;
-        }
-        let kick = self.last_rotation_kick?;
-        let (filled, front_filled) = self.t_corner_counts();
-        if filled < 3 {
-            return None;
-        }
-        // Full T-spin: both front corners filled, or the piece reached its
-        // spot via the last (fifth) kick test — the TST/fin exception.
-        if front_filled == 2 || kick == 4 {
-            Some(ClearKind::TSpin)
-        } else {
-            Some(ClearKind::TSpinMini)
-        }
+        t_spin_kind(&self.board, &self.active, self.last_rotation_kick)
     }
 
     fn lock_active(&mut self) {
@@ -736,24 +727,7 @@ impl Game {
         self.score += gained;
 
         // --- Attack (VS garbage) ------------------------------------------
-        let mut attack: u32 = match (kind, lines) {
-            (ClearKind::Normal, 2) => 1,
-            (ClearKind::Normal, 3) => 2,
-            (ClearKind::Normal, 4) => 4,
-            (ClearKind::TSpinMini, 2) => 1,
-            (ClearKind::TSpin, 1) => 2,
-            (ClearKind::TSpin, 2) => 4,
-            (ClearKind::TSpin, 3) => 6,
-            _ => 0,
-        };
-        if b2b {
-            attack += 1;
-        }
-        const COMBO_BONUS: [u32; 12] = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5];
-        attack += COMBO_BONUS[(combo as usize).min(COMBO_BONUS.len() - 1)];
-        if perfect_clear {
-            attack += 10;
-        }
+        let mut attack = attack_for(kind, lines, b2b, combo, perfect_clear);
         // Margin time: long rounds scale everyone's attack to force an end.
         attack = (attack as f32 * self.attack_multiplier()).floor() as u32;
         // Line clears cancel queued garbage before sending the remainder.
@@ -852,6 +826,72 @@ impl Game {
         // Note: garbage only ever rises between a lock and the next spawn,
         // so there is never a live falling piece to push out of the way;
         // `spawn_active` performs the real block-out check right after.
+    }
+}
+
+/// Garbage rows a clear sends before margin-time scaling and cancelling:
+/// the guideline-style attack table plus back-to-back, combo and
+/// perfect-clear bonuses. Shared by the game and the AI planner so the
+/// CPU values moves exactly as they will pay out.
+pub fn attack_for(kind: ClearKind, lines: u32, b2b: bool, combo: u32, perfect_clear: bool) -> u32 {
+    let mut attack: u32 = match (kind, lines) {
+        (ClearKind::Normal, 2) => 1,
+        (ClearKind::Normal, 3) => 2,
+        (ClearKind::Normal, 4) => 4,
+        (ClearKind::TSpinMini, 2) => 1,
+        (ClearKind::TSpin, 1) => 2,
+        (ClearKind::TSpin, 2) => 4,
+        (ClearKind::TSpin, 3) => 6,
+        _ => 0,
+    };
+    if b2b {
+        attack += 1;
+    }
+    const COMBO_BONUS: [u32; 12] = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5];
+    attack += COMBO_BONUS[(combo as usize).min(COMBO_BONUS.len() - 1)];
+    if perfect_clear {
+        attack += 10;
+    }
+    attack
+}
+
+/// Classify a T piece about to lock on `board` as a T-spin, a mini, or
+/// neither. `last_kick` is the SRS kick-table index of the final
+/// successful rotation, or None if the piece moved or fell afterwards
+/// (T-spins require the lock to follow a rotation). Shared by the game
+/// and the AI planner so both agree on what counts.
+pub fn t_spin_kind(board: &Board, piece: &ActivePiece, last_kick: Option<usize>) -> Option<ClearKind> {
+    if piece.kind != PieceKind::T {
+        return None;
+    }
+    let kick = last_kick?;
+    let corners = [(0, 0), (2, 0), (0, 2), (2, 2)];
+    // Corners adjacent to the flat "nose" of the T for each rotation.
+    let front: [(i8, i8); 2] = match piece.rot {
+        Rot::R0 => [(0, 2), (2, 2)],
+        Rot::R1 => [(2, 2), (2, 0)],
+        Rot::R2 => [(0, 0), (2, 0)],
+        Rot::R3 => [(0, 0), (0, 2)],
+    };
+    let mut filled = 0;
+    let mut front_filled = 0;
+    for (cx, cy) in corners {
+        if board.is_blocked(piece.x + cx, piece.y + cy) {
+            filled += 1;
+            if front.contains(&(cx, cy)) {
+                front_filled += 1;
+            }
+        }
+    }
+    if filled < 3 {
+        return None;
+    }
+    // Full T-spin: both front corners filled, or the piece reached its
+    // spot via the last (fifth) kick test — the TST/fin exception.
+    if front_filled == 2 || kick == 4 {
+        Some(ClearKind::TSpin)
+    } else {
+        Some(ClearKind::TSpinMini)
     }
 }
 

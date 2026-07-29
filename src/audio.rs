@@ -267,6 +267,7 @@ impl Plugin for GameAudioPlugin {
             .add_systems(OnEnter(AppState::SoloSelect), start_stage_select_bgm)
             .add_systems(OnEnter(AppState::ZoneSelect), start_stage_select_bgm)
             .add_systems(OnEnter(AppState::StageSelect), start_stage_select_bgm)
+            .add_systems(OnEnter(AppState::CustomSetup), start_stage_select_bgm)
             .add_systems(OnEnter(AppState::Playing), start_game_bgm)
             .add_systems(OnEnter(PlayState::Paused), pause_bgm)
             .add_systems(OnExit(PlayState::Paused), resume_bgm)

@@ -104,6 +104,10 @@ jobs:
             - Solo modes: Marathon, Sprint (40-line race) and Dig (cheese race) with personal bests
             - Two 30-stage VS CPU campaigns (first-to-n rounds, S-D grades): the classic ladder
               and ZONE BATTLE, whose time-stop super move charges by cancelling garbage
+            - CUSTOM MATCH: pick CPU level & style, first-to-N, zone, margin time, gravity,
+              attack handicaps and starting garbage
+            - CPU opponents plan like MisaMino / Cold Clear: beam search with soft-drop tucks,
+              SRS spins and self-built T-spin doubles at higher stages
             - SRS, 7-bag, hold, T-spins, B2B, combos, guideline scoring, margin time
             - Gamepad support, rebindable keys, DAS/ARR/SDF tuning, VSync & fullscreen (F11)
             - English / Japanese UI, auto-detected from the OS (switchable in settings)

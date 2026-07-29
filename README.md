@@ -6,15 +6,29 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
 
 ## Features
 
-- **Marathon mode** — classic single-player, guideline gravity curve, 10 lines per level
+- **Solo modes** — Marathon (classic endless, guideline gravity curve),
+  Sprint (40-line race) and Dig (cheese race), with persistent personal bests
 - **VS CPU mode** — a 30-stage ladder of computer opponents with distinct
-  personalities (Balanced / Rusher / Thinker), human-like blunder rates that
-  fade out as stages climb, garbage attack & cancellation rules modeled
-  after modern versus games, a **time-based gravity ramp** (both boards
-  speed up one level every 25 s, margin-time style — cleared lines never
-  change the pace), **first-to-2 rounds** (boss stages 10/20/30 are
-  first-to-3), and an **S/A/B/C/D grade** on every stage clear based on
-  dominance, attack-per-minute and style. Progress and best grades persist.
+  personalities (Balanced / Rusher / Thinker / Spinner), human-like blunder
+  rates that fade out as stages climb, garbage attack & cancellation rules
+  modeled after modern versus games, a **time-based gravity ramp** (both
+  boards speed up one level every 25 s — cleared lines never change the
+  pace), **margin time** (long rounds scale everyone's attack up),
+  **first-to-2 rounds** (boss stages 10/20/30 are first-to-3), and an
+  **S/A/B/C/D grade** on every stage clear based on dominance,
+  attack-per-minute and style. Progress and best grades persist.
+- **ZONE BATTLE** — a second 30-stage campaign with a Tetris-Effect-style
+  super move: cancelling or digging garbage charges a gauge; firing it stops
+  time, banks every cleared row at the bottom of the field and launches them
+  all as one attack when the zone ends.
+- **CUSTOM MATCH** — build your own versus rules: CPU level (1-30) and
+  playstyle, first-to-N, zone gauges on/off, margin time, fixed or ramping
+  gravity, per-side attack handicaps (50-200%) and starting garbage.
+- **Serious CPU opponents** — the AI plans like MisaMino / Cold Clear:
+  a pathfinding move generator (soft-drop tucks, SRS spins), beam search
+  over the preview queue, and an evaluation that tracks back-to-back,
+  combos and T-spin-double setups — high-stage CPUs build and fire
+  T-spins on their own.
 - **Guideline-compliant mechanics**
   - [Super Rotation System (SRS)](https://tetrisch.github.io/main/srs.html) with full JLSTZ / I wall-kick tables
   - 7-bag randomizer, hold, 5-piece preview, ghost piece
@@ -23,7 +37,10 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
   - Back-to-Back, combos, perfect clears, guideline scoring
   - Piece spawning in rows 21–22 with immediate drop, block-out / lock-out top-out rules
 - **Configurable controls** — every action can be rebound in the Settings menu;
-  DAS / ARR handling tuning and volume sliders included. Settings persist to disk.
+  DAS / ARR / SDF handling tuning and volume sliders included, plus gamepad
+  support with a fixed layout. Settings persist to disk.
+- **English / Japanese UI** — auto-detected from the OS language, switchable
+  in the settings.
 - **Flashy presentation** — HDR bloom on everything that matters, glow
   particles, hard-drop light trails, line-clear light bars, shockwave rings,
   screen shake, banners, confetti, starfield over a hand-painted space
@@ -66,6 +83,7 @@ cargo test -p bevytris-core
 | Rotate CW   | ↑           |
 | Rotate CCW  | Z           |
 | Hold        | C           |
+| Zone        | V           |
 | Pause       | Esc         |
 | Fullscreen  | F11         |
 
@@ -79,8 +97,11 @@ Settings are stored as RON at the platform config directory, e.g.
 ## Architecture
 
 - `crates/core` (`bevytris-core`) — engine-independent rules: board, pieces,
-  SRS kicks, 7-bag, gravity/lockdown, scoring, garbage, and the CPU opponent's
-  placement search (Dellacherie-style evaluation). Fully unit-tested.
+  SRS kicks, 7-bag, gravity/lockdown, scoring, garbage, the zone mechanic,
+  and the CPU opponent (pathfinding movegen + beam search over a
+  Dellacherie-style evaluation extended with attack and T-spin terms).
+  Fully unit-tested; `cargo run -p bevytris-core --example selfplay
+  --release` benchmarks the AI ladder headlessly.
 - `src/` — the Bevy app: rendering, input (DAS/ARR), menus, settings
   persistence, particles/shake/banner effects, and audio playback (CC0
   sample banks, with runtime pitch-shifting for combo chimes).

@@ -7,8 +7,8 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use crate::audio::{PlaySfx, Sfx};
-use crate::config::{Action, GameSettings};
-use crate::core::ai::{self, AiProfile, Plan};
+use crate::config::{Action, CustomMatchConfig, GameSettings};
+use crate::core::ai::{self, AiProfile, Plan, Step};
 use crate::core::board::BOARD_WIDTH;
 use crate::core::game::{Game, GameEvent, Leveling, Stats, Zone};
 use crate::input::{PadAction, PadInput};
@@ -31,10 +31,30 @@ pub const DIG_ROWS: u32 = 10;
 /// rounds escalate to a finish instead of stalling.
 const MARGIN_TIME_SECS: f32 = 90.0;
 
+/// Cheese-style garbage: one hole per row, never directly above the
+/// previous row's hole (a shared well would trivialize it).
+fn stack_cheese(game: &mut Game, seed: u64, rows: u32) {
+    let mut rng = StdRng::seed_from_u64(seed ^ 0xD16);
+    let mut prev: i8 = -1;
+    for _ in 0..rows {
+        let mut hole = rng.random_range(0..BOARD_WIDTH);
+        while hole == prev {
+            hole = rng.random_range(0..BOARD_WIDTH);
+        }
+        game.board.add_garbage(1, hole);
+        prev = hole;
+    }
+}
+
 /// A fresh board for `mode`; VS boards use the timed gravity ramp, races
-/// pin gravity at level 1 and dig pre-stacks its cheese.
-fn new_game(seed: u64, mode: GameMode) -> Game {
-    let mut game = Game::new(seed, 1);
+/// pin gravity at level 1 and dig pre-stacks its cheese. Custom matches
+/// apply the user's rule sheet.
+fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
+    let start_level = match mode {
+        GameMode::Custom if custom.speed_level > 0 => custom.speed_level,
+        _ => 1,
+    };
+    let mut game = Game::new(seed, start_level);
     match mode {
         GameMode::VsCpu { .. } => {
             game.leveling = Leveling::Timed { seconds_per_level: VS_SECONDS_PER_LEVEL };
@@ -48,17 +68,22 @@ fn new_game(seed: u64, mode: GameMode) -> Game {
         GameMode::Sprint => game.leveling = Leveling::Fixed,
         GameMode::Dig => {
             game.leveling = Leveling::Fixed;
-            // Cheese-style garbage: one hole per row, never directly above
-            // the previous row's hole (a shared well would trivialize it).
-            let mut rng = StdRng::seed_from_u64(seed ^ 0xD16);
-            let mut prev: i8 = -1;
-            for _ in 0..DIG_ROWS {
-                let mut hole = rng.random_range(0..BOARD_WIDTH);
-                while hole == prev {
-                    hole = rng.random_range(0..BOARD_WIDTH);
-                }
-                game.board.add_garbage(1, hole);
-                prev = hole;
+            stack_cheese(&mut game, seed, DIG_ROWS);
+        }
+        GameMode::Custom => {
+            game.leveling = if custom.speed_level > 0 {
+                Leveling::Fixed
+            } else {
+                Leveling::Timed { seconds_per_level: VS_SECONDS_PER_LEVEL }
+            };
+            if custom.margin_secs > 0 {
+                game.margin_time = Some(custom.margin_secs as f32);
+            }
+            if custom.zone {
+                game.zone = Some(Zone::default());
+            }
+            if custom.start_garbage > 0 {
+                stack_cheese(&mut game, seed, custom.start_garbage);
             }
         }
         GameMode::Single => {}
@@ -98,6 +123,8 @@ pub struct CpuControlled {
     pub profile: AiProfile,
     rng: StdRng,
     plan: Option<Plan>,
+    /// Next step of the plan to execute.
+    step_idx: usize,
     /// `stats.pieces` value the current plan was made for.
     planned_piece: Option<u32>,
     hold_done: bool,
@@ -112,6 +139,7 @@ impl CpuControlled {
             profile,
             rng: StdRng::seed_from_u64(seed ^ 0xC0FFEE),
             plan: None,
+            step_idx: 0,
             planned_piece: None,
             hold_done: false,
             timer: profile.think_time,
@@ -121,6 +149,7 @@ impl CpuControlled {
 
     fn reset_for_round(&mut self) {
         self.plan = None;
+        self.step_idx = 0;
         self.planned_piece = None;
         self.hold_done = false;
         self.timer = self.profile.think_time;
@@ -212,13 +241,14 @@ pub struct MatchState {
 }
 
 impl MatchState {
-    fn new(mode: GameMode) -> Self {
+    fn new(mode: GameMode, custom: &CustomMatchConfig) -> Self {
         let (stage, wins_needed) = match mode {
             GameMode::Single | GameMode::Sprint | GameMode::Dig => (None, 1),
             // Boss stages (10/20/30) are first-to-3, the rest first-to-2.
             GameMode::VsCpu { stage } | GameMode::ZoneBattle { stage } => {
                 (Some(stage), if stage % 10 == 0 { 3 } else { 2 })
             }
+            GameMode::Custom => (None, custom.wins_needed.clamp(1, 5)),
         };
         Self {
             stage,
@@ -273,18 +303,19 @@ impl Plugin for SessionPlugin {
     }
 }
 
-fn spawn_session(mut commands: Commands, mode: Res<GameMode>) {
+fn spawn_session(mut commands: Commands, mode: Res<GameMode>, settings: Res<GameSettings>) {
     let seed: u64 = rand::rng().random();
+    let custom = settings.custom;
     // Both players get the same piece sequence (standard for versus play).
 
     commands.remove_resource::<SessionResult>();
     commands.remove_resource::<LastRound>();
     commands.remove_resource::<StageClear>();
     commands.remove_resource::<RaceResult>();
-    commands.insert_resource(MatchState::new(*mode));
+    commands.insert_resource(MatchState::new(*mode, &custom));
 
     commands.spawn((
-        GameSession { game: new_game(seed, *mode) },
+        GameSession { game: new_game(seed, *mode, &custom) },
         BoardIndex(0),
         HumanControlled,
         DasState::default(),
@@ -293,10 +324,19 @@ fn spawn_session(mut commands: Commands, mode: Res<GameMode>) {
         Visibility::default(),
     ));
 
-    if let GameMode::VsCpu { stage } | GameMode::ZoneBattle { stage } = *mode {
-        let profile = AiProfile::for_stage(stage);
+    let cpu_profile = match *mode {
+        GameMode::VsCpu { stage } | GameMode::ZoneBattle { stage } => {
+            Some(AiProfile::for_stage(stage))
+        }
+        GameMode::Custom => Some(AiProfile::for_stage_styled(
+            custom.cpu_level,
+            custom.cpu_style.archetype(),
+        )),
+        _ => None,
+    };
+    if let Some(profile) = cpu_profile {
         commands.spawn((
-            GameSession { game: new_game(seed, *mode) },
+            GameSession { game: new_game(seed, *mode, &custom) },
             BoardIndex(1),
             CpuControlled::new(profile, seed),
             DespawnOnExit(AppState::Playing),
@@ -479,6 +519,7 @@ fn cpu_drive(
             profile,
             rng,
             plan,
+            step_idx,
             planned_piece,
             hold_done,
             timer,
@@ -506,6 +547,7 @@ fn cpu_drive(
         if *planned_piece != Some(piece_id) {
             *planned_piece = Some(piece_id);
             *plan = None;
+            *step_idx = 0;
             *hold_done = false;
             *timer = profile.think_time;
             continue;
@@ -517,18 +559,19 @@ fn cpu_drive(
         }
 
         if plan.is_none() {
-            let next = game.queue.front().copied();
-            let next2 = game.queue.get(1).copied();
+            let queue: Vec<_> = game.queue.iter().copied().collect();
             *plan = ai::plan(
                 &game.board,
-                game.active.kind,
+                game.active,
                 game.hold,
-                next,
-                next2,
+                &queue,
                 game.incoming_total(),
+                game.b2b_armed(),
+                game.combo(),
                 profile,
                 rng,
             );
+            *step_idx = 0;
             if plan.is_none() {
                 // Nowhere to go: give up gracefully by dropping.
                 game.hard_drop();
@@ -536,38 +579,38 @@ fn cpu_drive(
             }
         }
 
-        let Some(p) = *plan else { continue };
+        let Some(p) = plan.as_ref() else { continue };
         *timer = profile.action_interval;
 
         // Execute one virtual key press per interval.
         if p.use_hold && !*hold_done {
             game.hold();
             *hold_done = true;
-            // After hold a different piece is active; the plan targeted it.
+            // After hold a different piece is active; the remaining steps
+            // target it (they were planned from its spawn state).
             continue;
         }
-        let rot_now = game.active.rot;
-        if rot_now != p.rot {
-            let cw_steps = (4 + p.rot.index() as i8 - rot_now.index() as i8) % 4;
-            let ok = if cw_steps == 3 {
-                game.rotate(false)
-            } else {
-                game.rotate(true)
-            };
-            if !ok {
-                // Rotation stuck (rare): just drop it where it is.
-                game.hard_drop();
+        match p.steps.get(*step_idx).copied() {
+            Some(step) => {
+                *step_idx += 1;
+                let ok = match step {
+                    Step::Left => game.move_horizontal(-1),
+                    Step::Right => game.move_horizontal(1),
+                    Step::Cw => game.rotate(true),
+                    Step::Ccw => game.rotate(false),
+                    Step::Drop => {
+                        game.sonic_drop();
+                        true
+                    }
+                };
+                if !ok {
+                    // Gravity (or a misread) drifted the piece off the
+                    // planned path: commit where it stands.
+                    game.hard_drop();
+                }
             }
-            continue;
+            None => game.hard_drop(),
         }
-        if game.active.x != p.x {
-            let dir = if p.x > game.active.x { 1 } else { -1 };
-            if !game.move_horizontal(dir) {
-                game.hard_drop();
-            }
-            continue;
-        }
-        game.hard_drop();
     }
 }
 
@@ -614,6 +657,7 @@ fn tick_games(
     mut next: ResMut<NextState<PlayState>>,
     mut commands: Commands,
     mode: Res<GameMode>,
+    settings: Res<GameSettings>,
     mut match_state: ResMut<MatchState>,
     mut progress: ResMut<Progress>,
     result: Option<Res<SessionResult>>,
@@ -641,8 +685,22 @@ fn tick_games(
         }
     }
 
-    // Route attacks to the other board.
+    // Route attacks to the other board. Custom matches scale each side's
+    // outgoing garbage by its handicap percentage (rounded half-up).
     for (from, attack) in outgoing {
+        let attack = if *mode == GameMode::Custom {
+            let pct = if from == 0 {
+                settings.custom.player_attack_pct
+            } else {
+                settings.custom.cpu_attack_pct
+            };
+            (attack * pct + 50) / 100
+        } else {
+            attack
+        };
+        if attack == 0 {
+            continue;
+        }
         for (_, index, mut session) in &mut query {
             if index.0 != from {
                 session.game.queue_garbage(attack);
@@ -705,7 +763,7 @@ fn tick_games(
             commands.insert_resource(SessionResult::SoloOver);
             next.set(PlayState::Finished);
         }
-        GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } => {
+        GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } | GameMode::Custom => {
             // Ties go to the player, generously.
             let winner = if dead.contains(&1) { 0 } else { 1 };
             if winner == 0 {
@@ -824,6 +882,7 @@ mod tests {
 fn round_over_tick(
     time: Res<Time>,
     mode: Res<GameMode>,
+    settings: Res<GameSettings>,
     mut timer: ResMut<RoundOverTimer>,
     mut match_state: ResMut<MatchState>,
     mut boards: Query<(
@@ -840,7 +899,7 @@ fn round_over_tick(
 
     let seed: u64 = rand::rng().random();
     for (mut session, cpu, das) in &mut boards {
-        session.game = new_game(seed, *mode);
+        session.game = new_game(seed, *mode, &settings.custom);
         if let Some(mut cpu) = cpu {
             cpu.reset_for_round();
         }

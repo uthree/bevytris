@@ -178,11 +178,21 @@ impl Plugin for RenderPlugin {
 pub fn setup_board_visuals(
     mut commands: Commands,
     mode: Res<GameMode>,
+    settings: Res<crate::config::GameSettings>,
     locale: Res<Locale>,
     boards: Query<(Entity, &BoardIndex), With<GameSession>>,
 ) {
     let s = locale.s();
-    let vs = matches!(*mode, GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. });
+    let vs = matches!(
+        *mode,
+        GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } | GameMode::Custom
+    );
+    // The zone gauge shows wherever the zone mechanic is live.
+    let zone_on = match *mode {
+        GameMode::ZoneBattle { .. } => true,
+        GameMode::Custom => settings.custom.zone,
+        _ => false,
+    };
     let cell = if vs { 26.0 } else { 30.0 };
 
     for (entity, index) in &boards {
@@ -287,9 +297,9 @@ pub fn setup_board_visuals(
                     DangerBar,
                 ));
 
-                // Zone gauge hugging the right edge (zone battle only):
+                // Zone gauge hugging the right edge (zone modes only):
                 // a dark track with a fill that charges bottom-up.
-                if matches!(*mode, GameMode::ZoneBattle { .. }) {
+                if zone_on {
                     parent.spawn((
                         Sprite::from_color(
                             Color::srgba(0.07, 0.1, 0.18, 0.9),
@@ -319,7 +329,8 @@ pub fn setup_board_visuals(
                         (s.left, HudText::Left),
                         (s.score, HudText::Score),
                     ],
-                    GameMode::ZoneBattle { .. } => vec![
+                    // The zone gauge label needs the bottom edge clear.
+                    _ if zone_on => vec![
                         (s.score, HudText::Score),
                         (s.level, HudText::Level),
                         (s.lines, HudText::Lines),
@@ -355,7 +366,7 @@ pub fn setup_board_visuals(
                     GameMode::Single => s.marathon,
                     GameMode::Sprint => s.sprint,
                     GameMode::Dig => s.dig,
-                    GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } => {
+                    GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } | GameMode::Custom => {
                         if index.0 == 0 {
                             s.you
                         } else {
@@ -412,6 +423,7 @@ fn sync_match_hud(
         (Some(stage), GameMode::ZoneBattle { .. }) => {
             format!("{} {stage:02}", s.zone_prefix)
         }
+        (_, GameMode::Custom) => s.custom_prefix.to_string(),
         (Some(stage), _) => format!("{} {stage:02}", s.stage_prefix),
         _ => return,
     };

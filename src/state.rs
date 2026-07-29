@@ -13,6 +13,8 @@ pub enum AppState {
     StageSelect,
     /// Difficulty picker for zone battle mode.
     ZoneSelect,
+    /// Rule sheet editor for a custom match.
+    CustomSetup,
     Playing,
     /// One-frame bounce state used to restart a match. A Playing→Playing
     /// identity transition would leave the `PlayState` sub-state untouched
@@ -47,6 +49,9 @@ pub enum GameMode {
     /// VS with the zone super move; `stage` picks the CPU profile but the
     /// match never touches campaign progress.
     ZoneBattle { stage: u32 },
+    /// VS under the user-authored rule sheet (`GameSettings::custom`);
+    /// never touches campaign progress.
+    Custom,
 }
 
 impl Default for GameMode {
