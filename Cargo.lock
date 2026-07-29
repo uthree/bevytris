@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "bevytris"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "bevy",
  "bevytris-core",

@@ -101,11 +101,15 @@ jobs:
             and run the `bevytris` binary. Keep the bundled `assets/` folder
             next to the executable.
 
-            - Marathon mode & a 30-stage VS CPU ladder (first-to-n rounds, S-D grades)
-            - SRS, 7-bag, hold, T-spins, B2B, combos, guideline scoring
-            - Rebindable keys, DAS/ARR/SDF tuning, VSync & fullscreen toggles (F11)
+            - Solo modes: Marathon, Sprint (40-line race) and Dig (cheese race) with personal bests
+            - Two 30-stage VS CPU campaigns (first-to-n rounds, S-D grades): the classic ladder
+              and ZONE BATTLE, whose time-stop super move charges by cancelling garbage
+            - SRS, 7-bag, hold, T-spins, B2B, combos, guideline scoring, margin time
+            - Gamepad support, rebindable keys, DAS/ARR/SDF tuning, VSync & fullscreen (F11)
+            - English / Japanese UI, auto-detected from the OS (switchable in settings)
             - HDR bloom, particles, shockwaves, board inertia, Misaki pixel font
-            - CC0 chiptune BGM by Juhani Junkala; all SFX procedurally synthesized
+            - CC0 chiptune BGM (Juhani Junkala, SketchyLogic); SFX from CC0 samples plus
+              procedurally synthesized bells and booms
 
             Full third-party credits in `assets/CREDITS.md`.
           files: |
