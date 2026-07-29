@@ -213,9 +213,11 @@ pub fn setup_board_visuals(
                 BoardKick::new(Vec3::new(x, -14.0, 0.0)),
             ))
             .with_children(|parent| {
-                // Backdrop panel.
+                // Backdrop panel — fully opaque: the background scenes are
+                // emissive and bloom-boosted, so even a few percent of
+                // bleed-through reads as ghost text inside the field.
                 parent.spawn((
-                    Sprite::from_color(Color::srgba(0.02, 0.02, 0.05, 0.92), Vec2::new(w + 8.0, h + 8.0)),
+                    Sprite::from_color(Color::srgb(0.02, 0.02, 0.05), Vec2::new(w + 8.0, h + 8.0)),
                     Transform::from_xyz(0.0, 0.0, 0.5),
                 ));
                 // Neon frame: four edge bars (pulsed by FrameGlow).
@@ -254,7 +256,7 @@ pub fn setup_board_visuals(
                     Transform::from_xyz(hold_x, hold_y + cell * 1.7, 2.0),
                 ));
                 parent.spawn((
-                    Sprite::from_color(Color::srgba(0.0, 0.0, 0.0, 0.55), Vec2::splat(cell * 4.0)),
+                    Sprite::from_color(Color::srgba(0.0, 0.0, 0.0, 0.85), Vec2::splat(cell * 4.0)),
                     Transform::from_xyz(hold_x, hold_y, 0.7),
                 ));
                 for i in 0..4 {
@@ -277,7 +279,7 @@ pub fn setup_board_visuals(
                 for slot in 0..5 {
                     let slot_y = h / 2.0 - cell * 1.2 - slot as f32 * cell * 2.4;
                     parent.spawn((
-                        Sprite::from_color(Color::srgba(0.0, 0.0, 0.0, 0.45), Vec2::splat(cell * 3.4)),
+                        Sprite::from_color(Color::srgba(0.0, 0.0, 0.0, 0.85), Vec2::splat(cell * 3.4)),
                         Transform::from_xyz(next_x, slot_y, 0.7),
                     ));
                     for i in 0..4 {

@@ -21,6 +21,7 @@ use rand::Rng;
 
 use crate::audio::PlaySfx;
 use crate::emissive;
+use crate::session::{GameSession, HumanControlled};
 use crate::state::AppState;
 
 /// Pseudo-spectrum band count for the visualizer.
@@ -81,9 +82,28 @@ struct SceneState {
     pinned: bool,
 }
 
-/// Per-scene display weight (0..1), refreshed every frame.
+/// Per-scene display weight (0..1), refreshed every frame, plus the
+/// eased master gate (0 in menus, 1 mid-game).
 #[derive(Resource, Default)]
-struct SceneWeights([f32; SCENE_COUNT]);
+struct SceneWeights {
+    scenes: [f32; SCENE_COUNT],
+    master: f32,
+}
+
+/// The scenes' own clock. Time stops with the player's zone: `speed`
+/// eases to 0, freezing every scene mid-motion, and eases back to 1
+/// when the zone ends.
+#[derive(Resource)]
+struct SceneClock {
+    t: f32,
+    speed: f32,
+}
+
+impl Default for SceneClock {
+    fn default() -> Self {
+        SceneClock { t: 0.0, speed: 1.0 }
+    }
+}
 
 pub struct BackgroundPlugin;
 
@@ -99,6 +119,7 @@ impl Plugin for BackgroundPlugin {
         app.init_resource::<StarSurge>()
             .init_resource::<AudioPulse>()
             .init_resource::<SceneWeights>()
+            .init_resource::<SceneClock>()
             .insert_resource(SceneState {
                 active: start,
                 prev: start,
@@ -112,13 +133,15 @@ impl Plugin for BackgroundPlugin {
                 Update,
                 (
                     update_audio_pulse,
+                    update_scene_clock,
                     update_scene_state,
                     animate_stars,
                     animate_formation,
                     animate_cyber,
                     animate_galaxy,
                     animate_visualizer,
-                ),
+                )
+                    .chain(),
             );
     }
 }
@@ -130,6 +153,7 @@ impl Plugin for BackgroundPlugin {
 #[derive(Component)]
 struct Star {
     speed: f32,
+    alpha: f32,
 }
 
 #[derive(Component)]
@@ -223,7 +247,8 @@ fn random_column_text(rng: &mut impl Rng) -> String {
 fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
     let mut rng = rand::rng();
 
-    // Global falling starfield (shared by every scene).
+    // Falling starfield for the menus; it fades out while the scenes run
+    // so each scene keeps its own distinct look.
     for _ in 0..110 {
         let b = rng.random_range(0.15..0.7);
         let size = rng.random_range(1.0..3.5);
@@ -236,6 +261,7 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
             ),
             Star {
                 speed: rng.random_range(12.0..55.0),
+                alpha: 0.8,
             },
         ));
     }
@@ -425,15 +451,34 @@ fn update_audio_pulse(
     }
 }
 
+/// Ease the scene clock: frozen while the player's zone runs.
+fn update_scene_clock(
+    time: Res<Time>,
+    sessions: Query<&GameSession, With<HumanControlled>>,
+    mut clock: ResMut<SceneClock>,
+) {
+    let dt = time.delta_secs();
+    let frozen = sessions.iter().any(|s| s.game.zone_active());
+    let target = if frozen { 0.0 } else { 1.0 };
+    clock.speed += (target - clock.speed) * (4.0 * dt).min(1.0);
+    if clock.speed < 0.01 {
+        clock.speed = 0.0;
+    }
+    clock.t += dt * clock.speed;
+}
+
 fn update_scene_state(
     time: Res<Time>,
     app_state: Res<State<AppState>>,
+    clock: Res<SceneClock>,
     mut state: ResMut<SceneState>,
     mut weights: ResMut<SceneWeights>,
     mut roots: Query<(&SceneRoot, &mut Visibility)>,
 ) {
     let dt = time.delta_secs();
-    state.fade = (state.fade + dt / FADE_SECS).min(1.0);
+    // Crossfades and the scene timer run on the (freezable) scene clock.
+    let dt_s = dt * clock.speed;
+    state.fade = (state.fade + dt_s / FADE_SECS).min(1.0);
 
     // The show only runs during gameplay; menus fade back to the quiet
     // starfield (in over ~2 s, out faster so the title calms right down).
@@ -442,7 +487,12 @@ fn update_scene_state(
     let target = if playing { 1.0 } else { 0.0 };
     state.master += (target - state.master).clamp(-rate, rate);
 
-    if !state.pinned && state.timer.tick(time.delta()).is_finished() {
+    if !state.pinned
+        && state
+            .timer
+            .tick(std::time::Duration::from_secs_f32(dt_s))
+            .is_finished()
+    {
         let mut rng = rand::rng();
         let mut next = rng.random_range(0..SCENE_COUNT);
         if next == state.active {
@@ -456,12 +506,13 @@ fn update_scene_state(
 
     let ease = state.fade * state.fade * (3.0 - 2.0 * state.fade);
     let master = state.master * state.master * (3.0 - 2.0 * state.master);
-    weights.0 = [0.0; SCENE_COUNT];
-    weights.0[state.prev] = (1.0 - ease) * master;
-    weights.0[state.active] = ease * master;
+    weights.scenes = [0.0; SCENE_COUNT];
+    weights.scenes[state.prev] = (1.0 - ease) * master;
+    weights.scenes[state.active] = ease * master;
+    weights.master = master;
 
     for (root, mut vis) in &mut roots {
-        let target = if weights.0[root.0] > 0.001 {
+        let target = if weights.scenes[root.0] > 0.001 {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -474,16 +525,19 @@ fn update_scene_state(
 
 fn animate_stars(
     time: Res<Time>,
+    weights: Res<SceneWeights>,
     mut surge: ResMut<StarSurge>,
-    mut query: Query<(&Star, &mut Transform)>,
+    mut query: Query<(&Star, &mut Transform, &mut Sprite)>,
 ) {
     let dt = time.delta_secs();
     surge.0 += (1.0 - surge.0) * (3.0 * dt).min(1.0);
-    for (star, mut tf) in &mut query {
+    let visible = 1.0 - weights.master;
+    for (star, mut tf, mut sprite) in &mut query {
         tf.translation.y -= star.speed * surge.0 * dt;
         if tf.translation.y < -380.0 {
             tf.translation.y = 380.0;
         }
+        sprite.color.set_alpha(star.alpha * visible);
     }
 }
 
@@ -562,16 +616,16 @@ fn figure_point(shape: usize, i: usize, n: usize, t: f32) -> Vec3 {
 }
 
 fn animate_formation(
-    time: Res<Time>,
+    clock: Res<SceneClock>,
     pulse: Res<AudioPulse>,
     weights: Res<SceneWeights>,
     mut dots: Query<(&FormationDot, &mut Transform, &mut Sprite)>,
 ) {
-    let weight = weights.0[FORMATION];
-    if weight <= 0.001 {
+    let weight = weights.scenes[FORMATION];
+    if weight <= 0.001 || clock.speed == 0.0 {
         return;
     }
-    let t = time.elapsed_secs();
+    let t = clock.t;
     // A new figure every 14 s, morphing over 3 s.
     let cycle = t / 14.0;
     let shape = cycle as usize;
@@ -608,16 +662,17 @@ fn animate_formation(
 
 fn animate_cyber(
     time: Res<Time>,
+    clock: Res<SceneClock>,
     pulse: Res<AudioPulse>,
     weights: Res<SceneWeights>,
     mut columns: Query<(&CodeColumn, &mut Transform, &mut Text2d, &mut TextColor), Without<CodeLine>>,
     mut lines: Query<(&CodeLine, &mut Transform, &mut TextColor), (With<CodeLine>, Without<CodeColumn>)>,
 ) {
-    let weight = weights.0[CYBER];
-    if weight <= 0.001 {
+    let weight = weights.scenes[CYBER];
+    if weight <= 0.001 || clock.speed == 0.0 {
         return;
     }
-    let dt = time.delta_secs();
+    let dt = time.delta_secs() * clock.speed;
     let speed_mul = 0.7 + 0.8 * pulse.energy;
     let mut rng = rand::rng();
     for (col, mut tf, mut text, mut color) in &mut columns {
@@ -644,6 +699,7 @@ fn animate_cyber(
 #[allow(clippy::too_many_arguments)]
 fn animate_galaxy(
     time: Res<Time>,
+    clock: Res<SceneClock>,
     pulse: Res<AudioPulse>,
     weights: Res<SceneWeights>,
     mut commands: Commands,
@@ -655,9 +711,9 @@ fn animate_galaxy(
         (Without<GalaxyStar>, Without<GalaxyArt>),
     >,
 ) {
-    let weight = weights.0[GALAXY];
-    let t = time.elapsed_secs();
-    let dt = time.delta_secs();
+    let weight = weights.scenes[GALAXY];
+    let t = clock.t;
+    let dt = time.delta_secs() * clock.speed;
 
     // Shooting stars live in world space and finish their run even while
     // the scene fades out.
@@ -675,7 +731,7 @@ fn animate_galaxy(
     if let Ok(mut sprite) = art.single_mut() {
         sprite.color.set_alpha(weight);
     }
-    if weight <= 0.001 {
+    if weight <= 0.001 || clock.speed == 0.0 {
         return;
     }
 
@@ -689,7 +745,11 @@ fn animate_galaxy(
         sprite.custom_size = Some(Vec2::splat(star.size * (0.8 + 0.4 * pulse.energy)));
     }
 
-    if timer.0.tick(time.delta()).is_finished() {
+    if timer
+        .0
+        .tick(std::time::Duration::from_secs_f32(dt))
+        .is_finished()
+    {
         let mut rng = rand::rng();
         timer.0 = Timer::from_seconds(rng.random_range(3.0..8.0), TimerMode::Once);
         let from_left = rng.random_bool(0.5);
@@ -715,17 +775,17 @@ fn animate_galaxy(
 // ---------------------------------------------------------------------------
 
 fn animate_visualizer(
-    time: Res<Time>,
+    clock: Res<SceneClock>,
     pulse: Res<AudioPulse>,
     weights: Res<SceneWeights>,
     mut bars: Query<(&EqBar, &mut Transform, &mut Sprite), Without<WaveDot>>,
     mut dots: Query<(&WaveDot, &mut Transform, &mut Sprite), Without<EqBar>>,
 ) {
-    let weight = weights.0[VISUALIZER];
-    if weight <= 0.001 {
+    let weight = weights.scenes[VISUALIZER];
+    if weight <= 0.001 || clock.speed == 0.0 {
         return;
     }
-    let t = time.elapsed_secs();
+    let t = clock.t;
     for (bar, mut tf, mut sprite) in &mut bars {
         let h = 8.0 + pulse.bands[bar.band] * 120.0;
         let size = sprite.custom_size.unwrap_or(Vec2::new(40.0, 8.0));

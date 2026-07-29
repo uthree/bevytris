@@ -6,9 +6,10 @@
 use bevy::audio::{AudioSource, PlaybackSettings, Volume};
 use bevy::prelude::*;
 use rand::seq::IndexedRandom;
+use std::collections::HashMap;
 
 use crate::config::GameSettings;
-use crate::session::SessionResult;
+use crate::session::{GameSession, HumanControlled, SessionResult};
 use crate::state::{AppState, PlayState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,38 +154,59 @@ impl SfxBank {
     }
 }
 
-fn build_sfx_bank(asset_server: &AssetServer) -> SfxBank {
-    SfxBank {
-        move_tick: asset_server.load("sfx/move.wav"),
-        rotate: asset_server.load("sfx/rotate.wav"),
-        rotate_fail: asset_server.load("sfx/rotate_fail.wav"),
-        soft_drop: asset_server.load("sfx/soft_drop.wav"),
-        hard_drop: asset_server.load("sfx/hard_drop.wav"),
-        lock: asset_server.load("sfx/lock.wav"),
-        hold: asset_server.load("sfx/hold.wav"),
-        hold_fail: asset_server.load("sfx/hold_fail.wav"),
-        clear_note: asset_server.load("sfx/clear_note.wav"),
-        tetris: asset_server.load("sfx/phrase_tetris.wav"),
-        tspin: asset_server.load("sfx/tspin.wav"),
-        tspin_clear: asset_server.load("sfx/phrase_tspin.wav"),
-        perfect: asset_server.load("sfx/phrase_perfect.wav"),
-        zone_ready: asset_server.load("sfx/zone_ready.wav"),
-        zone_boom: asset_server.load("sfx/zone_boom.wav"),
-        danger_alarm: asset_server.load("sfx/danger_alarm.wav"),
-        b2b: asset_server.load("sfx/b2b.wav"),
-        combo: asset_server.load("sfx/combo.wav"),
-        level_up: asset_server.load("sfx/level_up.wav"),
-        garbage_warn: asset_server.load("sfx/garbage_warn.wav"),
-        garbage_rise: asset_server.load("sfx/garbage_rise.wav"),
-        countdown: asset_server.load("sfx/countdown.wav"),
-        go: asset_server.load("sfx/go.wav"),
-        game_over: asset_server.load("sfx/game_over.wav"),
-        defeat: asset_server.load("sfx/defeat.wav"),
-        win: asset_server.load("sfx/win.wav"),
-        menu_move: asset_server.load("sfx/menu_move.wav"),
-        menu_select: asset_server.load("sfx/menu_select.wav"),
-        menu_back: asset_server.load("sfx/menu_back.wav"),
-    }
+/// Maps each dry sample to its lowpassed twin in assets/sfx/muffled
+/// (pre-rendered offline: 2x biquad LP at 750 Hz + soft limiter). While
+/// the player's zone runs, every effect plays the muffled variant.
+#[derive(Resource)]
+pub struct MuffledSfx(HashMap<AssetId<AudioSource>, Handle<AudioSource>>);
+
+fn build_sfx_bank(asset_server: &AssetServer) -> (SfxBank, MuffledSfx) {
+    let mut muffled = HashMap::new();
+    let mut load = |file: &str| -> Handle<AudioSource> {
+        let dry: Handle<AudioSource> = asset_server.load(format!("sfx/{file}"));
+        muffled.insert(dry.id(), asset_server.load(format!("sfx/muffled/{file}")));
+        dry
+    };
+    let bank = SfxBank {
+        move_tick: load("move.wav"),
+        rotate: load("rotate.wav"),
+        rotate_fail: load("rotate_fail.wav"),
+        soft_drop: load("soft_drop.wav"),
+        hard_drop: load("hard_drop.wav"),
+        lock: load("lock.wav"),
+        hold: load("hold.wav"),
+        hold_fail: load("hold_fail.wav"),
+        clear_note: load("clear_note.wav"),
+        tetris: load("phrase_tetris.wav"),
+        tspin: load("tspin.wav"),
+        tspin_clear: load("phrase_tspin.wav"),
+        perfect: load("phrase_perfect.wav"),
+        zone_ready: load("zone_ready.wav"),
+        zone_boom: load("zone_boom.wav"),
+        danger_alarm: load("danger_alarm.wav"),
+        b2b: load("b2b.wav"),
+        combo: load("combo.wav"),
+        level_up: load("level_up.wav"),
+        garbage_warn: load("garbage_warn.wav"),
+        garbage_rise: load("garbage_rise.wav"),
+        countdown: load("countdown.wav"),
+        go: load("go.wav"),
+        game_over: load("game_over.wav"),
+        defeat: load("defeat.wav"),
+        win: load("win.wav"),
+        menu_move: load("menu_move.wav"),
+        menu_select: load("menu_select.wav"),
+        menu_back: load("menu_back.wav"),
+    };
+    (bank, MuffledSfx(muffled))
+}
+
+/// True while the human player's zone super move is running — the cue
+/// for the whole soundscape to go underwater.
+pub fn player_zone_active(
+    sessions: &Query<&GameSession, With<HumanControlled>>,
+) -> bool {
+    sessions.iter().any(|s| s.game.zone_active())
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +266,10 @@ impl Plugin for GameAudioPlugin {
         // launch. Build them here, at plugin-build time (this plugin must be
         // added after DefaultPlugins, which registers the AssetServer).
         let asset_server = app.world().resource::<AssetServer>().clone();
-        app.insert_resource(build_sfx_bank(&asset_server));
+        let (bank, muffled) = build_sfx_bank(&asset_server);
+        app.insert_resource(bank);
+        app.insert_resource(muffled);
+        app.init_resource::<BgmDuck>();
         let track = |name: &'static str, file: &str| BgmTrack {
             name,
             handle: asset_server.load(format!("music/{file}")),
@@ -286,11 +311,21 @@ fn play_sfx(
     mut commands: Commands,
     mut reader: MessageReader<PlaySfx>,
     bank: Res<SfxBank>,
+    muffled: Res<MuffledSfx>,
     settings: Res<GameSettings>,
+    sessions: Query<&GameSession, With<HumanControlled>>,
 ) {
     let base = settings.sfx_linear();
+    // Inside the player's zone the world goes underwater: every effect
+    // swaps to its pre-rendered lowpassed variant.
+    let muffle = player_zone_active(&sessions);
     for msg in reader.read() {
-        let (handle, gain, speed) = bank.params(msg.sfx);
+        let (mut handle, gain, speed) = bank.params(msg.sfx);
+        if muffle {
+            if let Some(wet) = muffled.0.get(&handle.id()) {
+                handle = wet.clone();
+            }
+        }
         let volume = base * gain * msg.gain;
         if volume <= 0.001 {
             continue;
@@ -445,16 +480,33 @@ fn update_bgm_toasts(
     }
 }
 
-/// Keep the BGM sink in sync with the settings sliders.
+/// Smoothed BGM duck factor: the music sinks behind glass while the
+/// player's zone runs (we can't lowpass a live stream, so distance
+/// stands in for muffling — the SFX carry the real filter).
+#[derive(Resource)]
+struct BgmDuck(f32);
+
+impl Default for BgmDuck {
+    fn default() -> Self {
+        BgmDuck(1.0)
+    }
+}
+
+/// Keep the BGM sink in sync with the settings sliders and the zone duck.
 fn apply_bgm_volume(
+    time: Res<Time>,
     settings: Res<GameSettings>,
+    sessions: Query<&GameSession, With<HumanControlled>>,
+    mut duck: ResMut<BgmDuck>,
     mut sinks: Query<&mut AudioSink, With<Bgm>>,
 ) {
-    if !settings.is_changed() {
-        return;
-    }
-    for mut sink in &mut sinks {
-        sink.set_volume(Volume::Linear(settings.bgm_linear()));
+    let target = if player_zone_active(&sessions) { 0.3 } else { 1.0 };
+    let next = duck.0 + (target - duck.0) * (5.0 * time.delta_secs()).min(1.0);
+    if (next - duck.0).abs() > 0.0005 || settings.is_changed() {
+        duck.0 = next;
+        for mut sink in &mut sinks {
+            sink.set_volume(Volume::Linear(settings.bgm_linear() * duck.0));
+        }
     }
 }
 

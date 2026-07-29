@@ -14,7 +14,9 @@
   drop sounds (`move.wav`, `soft_drop.wav`, `hard_drop.wav`) are steeply
   high-passed (2.5-3 kHz) to sit light in the mix. The combo chime
   (`combo.wav`, from `sfx_coin_single3.wav`) is additionally pitch-shifted
-  at runtime as combos climb.
+  at runtime as combos climb. `assets/sfx/muffled/*.wav` are lowpassed
+  (2x biquad at 750 Hz, soft-limited) copies of every sound, played while
+  the zone super move stops time.
 - Although CC0 requires no attribution, we credit the author with pleasure.
 
 **"Impact Sounds"** by **Kenney** (kenney.nl)
