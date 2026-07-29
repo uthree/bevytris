@@ -554,9 +554,9 @@ const CODE_BLOCKS: [&str; 4] = [
 ];
 
 const GLYPHS: &[char] = &[
-    'ア', 'イ', 'ウ', 'エ', 'オ', 'カ', 'キ', 'ク', 'ケ', 'コ', 'サ', 'シ', 'ス', 'セ', 'ソ',
-    'タ', 'チ', 'ツ', 'テ', 'ト', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B',
-    'C', 'D', 'E', 'F', '<', '>', '/', '*', '+', '-', '=', '#', '$', '%', '&', '?',
+    'ア', 'イ', 'ウ', 'エ', 'オ', 'カ', 'キ', 'ク', 'ケ', 'コ', 'サ', 'シ', 'ス', 'セ', 'ソ', 'タ',
+    'チ', 'ツ', 'テ', 'ト', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D',
+    'E', 'F', '<', '>', '/', '*', '+', '-', '=', '#', '$', '%', '&', '?',
 ];
 
 fn random_column_text(rng: &mut impl Rng) -> String {
@@ -625,7 +625,8 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
         ))
         .with_children(|parent| {
             for i in 0..CODE_COLUMNS {
-                let x = -640.0 + (i as f32 + 0.5) * 1280.0 / CODE_COLUMNS as f32
+                let x = -640.0
+                    + (i as f32 + 0.5) * 1280.0 / CODE_COLUMNS as f32
                     + rng.random_range(-14.0..14.0);
                 parent.spawn((
                     Text2d::new(random_column_text(&mut rng)),
@@ -734,7 +735,10 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
             }
             for idx in 0..WAVE_DOTS {
                 parent.spawn((
-                    Sprite::from_color(emissive(Color::srgb(0.5, 0.95, 1.0), 1.4), Vec2::splat(4.0)),
+                    Sprite::from_color(
+                        emissive(Color::srgb(0.5, 0.95, 1.0), 1.4),
+                        Vec2::splat(4.0),
+                    ),
                     Transform::from_xyz(
                         -640.0 + (idx as f32 + 0.5) * 1280.0 / WAVE_DOTS as f32,
                         0.0,
@@ -799,17 +803,17 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
             // Gradient sky bands, top to horizon.
             for (i, &(r, g, b)) in SKY_COLORS.iter().enumerate() {
                 parent.spawn((
-                    Sprite::from_color(
-                        Color::srgba(r, g, b, 0.0),
-                        Vec2::new(1420.0, 96.0),
-                    ),
+                    Sprite::from_color(Color::srgba(r, g, b, 0.0), Vec2::new(1420.0, 96.0)),
                     Transform::from_xyz(0.0, 340.0 - (i as f32 + 0.5) * 92.0, -3.0),
                     SkyBand(i),
                 ));
             }
             // The square sun, slowly setting behind the ridge.
             parent.spawn((
-                Sprite::from_color(emissive(Color::srgb(1.0, 0.72, 0.32), 1.9), Vec2::splat(88.0)),
+                Sprite::from_color(
+                    emissive(Color::srgb(1.0, 0.72, 0.32), 1.9),
+                    Vec2::splat(88.0),
+                ),
                 Transform::from_xyz(-170.0, 120.0, -2.5),
                 SunsetSun,
             ));
@@ -841,15 +845,10 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
                 let count = (1480.0 / width) as usize + 1;
                 for i in 0..count {
                     let fi = i as f32 + layer as f32 * 0.5;
-                    let h = base
-                        + amp * ((fi * 1.31).sin() + 0.6 * (fi * 0.47 + 1.3).sin()).abs();
+                    let h = base + amp * ((fi * 1.31).sin() + 0.6 * (fi * 0.47 + 1.3).sin()).abs();
                     parent.spawn((
                         Sprite::from_color(color.with_alpha(0.0), Vec2::new(width, h)),
-                        Transform::from_xyz(
-                            -740.0 + (i as f32 + 0.5) * width,
-                            -370.0 + h / 2.0,
-                            z,
-                        ),
+                        Transform::from_xyz(-740.0 + (i as f32 + 0.5) * width, -370.0 + h / 2.0, z),
                         MountainBar,
                     ));
                 }
@@ -1062,12 +1061,21 @@ fn update_scene_state(
 
     // The show only runs during gameplay; menus fade back to the quiet
     // starfield (in over ~2 s, out faster so the title calms right down).
-    let playing = matches!(*app_state.get(), AppState::Playing | AppState::Restarting);
+    // The listening room is the exception: the whole point of it is to
+    // watch the score, so it gets the piano roll and nothing else.
+    let listening = *app_state.get() == AppState::Jukebox;
+    let playing = listening || matches!(*app_state.get(), AppState::Playing | AppState::Restarting);
     let rate = if playing { dt / 2.0 } else { dt / 0.8 };
     let target = if playing { 1.0 } else { 0.0 };
     state.master += (target - state.master).clamp(-rate, rate);
 
-    if !state.pinned && state.timer.tick(time.delta()).is_finished() {
+    if listening {
+        state.active = PIANOROLL;
+        state.prev = PIANOROLL;
+        state.fade = 1.0;
+    }
+
+    if !listening && !state.pinned && state.timer.tick(time.delta()).is_finished() {
         let mut rng = rand::rng();
         let mut next = rng.random_range(0..SCENE_COUNT);
         if next == state.active {
@@ -1239,8 +1247,7 @@ fn animate_formation(
         sprite.custom_size = Some(Vec2::splat(size));
         let depth_fade = ((persp - 0.55) * 1.6).clamp(0.15, 1.0);
         let alpha = weight * depth_fade * (0.6 + 0.4 * pulse.slow.min(1.0));
-        sprite.color =
-            emissive(palette.formation[dot.idx % 4], 2.4).with_alpha(alpha);
+        sprite.color = emissive(palette.formation[dot.idx % 4], 2.4).with_alpha(alpha);
     }
 }
 
@@ -1253,8 +1260,14 @@ fn animate_cyber(
     pulse: Res<AudioPulse>,
     weights: Res<SceneWeights>,
     palettes: Res<ScenePalettes>,
-    mut columns: Query<(&CodeColumn, &mut Transform, &mut Text2d, &mut TextColor), Without<CodeBlock>>,
-    mut blocks: Query<(&CodeBlock, &mut Transform, &mut TextColor), (With<CodeBlock>, Without<CodeColumn>)>,
+    mut columns: Query<
+        (&CodeColumn, &mut Transform, &mut Text2d, &mut TextColor),
+        Without<CodeBlock>,
+    >,
+    mut blocks: Query<
+        (&CodeBlock, &mut Transform, &mut TextColor),
+        (With<CodeBlock>, Without<CodeColumn>),
+    >,
 ) {
     let weight = weights.scenes[CYBER];
     if weight <= 0.001 {
@@ -1270,8 +1283,8 @@ fn animate_cyber(
             tf.translation.y = rng.random_range(420.0..640.0);
             **text = random_column_text(&mut rng);
         }
-        color.0 = emissive(palette.glyph, 1.5)
-            .with_alpha(weight * (0.28 + 0.25 * pulse.slow.min(1.0)));
+        color.0 =
+            emissive(palette.glyph, 1.5).with_alpha(weight * (0.28 + 0.25 * pulse.slow.min(1.0)));
     }
     for (block, mut tf, mut color) in &mut blocks {
         tf.translation.x -= block.speed * speed_mul * dt;
@@ -1438,8 +1451,8 @@ fn animate_garden(
             size
         };
         sprite.custom_size = Some(Vec2::splat(size));
-        sprite.color = emissive(color, boost)
-            .with_alpha(weight * fade * base_alpha * (0.4 + 0.6 * pop));
+        sprite.color =
+            emissive(color, boost).with_alpha(weight * fade * base_alpha * (0.4 + 0.6 * pop));
     }
 }
 
@@ -1483,9 +1496,8 @@ fn animate_fractal(
         let small_fade = ((px - 2.0) / 6.0).clamp(0.0, 1.0);
         let f = cell.depth as f32 / 3.0;
         let color = palette.eq.0.mix(&palette.eq.1, f);
-        sprite.color = emissive(color, 1.1).with_alpha(
-            weight * 0.19 * big_fade * small_fade * (0.7 + 0.3 * pulse.slow.min(1.0)),
-        );
+        sprite.color = emissive(color, 1.1)
+            .with_alpha(weight * 0.19 * big_fade * small_fade * (0.7 + 0.3 * pulse.slow.min(1.0)));
     }
 }
 
@@ -1499,11 +1511,20 @@ fn animate_sunset(
     weights: Res<SceneWeights>,
     mut bands: Query<
         (&SkyBand, &mut Sprite),
-        (Without<SunsetSun>, Without<SunsetCloud>, Without<MountainBar>),
+        (
+            Without<SunsetSun>,
+            Without<SunsetCloud>,
+            Without<MountainBar>,
+        ),
     >,
     mut sun: Query<
         (&mut Transform, &mut Sprite),
-        (With<SunsetSun>, Without<SkyBand>, Without<SunsetCloud>, Without<MountainBar>),
+        (
+            With<SunsetSun>,
+            Without<SkyBand>,
+            Without<SunsetCloud>,
+            Without<MountainBar>,
+        ),
     >,
     mut clouds: Query<
         (&SunsetCloud, &mut Transform, &mut Sprite),
@@ -1511,7 +1532,12 @@ fn animate_sunset(
     >,
     mut mountains: Query<
         &mut Sprite,
-        (With<MountainBar>, Without<SunsetSun>, Without<SkyBand>, Without<SunsetCloud>),
+        (
+            With<MountainBar>,
+            Without<SunsetSun>,
+            Without<SkyBand>,
+            Without<SunsetCloud>,
+        ),
     >,
 ) {
     let weight = weights.scenes[SUNSET];
@@ -1529,8 +1555,8 @@ fn animate_sunset(
     if let Ok((mut tf, mut sprite)) = sun.single_mut() {
         let cycle = (t / 70.0).fract();
         tf.translation.y = 300.0 - 540.0 * cycle;
-        sprite.color = emissive(Color::srgb(1.0, 0.72, 0.32), 1.6 + 0.5 * pulse.slow)
-            .with_alpha(weight);
+        sprite.color =
+            emissive(Color::srgb(1.0, 0.72, 0.32), 1.6 + 0.5 * pulse.slow).with_alpha(weight);
     }
     for (cloud, mut tf, mut sprite) in &mut clouds {
         tf.translation.x += cloud.speed * (0.6 + 0.8 * pulse.slow) * dt;
@@ -1650,19 +1676,16 @@ fn animate_visualizer(
         };
         let f = bar.band as f32 / (BANDS - 1) as f32;
         let color = palette.eq.0.mix(&palette.eq.1, f);
-        sprite.color =
-            emissive(color, 1.3).with_alpha(weight * if bar.top { 0.14 } else { 0.26 });
+        sprite.color = emissive(color, 1.3).with_alpha(weight * if bar.top { 0.14 } else { 0.26 });
     }
     for (dot, mut tf, mut sprite) in &mut dots {
         let f = dot.idx as f32 / WAVE_DOTS as f32;
         let band = pulse.bands[(dot.idx * BANDS / WAVE_DOTS).min(BANDS - 1)];
-        let y = (f * 21.0 + t * 3.2).sin() * (10.0 + 70.0 * band)
-            + (f * 9.0 - t * 1.4).sin() * 8.0;
+        let y = (f * 21.0 + t * 3.2).sin() * (10.0 + 70.0 * band) + (f * 9.0 - t * 1.4).sin() * 8.0;
         tf.translation.y = y;
         sprite.color = emissive(palette.wave, 1.4).with_alpha(weight * 0.3);
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // PIANOROLL
@@ -1764,7 +1787,11 @@ fn animate_pianoroll(
             x: cx,
             y,
             w: if drum { 9.0 } else { w },
-            h: if drum { 9.0 } else { 9.0 * (0.75 + 0.25 * n.vel as f32 / 127.0) },
+            h: if drum {
+                9.0
+            } else {
+                9.0 * (0.75 + 0.25 * n.vel as f32 / 127.0)
+            },
             color: palette.formation[voice_hue(n.voice)],
             alpha: base_alpha * edge * global,
             glow,

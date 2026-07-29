@@ -58,9 +58,7 @@ pub enum Sfx {
 
 /// Semitone ladder for combo chimes (major pentatonic, two octaves):
 /// combo 1 plays the root, combo 11+ caps at +2 octaves.
-const COMBO_SEMITONES: [f32; 11] = [
-    0.0, 2.0, 4.0, 7.0, 9.0, 12.0, 14.0, 16.0, 19.0, 21.0, 24.0,
-];
+const COMBO_SEMITONES: [f32; 11] = [0.0, 2.0, 4.0, 7.0, 9.0, 12.0, 14.0, 16.0, 19.0, 21.0, 24.0];
 
 #[derive(Resource)]
 pub struct SfxBank {
@@ -208,9 +206,7 @@ fn build_sfx_bank(asset_server: &AssetServer) -> (SfxBank, MuffledSfx) {
 
 /// True while the human player's zone super move is running — the cue
 /// for the whole soundscape to go underwater.
-pub fn player_zone_active(
-    sessions: &Query<&GameSession, With<HumanControlled>>,
-) -> bool {
+pub fn player_zone_active(sessions: &Query<&GameSession, With<HumanControlled>>) -> bool {
     sessions.iter().any(|s| s.game.zone_active())
 }
 
@@ -379,7 +375,11 @@ fn apply_bgm_volume(
     mut duck: ResMut<BgmDuck>,
     mut sinks: Query<&mut AudioSink, With<Bgm>>,
 ) {
-    let target = if player_zone_active(&sessions) { 0.3 } else { 1.0 };
+    let target = if player_zone_active(&sessions) {
+        0.3
+    } else {
+        1.0
+    };
     let next = duck.0 + (target - duck.0) * (5.0 * time.delta_secs()).min(1.0);
     if (next - duck.0).abs() > 0.0005 || settings.is_changed() {
         duck.0 = next;

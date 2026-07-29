@@ -21,7 +21,7 @@
 //!   as the arrangement changes. See [`VOICE_PAN`].
 
 use crate::{
-    FRAME_RATE, Inst, InstDef, NoteEvent, SAMPLES_PER_FRAME, SAMPLE_RATE, VOICE_COUNT, Voice,
+    FRAME_RATE, Inst, InstDef, NoteEvent, SAMPLE_RATE, SAMPLES_PER_FRAME, VOICE_COUNT, Voice,
     inst_def,
 };
 
@@ -156,7 +156,8 @@ fn build_samples() -> Vec<Vec<f32>> {
         Box::new(move |t, _| {
             p1 += tau * 188.0 / 48_000.0;
             p2 += tau * 331.0 / 48_000.0;
-            n1() * (-t * 21.0).exp() + p1.sin() * (-t * 16.0).exp() * 0.5
+            n1() * (-t * 21.0).exp()
+                + p1.sin() * (-t * 16.0).exp() * 0.5
                 + p2.sin() * (-t * 19.0).exp() * 0.3
         }),
     ));
@@ -177,7 +178,11 @@ fn build_samples() -> Vec<Vec<f32>> {
                     }
                 })
                 .sum::<f32>();
-            let tail = if t > 0.03 { (-(t - 0.03) * 26.0).exp() } else { 0.0 };
+            let tail = if t > 0.03 {
+                (-(t - 0.03) * 26.0).exp()
+            } else {
+                0.0
+            };
             let raw = n2() * (burst + tail * 0.5);
             // One-pole high-pass, so it snaps instead of thudding.
             hp += (raw - hp) * 0.12;
@@ -1095,7 +1100,10 @@ mod tests {
         let mut s = Synth::new();
         let mut buf = vec![0.0; 4800];
         s.render(&mut buf);
-        assert!(buf.iter().all(|v| v.abs() < 1e-4), "idle synth is not quiet");
+        assert!(
+            buf.iter().all(|v| v.abs() < 1e-4),
+            "idle synth is not quiet"
+        );
     }
 
     #[test]
@@ -1107,7 +1115,10 @@ mod tests {
         let early: f32 = buf[..4000].iter().map(|v| v.abs()).sum();
         let late: f32 = buf[20000..24000].iter().map(|v| v.abs()).sum();
         assert!(early > 1.0, "note produced no sound ({early})");
-        assert!(late < early * 0.1, "note never released ({early} -> {late})");
+        assert!(
+            late < early * 0.1,
+            "note never released ({early} -> {late})"
+        );
     }
 
     #[test]
@@ -1236,7 +1247,10 @@ mod tests {
         for midi in 21..=80 {
             let want = midi_to_hz(midi as f32);
             let cents = 1200.0 * (quantize_triangle(want) / want).log2();
-            assert!(cents.abs() < 12.0, "triangle midi {midi}: {cents} cents off");
+            assert!(
+                cents.abs() < 12.0,
+                "triangle midi {midi}: {cents} cents off"
+            );
         }
     }
 
@@ -1316,6 +1330,9 @@ mod tests {
         };
         let dry = bright(false);
         let wet = bright(true);
-        assert!(wet < dry * 0.5, "zone filter barely did anything: {dry} -> {wet}");
+        assert!(
+            wet < dry * 0.5,
+            "zone filter barely did anything: {dry} -> {wet}"
+        );
     }
 }

@@ -115,25 +115,43 @@ pub enum GameEvent {
     },
     RotationFailed,
     SoftDropStep,
-    HardDrop { distance: i8 },
+    HardDrop {
+        distance: i8,
+    },
     /// A T-piece locked as a T-spin / mini without clearing lines.
-    TSpinNoLines { mini: bool },
-    Locked { piece: ActivePiece },
+    TSpinNoLines {
+        mini: bool,
+    },
+    Locked {
+        piece: ActivePiece,
+    },
     Cleared(LineClear),
     Held,
     HoldBlocked,
-    LevelUp { level: u32 },
+    LevelUp {
+        level: u32,
+    },
     /// Margin time kicked in (or stepped up): attack now scales by this.
-    AttackRamp { multiplier: f32 },
-    GarbageRose { rows: u32 },
+    AttackRamp {
+        multiplier: f32,
+    },
+    GarbageRose {
+        rows: u32,
+    },
     /// The zone gauge just reached full charge.
     ZoneReady,
     /// The zone super move started.
     ZoneActivated,
     /// A lock during an active zone banked full rows at the bottom.
-    ZoneLines { banked: u32, total: u32 },
+    ZoneLines {
+        banked: u32,
+        total: u32,
+    },
     /// The zone ended: banked lines cleared and fired as one attack.
-    ZoneEnded { lines: u32, attack: u32 },
+    ZoneEnded {
+        lines: u32,
+        attack: u32,
+    },
     TopOut,
 }
 
@@ -331,7 +349,9 @@ impl Game {
 
         // Zone countdown; expiry fires the banked lines.
         let expired = match &mut self.zone {
-            Some(Zone { active: Some(t), .. }) => {
+            Some(Zone {
+                active: Some(t), ..
+            }) => {
                 *t -= dt;
                 *t <= 0.0
             }
@@ -654,8 +674,7 @@ impl Game {
             // clear contain garbage (they feed the zone gauge a little).
             let garbage_rows_cleared = (0..super::board::BOARD_HEIGHT)
                 .filter(|&y| {
-                    (0..super::board::BOARD_WIDTH)
-                        .all(|x| self.board.cell(x, y).is_some())
+                    (0..super::board::BOARD_WIDTH).all(|x| self.board.cell(x, y).is_some())
                         && (0..super::board::BOARD_WIDTH)
                             .any(|x| self.board.cell(x, y) == Some(super::board::Cell::Garbage))
                 })
@@ -701,7 +720,6 @@ impl Game {
         let kind = tspin.unwrap_or(ClearKind::Normal);
         let difficult = lines == 4 || tspin.is_some();
         let b2b = difficult && self.b2b_armed;
-
 
         self.combo += 1;
         let combo = self.combo as u32;
@@ -896,7 +914,11 @@ pub fn attack_for(kind: ClearKind, lines: u32, b2b: bool, combo: u32, perfect_cl
 /// successful rotation, or None if the piece moved or fell afterwards
 /// (T-spins require the lock to follow a rotation). Shared by the game
 /// and the AI planner so both agree on what counts.
-pub fn t_spin_kind(board: &Board, piece: &ActivePiece, last_kick: Option<usize>) -> Option<ClearKind> {
+pub fn t_spin_kind(
+    board: &Board,
+    piece: &ActivePiece,
+    last_kick: Option<usize>,
+) -> Option<ClearKind> {
     if piece.kind != PieceKind::T {
         return None;
     }
@@ -934,7 +956,7 @@ pub fn t_spin_kind(board: &Board, piece: &ActivePiece, last_kick: Option<usize>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{Cell, BOARD_WIDTH};
+    use crate::board::{BOARD_WIDTH, Cell};
 
     fn fill_row(game: &mut Game, y: i8, holes: &[i8]) {
         for x in 0..BOARD_WIDTH {
@@ -1060,7 +1082,12 @@ mod tests {
         fill_row(&mut game, 0, &[4]);
         game.board.set_cell(5, 2, Some(Cell::Garbage));
 
-        game.active = ActivePiece { kind: PieceKind::T, rot: Rot::R2, x: 3, y: 0 };
+        game.active = ActivePiece {
+            kind: PieceKind::T,
+            rot: Rot::R2,
+            x: 3,
+            y: 0,
+        };
         assert!(game.board.fits(&game.active));
         assert!(!game.board.fits(&game.active.shifted(0, -1)), "grounded");
         // The final action must be a rotation for T-spin detection; the
@@ -1092,14 +1119,20 @@ mod tests {
         game.board.set_cell(0, 0, Some(Cell::Garbage)); // front corner
         game.board.set_cell(0, 2, Some(Cell::Garbage)); // back corner
         game.board.set_cell(2, 2, Some(Cell::Garbage)); // back corner
-        game.active = ActivePiece { kind: PieceKind::T, rot: Rot::R2, x: 0, y: 0 };
+        game.active = ActivePiece {
+            kind: PieceKind::T,
+            rot: Rot::R2,
+            x: 0,
+            y: 0,
+        };
         assert!(game.board.fits(&game.active));
         game.last_rotation_kick = Some(0);
         game.hard_drop();
-        assert!(game
-            .events
-            .iter()
-            .any(|e| matches!(e, GameEvent::TSpinNoLines { mini: true })));
+        assert!(
+            game.events
+                .iter()
+                .any(|e| matches!(e, GameEvent::TSpinNoLines { mini: true }))
+        );
     }
 
     #[test]
@@ -1109,7 +1142,10 @@ mod tests {
         assert_eq!(game.incoming_total(), 3);
         game.hard_drop(); // lock without clearing → garbage rises
         assert_eq!(game.incoming_total(), 0);
-        let rose = game.events.iter().any(|e| matches!(e, GameEvent::GarbageRose { rows: 3 }));
+        let rose = game
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::GarbageRose { rows: 3 }));
         assert!(rose);
     }
 
@@ -1131,7 +1167,11 @@ mod tests {
         assert_eq!(game.hold, Some(first));
         assert_eq!(game.active.kind, next);
         game.hold();
-        assert!(game.events.iter().any(|e| matches!(e, GameEvent::HoldBlocked)));
+        assert!(
+            game.events
+                .iter()
+                .any(|e| matches!(e, GameEvent::HoldBlocked))
+        );
     }
 
     #[test]
@@ -1144,7 +1184,12 @@ mod tests {
                 game.board.set_cell(x, y, Some(Cell::Garbage));
             }
         }
-        game.active = ActivePiece { kind: PieceKind::O, rot: Rot::R0, x: 0, y: 21 };
+        game.active = ActivePiece {
+            kind: PieceKind::O,
+            rot: Rot::R0,
+            x: 0,
+            y: 21,
+        };
         game.hard_drop(); // locks at rows 21-22, columns 0-1
         assert!(!game.game_over, "side overflow must not end the game");
         assert_eq!(game.board.cell(0, 21), Some(Cell::Piece(PieceKind::O)));
@@ -1158,7 +1203,12 @@ mod tests {
                 game.board.set_cell(x, y, Some(Cell::Garbage));
             }
         }
-        game.active = ActivePiece { kind: PieceKind::O, rot: Rot::R0, x: 4, y: 21 };
+        game.active = ActivePiece {
+            kind: PieceKind::O,
+            rot: Rot::R0,
+            x: 4,
+            y: 21,
+        };
         game.hard_drop(); // locks at rows 21-22 inside the deadly columns
         assert!(game.game_over, "center overflow must still end the game");
     }
@@ -1202,25 +1252,41 @@ mod tests {
         game.hard_drop();
         assert_eq!(game.lines, 10);
         assert_eq!(game.level, 2);
-        assert!(game.events.iter().any(|e| matches!(e, GameEvent::LevelUp { level: 2 })));
+        assert!(
+            game.events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LevelUp { level: 2 }))
+        );
     }
 
     #[test]
     fn timed_leveling_rises_with_play_time() {
         let mut game = Game::new(1, 1);
-        game.leveling = Leveling::Timed { seconds_per_level: 1.0 };
+        game.leveling = Leveling::Timed {
+            seconds_per_level: 1.0,
+        };
         for _ in 0..132 {
             game.tick(1.0 / 60.0); // 2.2 s total
         }
         assert_eq!(game.level, 3);
-        assert!(game.events.iter().any(|e| matches!(e, GameEvent::LevelUp { level: 2 })));
-        assert!(game.events.iter().any(|e| matches!(e, GameEvent::LevelUp { level: 3 })));
+        assert!(
+            game.events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LevelUp { level: 2 }))
+        );
+        assert!(
+            game.events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LevelUp { level: 3 }))
+        );
     }
 
     #[test]
     fn timed_leveling_ignores_line_clears() {
         let mut game = Game::new(1, 1);
-        game.leveling = Leveling::Timed { seconds_per_level: 60.0 };
+        game.leveling = Leveling::Timed {
+            seconds_per_level: 60.0,
+        };
         game.lines = 29; // one more line would be level 4 under the lines rule
         fill_row(&mut game, 0, &[4]);
         force_piece(&mut game, PieceKind::I);
@@ -1234,7 +1300,12 @@ mod tests {
         game.hard_drop();
         assert_eq!(game.lines, 30);
         assert_eq!(game.level, 1, "line clears must not level up in timed mode");
-        assert!(!game.events.iter().any(|e| matches!(e, GameEvent::LevelUp { .. })));
+        assert!(
+            !game
+                .events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LevelUp { .. }))
+        );
     }
 
     /// Drop a vertical I into the hole at column 4 of row 0.
@@ -1307,18 +1378,29 @@ mod tests {
     #[test]
     fn zone_banks_cleared_rows_and_fires_on_end() {
         let mut game = Game::new(1, 1);
-        game.zone = Some(Zone { charge: 1.0, ..Default::default() });
+        game.zone = Some(Zone {
+            charge: 1.0,
+            ..Default::default()
+        });
         assert!(game.activate_zone());
         assert!(game.zone_active());
 
         fill_row(&mut game, 0, &[4]);
         drop_i_into_col4(&mut game);
         // The full row banks at the bottom instead of clearing.
-        assert!(!game.events.iter().any(|e| matches!(e, GameEvent::Cleared(_))));
-        assert!(game
-            .events
-            .iter()
-            .any(|e| matches!(e, GameEvent::ZoneLines { banked: 1, total: 1 })));
+        assert!(
+            !game
+                .events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Cleared(_)))
+        );
+        assert!(game.events.iter().any(|e| matches!(
+            e,
+            GameEvent::ZoneLines {
+                banked: 1,
+                total: 1
+            }
+        )));
         assert!(
             (0..BOARD_WIDTH).all(|x| game.board.cell(x, 0) == Some(Cell::Zone)),
             "bottom row must be a zone line"
@@ -1332,10 +1414,13 @@ mod tests {
         // Timer expiry fires the banked line as attack.
         game.tick(ZONE_DURATION);
         assert!(!game.zone_active());
-        assert!(game
-            .events
-            .iter()
-            .any(|e| matches!(e, GameEvent::ZoneEnded { lines: 1, attack: 1 })));
+        assert!(game.events.iter().any(|e| matches!(
+            e,
+            GameEvent::ZoneEnded {
+                lines: 1,
+                attack: 1
+            }
+        )));
         assert!(
             (0..BOARD_WIDTH).all(|x| game.board.cell(x, 0) != Some(Cell::Zone)),
             "zone rows must clear when the zone ends"
@@ -1346,7 +1431,10 @@ mod tests {
     #[test]
     fn zone_projected_attack_tracks_banked_lines() {
         let mut game = Game::new(1, 1);
-        game.zone = Some(Zone { charge: 1.0, ..Default::default() });
+        game.zone = Some(Zone {
+            charge: 1.0,
+            ..Default::default()
+        });
         assert_eq!(game.zone_projected_attack(), 0, "inactive zone: no threat");
         assert!(game.activate_zone());
         assert_eq!(game.zone_projected_attack(), 0, "nothing banked yet");
@@ -1357,16 +1445,22 @@ mod tests {
         assert_eq!(game.zone_projected_attack(), 5);
         // The projection matches what the zone actually fires.
         game.tick(ZONE_DURATION + 0.1);
-        assert!(game
-            .events
-            .iter()
-            .any(|e| matches!(e, GameEvent::ZoneEnded { lines: 6, attack: 5 })));
+        assert!(game.events.iter().any(|e| matches!(
+            e,
+            GameEvent::ZoneEnded {
+                lines: 6,
+                attack: 5
+            }
+        )));
     }
 
     #[test]
     fn garbage_stays_queued_during_zone() {
         let mut game = Game::new(3, 1);
-        game.zone = Some(Zone { charge: 1.0, ..Default::default() });
+        game.zone = Some(Zone {
+            charge: 1.0,
+            ..Default::default()
+        });
         assert!(game.activate_zone());
         game.queue_garbage(3);
         game.hard_drop(); // non-clearing lock during the zone
@@ -1379,7 +1473,11 @@ mod tests {
     #[test]
     fn margin_time_multiplier_ladder() {
         let mut game = Game::new(1, 1);
-        assert_eq!(game.attack_multiplier(), 1.0, "disabled without margin time");
+        assert_eq!(
+            game.attack_multiplier(),
+            1.0,
+            "disabled without margin time"
+        );
         game.margin_time = Some(90.0);
         for (t, expected) in [
             (0.0, 1.0),
@@ -1450,7 +1548,12 @@ mod tests {
         game.hard_drop();
         assert_eq!(game.lines, 40);
         assert_eq!(game.level, 1);
-        assert!(!game.events.iter().any(|e| matches!(e, GameEvent::LevelUp { .. })));
+        assert!(
+            !game
+                .events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LevelUp { .. }))
+        );
     }
 
     #[test]
@@ -1467,7 +1570,9 @@ mod tests {
     #[test]
     fn timed_leveling_caps_at_max_level() {
         let mut game = Game::new(1, 1);
-        game.leveling = Leveling::Timed { seconds_per_level: 1.0 };
+        game.leveling = Leveling::Timed {
+            seconds_per_level: 1.0,
+        };
         game.tick(500.0);
         assert_eq!(game.level, MAX_TIMED_LEVEL);
     }
@@ -1513,14 +1618,24 @@ mod tests {
                 game.board.set_cell(x, y, Some(Cell::Garbage));
             }
         }
-        game.active = ActivePiece { kind: PieceKind::O, rot: Rot::R0, x: 8, y: 19 };
+        game.active = ActivePiece {
+            kind: PieceKind::O,
+            rot: Rot::R0,
+            x: 8,
+            y: 19,
+        };
         game.queue_garbage(8);
         game.hard_drop(); // locks in place (rows 19-20), no line clear
         assert!(
-            game.events.iter().any(|e| matches!(e, GameEvent::GarbageRose { rows: 8 })),
+            game.events
+                .iter()
+                .any(|e| matches!(e, GameEvent::GarbageRose { rows: 8 })),
             "garbage should have risen"
         );
-        assert!(!game.game_over, "legal board must not top out after garbage rise");
+        assert!(
+            !game.game_over,
+            "legal board must not top out after garbage rise"
+        );
     }
 
     #[test]
@@ -1555,7 +1670,10 @@ mod tests {
         let mut game = Game::new(1, 1);
         let before = game.stats.pieces;
         game.tick(25.0); // piece falls all the way to the floor during this tick
-        assert_eq!(game.stats.pieces, before, "landing frame must not charge lock delay");
+        assert_eq!(
+            game.stats.pieces, before,
+            "landing frame must not charge lock delay"
+        );
         // But staying grounded afterwards locks normally.
         game.tick(0.6);
         assert!(game.stats.pieces > before);
@@ -1569,9 +1687,13 @@ mod tests {
         let mut game = Game::new(1, 1);
         force_piece(&mut game, PieceKind::T);
         assert!(game.rotate(true));
-        assert!(game
-            .events
-            .iter()
-            .any(|e| matches!(e, GameEvent::Rotated { kicked: false, cw: true, .. })));
+        assert!(game.events.iter().any(|e| matches!(
+            e,
+            GameEvent::Rotated {
+                kicked: false,
+                cw: true,
+                ..
+            }
+        )));
     }
 }

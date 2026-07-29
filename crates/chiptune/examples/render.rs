@@ -99,8 +99,8 @@ fn main() {
         elapsed: 0.0,
         ..Default::default()
     });
-    director.force_meter(meter);
-    director.force_kit(kit);
+    director.pin_meter(meter);
+    director.pin_kit(kit);
 
     let mut samples = vec![0.0f32; total * 2];
     let mut notes = Vec::new();

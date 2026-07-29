@@ -32,7 +32,6 @@ impl Action {
         Action::Zone,
         Action::Pause,
     ];
-
 }
 
 /// CPU playstyle selector for custom matches; maps onto the AI archetypes.
@@ -141,15 +140,94 @@ impl CustomMatchConfig {
 pub fn bindable_keys() -> Vec<KeyCode> {
     use KeyCode::*;
     vec![
-        KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM, KeyN,
-        KeyO, KeyP, KeyQ, KeyR, KeyS, KeyT, KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ, Digit0, Digit1,
-        Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9, ArrowLeft, ArrowRight,
-        ArrowUp, ArrowDown, Space, Enter, Escape, Tab, Backspace, ShiftLeft, ShiftRight,
-        ControlLeft, ControlRight, AltLeft, AltRight, Minus, Equal, BracketLeft, BracketRight,
-        Semicolon, Quote, Comma, Period, Slash, Backslash, Numpad0, Numpad1, Numpad2, Numpad3,
-        Numpad4, Numpad5, Numpad6, Numpad7, Numpad8, Numpad9, NumpadAdd, NumpadSubtract,
-        NumpadMultiply, NumpadDivide, NumpadEnter, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10,
-        F11, F12,
+        KeyA,
+        KeyB,
+        KeyC,
+        KeyD,
+        KeyE,
+        KeyF,
+        KeyG,
+        KeyH,
+        KeyI,
+        KeyJ,
+        KeyK,
+        KeyL,
+        KeyM,
+        KeyN,
+        KeyO,
+        KeyP,
+        KeyQ,
+        KeyR,
+        KeyS,
+        KeyT,
+        KeyU,
+        KeyV,
+        KeyW,
+        KeyX,
+        KeyY,
+        KeyZ,
+        Digit0,
+        Digit1,
+        Digit2,
+        Digit3,
+        Digit4,
+        Digit5,
+        Digit6,
+        Digit7,
+        Digit8,
+        Digit9,
+        ArrowLeft,
+        ArrowRight,
+        ArrowUp,
+        ArrowDown,
+        Space,
+        Enter,
+        Escape,
+        Tab,
+        Backspace,
+        ShiftLeft,
+        ShiftRight,
+        ControlLeft,
+        ControlRight,
+        AltLeft,
+        AltRight,
+        Minus,
+        Equal,
+        BracketLeft,
+        BracketRight,
+        Semicolon,
+        Quote,
+        Comma,
+        Period,
+        Slash,
+        Backslash,
+        Numpad0,
+        Numpad1,
+        Numpad2,
+        Numpad3,
+        Numpad4,
+        Numpad5,
+        Numpad6,
+        Numpad7,
+        Numpad8,
+        Numpad9,
+        NumpadAdd,
+        NumpadSubtract,
+        NumpadMultiply,
+        NumpadDivide,
+        NumpadEnter,
+        F1,
+        F2,
+        F3,
+        F4,
+        F5,
+        F6,
+        F7,
+        F8,
+        F9,
+        F10,
+        F11,
+        F12,
     ]
 }
 
@@ -163,8 +241,22 @@ pub fn key_name(key: KeyCode) -> String {
 pub fn bindable_pad_buttons() -> Vec<GamepadButton> {
     use GamepadButton::*;
     vec![
-        South, East, West, North, LeftTrigger, RightTrigger, LeftTrigger2, RightTrigger2,
-        Select, Start, LeftThumb, RightThumb, DPadUp, DPadDown, DPadLeft, DPadRight,
+        South,
+        East,
+        West,
+        North,
+        LeftTrigger,
+        RightTrigger,
+        LeftTrigger2,
+        RightTrigger2,
+        Select,
+        Start,
+        LeftThumb,
+        RightThumb,
+        DPadUp,
+        DPadDown,
+        DPadLeft,
+        DPadRight,
     ]
 }
 
@@ -337,7 +429,11 @@ impl GameSettings {
         // Steal the key from any action that currently uses it by swapping
         // bindings, so no action is ever left unbound or duplicated.
         let previous = self.key_for(action);
-        if let Some((&other, _)) = self.bindings.iter().find(|(a, k)| **k == key && **a != action) {
+        if let Some((&other, _)) = self
+            .bindings
+            .iter()
+            .find(|(a, k)| **k == key && **a != action)
+        {
             self.bindings.insert(other, previous);
         }
         self.bindings.insert(action, key);

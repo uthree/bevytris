@@ -1,6 +1,6 @@
 //! The playfield: a 10x40 grid of which the bottom 20 rows are visible.
 
-use super::piece::{cells, PieceKind, Rot};
+use super::piece::{PieceKind, Rot, cells};
 
 pub const BOARD_WIDTH: i8 = 10;
 pub const BOARD_HEIGHT: i8 = 40;
@@ -35,7 +35,12 @@ impl ActivePiece {
             PieceKind::O => (4, 20),
             _ => (3, 19),
         };
-        ActivePiece { kind, rot: Rot::R0, x, y }
+        ActivePiece {
+            kind,
+            rot: Rot::R0,
+            x,
+            y,
+        }
     }
 
     /// Board coordinates of the four occupied cells.
@@ -48,7 +53,11 @@ impl ActivePiece {
     }
 
     pub fn shifted(&self, dx: i8, dy: i8) -> Self {
-        ActivePiece { x: self.x + dx, y: self.y + dy, ..*self }
+        ActivePiece {
+            x: self.x + dx,
+            y: self.y + dy,
+            ..*self
+        }
     }
 
     pub fn rotated(&self, rot: Rot) -> Self {
@@ -93,7 +102,10 @@ impl Board {
     }
 
     pub fn fits(&self, piece: &ActivePiece) -> bool {
-        piece.board_cells().iter().all(|&(x, y)| !self.is_blocked(x, y))
+        piece
+            .board_cells()
+            .iter()
+            .all(|&(x, y)| !self.is_blocked(x, y))
     }
 
     /// Write the piece's cells into the grid.
@@ -120,9 +132,7 @@ impl Board {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.grid
-            .iter()
-            .all(|row| row.iter().all(|c| c.is_none()))
+        self.grid.iter().all(|row| row.iter().all(|c| c.is_none()))
     }
 
     /// Insert `count` garbage rows at the bottom, each with a single hole at
@@ -156,7 +166,8 @@ impl Board {
         }
         for _ in 0..full.len() {
             self.grid.pop();
-            self.grid.insert(0, [Some(Cell::Zone); BOARD_WIDTH as usize]);
+            self.grid
+                .insert(0, [Some(Cell::Zone); BOARD_WIDTH as usize]);
         }
         full.len() as u32
     }

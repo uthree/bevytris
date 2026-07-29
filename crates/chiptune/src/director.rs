@@ -25,9 +25,9 @@
 //! small allocations every second and a half; the buffers it reuses are
 //! kept, so after the first few bars it settles.
 
+use crate::NoteEvent;
 use crate::compose::{Composer, Context, Info};
 use crate::synth::Synth;
-use crate::NoteEvent;
 
 /// If the playhead somehow gets this far ahead of where the next bar was
 /// due — a long stall, or the very first frame — the score re-anchors to
@@ -43,9 +43,22 @@ const RESYNC_SLACK: u64 = crate::SAMPLE_RATE as u64 / 4;
 /// playhead, which is the only reason it is more than zero.
 const PLAN_AHEAD: u64 = crate::SAMPLE_RATE as u64 * 2;
 
+/// Any profile but this one — used to force a re-roll of a piece whose
+/// profile is not changing.
+fn other_profile(p: crate::compose::Profile) -> crate::compose::Profile {
+    use crate::compose::Profile::*;
+    if p == Ambient { Victory } else { Ambient }
+}
+
 pub struct Director {
     composer: Composer,
     synth: Synth,
+    seed: u64,
+    /// Overrides that survive a re-roll: the composer picks a meter and a
+    /// kit per piece, and a listener who has pinned one wants it to stay
+    /// pinned across the next piece too.
+    pin_meter: Option<crate::compose::Meter>,
+    pin_kit: Option<crate::compose::Kit>,
     ctx: Context,
     /// The bar currently being played out, in time order.
     bar: Vec<NoteEvent>,
@@ -62,6 +75,9 @@ impl Director {
         Director {
             composer: Composer::new(seed),
             synth: Synth::new(),
+            seed,
+            pin_meter: None,
+            pin_kit: None,
             ctx: Context::default(),
             bar: Vec::with_capacity(256),
             cursor: 0,
@@ -89,9 +105,76 @@ impl Director {
             // order with everything the new one is about to compose.
             self.fresh.clear();
             self.cut = true;
+            self.apply_pins();
         }
         self.synth.set_muffled(ctx.zone);
         self.ctx = ctx;
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Start again from a different seed, keeping the current profile.
+    /// The synthesizer carries on, so the change is a cut rather than a
+    /// gap.
+    pub fn reseed(&mut self, seed: u64) {
+        if seed == self.seed {
+            return;
+        }
+        self.seed = seed;
+        let profile = self.ctx.profile;
+        let intensity = self.ctx.intensity;
+        self.composer = Composer::new(seed);
+        // `set_profile` is what rolls a piece, and it no-ops on the
+        // profile it is already in — so nudge through another one.
+        self.composer.set_profile(other_profile(profile), intensity);
+        self.composer.set_profile(profile, intensity);
+        self.apply_pins();
+        self.synth.all_notes_off();
+        self.composer.seek(self.synth.pos());
+        self.bar.clear();
+        self.cursor = 0;
+        self.fresh.clear();
+        self.cut = true;
+    }
+
+    /// Hold the time signature across re-rolls; `None` lets each piece
+    /// choose its own again.
+    pub fn pin_meter(&mut self, meter: Option<crate::compose::Meter>) {
+        if meter != self.pin_meter {
+            self.pin_meter = meter;
+            self.apply_pins();
+            self.repiece();
+        }
+    }
+
+    /// Hold the drum kit across re-rolls.
+    pub fn pin_kit(&mut self, kit: Option<crate::compose::Kit>) {
+        if kit != self.pin_kit {
+            self.pin_kit = kit;
+            self.apply_pins();
+        }
+    }
+
+    fn apply_pins(&mut self) {
+        if let Some(m) = self.pin_meter {
+            self.composer.force_meter(m);
+        }
+        if let Some(k) = self.pin_kit {
+            self.composer.force_kit(k);
+        }
+    }
+
+    /// Restart the piece in place, after something that changed its
+    /// material rather than just its timbre.
+    fn repiece(&mut self) {
+        self.synth.all_notes_off();
+        self.composer.seek(self.synth.pos());
+        self.bar.clear();
+        self.cursor = 0;
+        self.fresh.clear();
+        self.cut = true;
     }
 
     pub fn context(&self) -> Context {
@@ -115,21 +198,6 @@ impl Director {
     /// Master trim, before the limiter.
     pub fn set_gain(&mut self, g: f32) {
         self.synth.set_gain(g);
-    }
-
-    /// Pin the time signature the piece rolled. Auditioning aid; `None`
-    /// leaves the roll alone.
-    pub fn force_meter(&mut self, meter: Option<crate::compose::Meter>) {
-        if let Some(m) = meter {
-            self.composer.force_meter(m);
-        }
-    }
-
-    /// Pin the drum kit the piece rolled.
-    pub fn force_kit(&mut self, kit: Option<crate::compose::Kit>) {
-        if let Some(k) = kit {
-            self.composer.force_kit(k);
-        }
     }
 
     /// Move everything planned since the last call into `out`. Notes are
@@ -317,6 +385,57 @@ mod tests {
     }
 
     #[test]
+    fn reseeding_starts_a_different_piece_without_a_gap() {
+        let mut d = Director::new(1);
+        d.set_context(ctx(Profile::VsIntense));
+        energy(&mut d, 48_000);
+        let before = d.info();
+        assert_eq!(d.seed(), 1);
+
+        d.reseed(0xC0FFEE);
+        assert_eq!(d.seed(), 0xC0FFEE);
+        assert!(d.take_cut(), "a reseed should report a cut");
+        assert_eq!(d.info().profile, Profile::VsIntense, "profile survived?");
+        // The clock does not jump, so the music does not gap.
+        let level = energy(&mut d, 48_000);
+        assert!(level > 100.0, "the new piece is silent ({level})");
+        let after = d.info();
+        assert_ne!(
+            (before.bpm, before.tonic, before.seed),
+            (after.bpm, after.tonic, after.seed)
+        );
+        // Reseeding to the same value is a no-op, not another cut.
+        d.take_cut();
+        d.reseed(0xC0FFEE);
+        assert!(!d.take_cut());
+    }
+
+    #[test]
+    fn pins_survive_a_reseed() {
+        use crate::compose::{Kit, Meter};
+        let mut d = Director::new(1);
+        d.set_context(ctx(Profile::VsIntense));
+        d.pin_meter(Some(Meter::Six));
+        d.pin_kit(Some(Kit::Sampled));
+        energy(&mut d, 24_000);
+        assert_eq!(d.info().meter, Meter::Six);
+        assert_eq!(d.info().kit, Kit::Sampled);
+
+        // Versus almost always rolls 4/4 and usually rolls the chip kit,
+        // so an unpinned engine would drift off these within a few seeds.
+        for seed in 2..12u64 {
+            d.reseed(seed);
+            energy(&mut d, 12_000);
+            assert_eq!(d.info().meter, Meter::Six, "meter came unpinned");
+            assert_eq!(d.info().kit, Kit::Sampled, "kit came unpinned");
+        }
+        // Releasing the pin lets the piece choose again.
+        d.pin_meter(None);
+        d.pin_kit(None);
+        energy(&mut d, 12_000);
+    }
+
+    #[test]
     fn draining_is_optional() {
         // A caller that never reads the feed must not make it grow
         // without bound.
@@ -325,7 +444,11 @@ mod tests {
         energy(&mut d, 48_000 * 120);
         let mut notes = Vec::new();
         d.drain_new_notes(&mut notes);
-        assert!(notes.len() <= 4096 + 512, "the feed grew to {}", notes.len());
+        assert!(
+            notes.len() <= 4096 + 512,
+            "the feed grew to {}",
+            notes.len()
+        );
     }
 
     #[test]

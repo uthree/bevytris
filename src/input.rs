@@ -11,7 +11,7 @@
 use bevy::prelude::*;
 use std::collections::HashSet;
 
-use crate::config::{bindable_pad_buttons, Action, GameSettings};
+use crate::config::{Action, GameSettings, bindable_pad_buttons};
 
 /// Fixed navigation actions (menus, overlays).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,11 +71,7 @@ impl Plugin for PadInputPlugin {
     }
 }
 
-fn poll_pads(
-    mut state: ResMut<PadInput>,
-    settings: Res<GameSettings>,
-    pads: Query<&Gamepad>,
-) {
+fn poll_pads(mut state: ResMut<PadInput>, settings: Res<GameSettings>, pads: Query<&Gamepad>) {
     let mut nav: HashSet<PadAction> = HashSet::new();
     let mut act: HashSet<Action> = HashSet::new();
     let mut raw: HashSet<GamepadButton> = HashSet::new();

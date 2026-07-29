@@ -39,7 +39,9 @@ pub fn parse_seed(raw: &str) -> Option<u64> {
     if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
         return u64::from_str_radix(hex, 16).ok();
     }
-    raw.parse().ok().or_else(|| u64::from_str_radix(raw, 16).ok())
+    raw.parse()
+        .ok()
+        .or_else(|| u64::from_str_radix(raw, 16).ok())
 }
 
 /// The eight hardware voices, in mix order.
@@ -502,7 +504,9 @@ const SAMPLED: InstDef = InstDef {
 
 const CRASH: InstDef = InstDef {
     vol: m(
-        &[15, 15, 14, 13, 12, 11, 10, 9, 9, 8, 7, 7, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1],
+        &[
+            15, 15, 14, 13, 12, 11, 10, 9, 9, 8, 7, 7, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1,
+        ],
         None,
     ),
     duty: 0,
@@ -537,12 +541,9 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
         Inst::Hat => &HAT,
         Inst::Shaker => &SHAKER,
         Inst::Crash => &CRASH,
-        Inst::PcmKick
-        | Inst::PcmSnare
-        | Inst::Clap
-        | Inst::Tom
-        | Inst::Riser
-        | Inst::Impact => &SAMPLED,
+        Inst::PcmKick | Inst::PcmSnare | Inst::Clap | Inst::Tom | Inst::Riser | Inst::Impact => {
+            &SAMPLED
+        }
     }
 }
 
@@ -639,10 +640,7 @@ mod tests {
             assert!(i.sample() < 6, "{i:?} points at a missing sample");
             assert_eq!(
                 i.is_drum(),
-                matches!(
-                    i.voice(),
-                    Voice::Perc | Voice::Hat | Voice::Sample
-                )
+                matches!(i.voice(), Voice::Perc | Voice::Hat | Voice::Sample)
             );
         }
         // Every sample instrument must claim a distinct slot.

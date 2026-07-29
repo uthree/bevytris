@@ -32,7 +32,7 @@ use bevy::audio::{AddAudioSource, ChannelCount, Decodable, SampleRate, Source, V
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 
-use bevytris_chiptune::compose::{Context, Info, Profile};
+use bevytris_chiptune::compose::{Context, Info, Kit, Meter, Profile};
 use bevytris_chiptune::director::Director;
 use bevytris_chiptune::{NoteEvent, SAMPLE_RATE, SAMPLES_PER_FRAME};
 
@@ -47,9 +47,20 @@ use crate::state::{AppState, GameMode, PlayState};
 /// Both mutexes are taken by the audio thread with `try_lock` once per
 /// 60 Hz frame and skipped on contention, so it never blocks; the main
 /// thread's own locks are uncontended microseconds.
+/// Everything the main thread asks the engine for.
+#[derive(Clone, Copy)]
+pub struct Wanted {
+    pub ctx: Context,
+    pub seed: u64,
+    /// Pinned time signature and drum kit; `None` lets each piece roll
+    /// its own. Only the listening room sets these.
+    pub meter: Option<Meter>,
+    pub kit: Option<Kit>,
+}
+
 pub struct Link {
     /// Main thread writes, audio thread reads.
-    ctx: Mutex<Context>,
+    want: Mutex<Wanted>,
     /// Audio thread writes, main thread reads.
     out: Mutex<Snapshot>,
     /// The musical clock, in stereo frames.
@@ -70,9 +81,9 @@ struct Snapshot {
 }
 
 impl Link {
-    fn new(ctx: Context) -> Self {
+    fn new(want: Wanted) -> Self {
         Link {
-            ctx: Mutex::new(ctx),
+            want: Mutex::new(want),
             out: Mutex::new(Snapshot::default()),
             pos: AtomicU64::new(0),
             energy: AtomicU32::new(0),
@@ -127,8 +138,11 @@ impl Iterator for ChiptuneDecoder {
             self.frame_acc = 0;
             // Both of these are try_lock: missing a frame costs 16 ms of
             // staleness and is far better than blocking the callback.
-            if let Ok(ctx) = self.link.ctx.try_lock() {
-                director.set_context(*ctx);
+            if let Ok(want) = self.link.want.try_lock() {
+                director.reseed(want.seed);
+                director.pin_meter(want.meter);
+                director.pin_kit(want.kit);
+                director.set_context(want.ctx);
             }
             if let Ok(mut out) = self.link.out.try_lock() {
                 out.info = Some(director.info());
@@ -202,6 +216,15 @@ pub struct MusicEngine {
     announce: bool,
 }
 
+impl MusicEngine {
+    /// What the engine reports it is actually playing, once it has caught
+    /// up with the last thing it was asked for. `None` for the frame or
+    /// two after a switch, which is exactly when naming it would be wrong.
+    pub fn now_playing(&self) -> Option<Info> {
+        self.info.filter(|i| i.profile == self.profile)
+    }
+}
+
 /// A window of the score around the playhead, for the piano-roll scene.
 /// The scene and the sequencer therefore share one clock; deriving beats
 /// from `Time::elapsed` instead would drift audibly inside a minute.
@@ -234,6 +257,34 @@ impl ScoreFeed {
     }
 }
 
+/// The listening room's settings. Only consulted while
+/// [`AppState::Jukebox`] is active, so the rest of the game is unaffected
+/// by whatever was left tuned in here.
+#[derive(Resource, Clone, Copy)]
+pub struct Jukebox {
+    pub seed: u64,
+    pub profile: Profile,
+    /// `None` means "whatever this piece rolled".
+    pub meter: Option<Meter>,
+    pub kit: Option<Kit>,
+    /// Stands in for the danger level, which there is no board to supply.
+    pub intensity: f32,
+    pub zone: bool,
+}
+
+impl Jukebox {
+    pub fn new(seed: u64) -> Self {
+        Jukebox {
+            seed,
+            profile: Profile::VsIntense,
+            meter: None,
+            kit: None,
+            intensity: 0.45,
+            zone: false,
+        }
+    }
+}
+
 /// `BEVYTRIS_MUSIC_DEBUG=1` puts a live readout of the music engine on
 /// screen and logs every piece change.
 ///
@@ -254,7 +305,13 @@ impl Plugin for MusicPlugin {
     fn build(&self, app: &mut App) {
         let seed = music_seed();
         let ctx = Context::default();
-        let link = Arc::new(Link::new(ctx));
+        let link = Arc::new(Link::new(Wanted {
+            ctx,
+            seed,
+            meter: None,
+            kit: None,
+        }));
+        app.insert_resource(Jukebox::new(seed));
         // Built here rather than in a Startup system: bevy_state runs the
         // initial state's OnEnter before PreStartup, and that hook already
         // wants to pick a profile.
@@ -339,8 +396,15 @@ fn start_stream(
 
 /// Which musical personality belongs to a given place in the game.
 /// `PlayState` only exists inside `Playing`, hence the `Option`.
-fn profile_for(app: AppState, play: Option<PlayState>, mode: GameMode) -> Profile {
+fn profile_for(
+    app: AppState,
+    play: Option<PlayState>,
+    mode: GameMode,
+    jukebox: Profile,
+) -> Profile {
     match app {
+        // The listening room picks its own.
+        AppState::Jukebox => jukebox,
         AppState::Playing | AppState::Restarting => {
             if play == Some(PlayState::Finished) {
                 Profile::Victory
@@ -360,9 +424,15 @@ fn choose_profile(
     app_state: Res<State<AppState>>,
     play_state: Option<Res<State<PlayState>>>,
     mode: Res<GameMode>,
+    jukebox: Res<Jukebox>,
     mut engine: ResMut<MusicEngine>,
 ) {
-    let profile = profile_for(*app_state.get(), play_state.map(|s| *s.get()), *mode);
+    let profile = profile_for(
+        *app_state.get(),
+        play_state.map(|s| *s.get()),
+        *mode,
+        jukebox.profile,
+    );
     if profile != engine.profile {
         let was = engine.profile;
         engine.profile = profile;
@@ -384,11 +454,14 @@ fn choose_profile(
 /// the context, and collect whatever it composed since last frame.
 fn drive_music(
     time: Res<Time>,
+    app_state: Res<State<AppState>>,
+    jukebox: Res<Jukebox>,
     danger: Option<Res<DangerLevel>>,
     sessions: Query<&GameSession, With<HumanControlled>>,
     mut engine: ResMut<MusicEngine>,
     mut feed: ResMut<ScoreFeed>,
 ) {
+    let listening = *app_state.get() == AppState::Jukebox;
     let mut raw = danger.map(|d| d.0[0]).unwrap_or(0.0) * 0.62;
     let mut zone = false;
     for s in &sessions {
@@ -398,6 +471,11 @@ fn drive_music(
         raw += 0.14 * (s.game.combo().max(0) as f32 / 6.0).min(1.0);
         zone |= s.game.zone_active();
     }
+    if listening {
+        // No board to read, so the listener supplies the dial directly.
+        raw = jukebox.intensity;
+        zone = jukebox.zone;
+    }
     let raw = raw.clamp(0.0, 1.0);
     // Asymmetric follower, same shape as the danger vignette's: rises
     // quickly, falls back slowly enough that one lucky clear does not
@@ -406,14 +484,23 @@ fn drive_music(
     engine.intensity += (raw - engine.intensity) * (rate * time.delta_secs()).min(1.0);
 
     // Parameters in.
-    if let Ok(mut ctx) = engine.link.clone().ctx.lock() {
-        *ctx = Context {
+    if let Ok(mut want) = engine.link.clone().want.lock() {
+        want.ctx = Context {
             profile: engine.profile,
             intensity: engine.intensity,
             transpose: engine.transpose,
             zone,
             elapsed: engine.profile_age,
         };
+        if listening {
+            want.seed = jukebox.seed;
+            want.meter = jukebox.meter;
+            want.kit = jukebox.kit;
+        } else {
+            want.seed = engine.seed;
+            want.meter = None;
+            want.kit = None;
+        }
     }
 
     // Score out.
@@ -478,7 +565,7 @@ fn announce_track(mut commands: Commands, mut engine: ResMut<MusicEngine>) {
     // until it has reported the *new* one. The snapshot lags the context
     // by up to a 60 Hz tick, so naming whatever is in it right after a
     // switch names the piece that just ended.
-    let Some(info) = engine.info.filter(|i| i.profile == engine.profile) else {
+    let Some(info) = engine.now_playing() else {
         return;
     };
     engine.announce = false;
@@ -549,7 +636,12 @@ mod tests {
     fn stream() -> ChiptuneStream {
         ChiptuneStream {
             director: Mutex::new(Some(Director::new(1234))),
-            link: Arc::new(Link::new(Context::default())),
+            link: Arc::new(Link::new(Wanted {
+                ctx: Context::default(),
+                seed: 1234,
+                meter: None,
+                kit: None,
+            })),
         }
     }
 
@@ -569,12 +661,24 @@ mod tests {
             GameMode::ZoneBattle { stage: 15 },
             GameMode::Custom,
         ] {
-            for app in [Title, Settings, SoloSelect, StageSelect, ZoneSelect, CustomSetup] {
+            for app in [
+                Title,
+                Settings,
+                SoloSelect,
+                StageSelect,
+                ZoneSelect,
+                CustomSetup,
+            ] {
                 assert_eq!(
-                    profile_for(app, None, mode),
+                    profile_for(app, None, mode, Profile::VsIntense),
                     Profile::Ambient,
                     "{app:?} should stay on menu music"
                 );
+            }
+            // The listening room answers to its own dial, not the mode
+            // sitting behind it.
+            for want in Profile::ALL {
+                assert_eq!(profile_for(Jukebox, None, mode, want), want);
             }
             // A match is a match from the countdown onwards.
             for play in [
@@ -587,16 +691,23 @@ mod tests {
                     GameMode::Single | GameMode::Sprint | GameMode::Dig => Profile::SoloCalm,
                     _ => Profile::VsIntense,
                 };
-                assert_eq!(profile_for(Playing, Some(play), mode), want, "{mode:?}");
+                assert_eq!(
+                    profile_for(Playing, Some(play), mode, Profile::Ambient),
+                    want,
+                    "{mode:?}"
+                );
             }
             // The result screen is a fanfare regardless of mode.
             assert_eq!(
-                profile_for(Playing, Some(PlayState::Finished), mode),
+                profile_for(Playing, Some(PlayState::Finished), mode, Profile::Ambient),
                 Profile::Victory
             );
             // A restart bounces through Restarting with no PlayState at
             // all; the music must not fall back to the menu for that frame.
-            assert_ne!(profile_for(Restarting, None, mode), Profile::Ambient);
+            assert_ne!(
+                profile_for(Restarting, None, mode, Profile::Ambient),
+                Profile::Ambient
+            );
         }
     }
 
@@ -606,9 +717,9 @@ mod tests {
         let link = s.link.clone();
         let mut d = s.decoder();
         {
-            let mut ctx = link.ctx.lock().unwrap();
-            ctx.profile = Profile::VsIntense;
-            ctx.elapsed = 600.0;
+            let mut w = link.want.lock().unwrap();
+            w.ctx.profile = Profile::VsIntense;
+            w.ctx.elapsed = 600.0;
         }
         let level = energy(&mut d, 96_000);
         assert!(level > 100.0, "a second of music produced {level}");
@@ -623,9 +734,9 @@ mod tests {
         let link = s.link.clone();
         let mut d = s.decoder();
         {
-            let mut ctx = link.ctx.lock().unwrap();
-            ctx.profile = Profile::SoloCalm;
-            ctx.elapsed = 600.0;
+            let mut w = link.want.lock().unwrap();
+            w.ctx.profile = Profile::SoloCalm;
+            w.ctx.elapsed = 600.0;
         }
         energy(&mut d, 96_000 * 3);
         let out = link.out.lock().unwrap();
@@ -656,9 +767,9 @@ mod tests {
         let link = s.link.clone();
         let mut d = s.decoder();
         {
-            let mut ctx = link.ctx.lock().unwrap();
-            ctx.profile = Profile::VsIntense;
-            ctx.elapsed = 600.0;
+            let mut w = link.want.lock().unwrap();
+            w.ctx.profile = Profile::VsIntense;
+            w.ctx.elapsed = 600.0;
         }
         let mut left = 0.0f32;
         let mut right = 0.0f32;
@@ -681,14 +792,14 @@ mod tests {
         let s = stream();
         let link = s.link.clone();
         let mut d = s.decoder();
-        link.ctx.lock().unwrap().profile = Profile::Ambient;
+        link.want.lock().unwrap().ctx.profile = Profile::Ambient;
         energy(&mut d, 96_000);
         assert_eq!(
             link.out.lock().unwrap().info.unwrap().profile,
             Profile::Ambient
         );
 
-        link.ctx.lock().unwrap().profile = Profile::VsIntense;
+        link.want.lock().unwrap().ctx.profile = Profile::VsIntense;
         // Not a single frame yet: the snapshot must still say Ambient, so
         // a caller can tell it has not caught up.
         assert_eq!(
@@ -709,11 +820,11 @@ mod tests {
         let s = stream();
         let link = s.link.clone();
         let mut d = s.decoder();
-        link.ctx.lock().unwrap().profile = Profile::Ambient;
+        link.want.lock().unwrap().ctx.profile = Profile::Ambient;
         energy(&mut d, 96_000 * 3);
         let before = link.out.lock().unwrap().info.unwrap();
 
-        link.ctx.lock().unwrap().profile = Profile::VsIntense;
+        link.want.lock().unwrap().ctx.profile = Profile::VsIntense;
         // Half a second is more than enough: the switch lands on the next
         // 60 Hz tick and the new piece starts from there.
         energy(&mut d, 48_000);
@@ -730,10 +841,15 @@ mod tests {
         let render = || {
             let s = ChiptuneStream {
                 director: Mutex::new(Some(Director::new(0x1234_5678))),
-                link: Arc::new(Link::new(Context {
-                    profile: Profile::VsIntense,
-                    elapsed: 600.0,
-                    ..Default::default()
+                link: Arc::new(Link::new(Wanted {
+                    ctx: Context {
+                        profile: Profile::VsIntense,
+                        elapsed: 600.0,
+                        ..Default::default()
+                    },
+                    seed: 0x1234_5678,
+                    meter: None,
+                    kit: None,
                 })),
             };
             let mut d = s.decoder();

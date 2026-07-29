@@ -11,8 +11,8 @@ use std::collections::{HashSet, VecDeque};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use super::board::{ActivePiece, Board, BOARD_HEIGHT, BOARD_WIDTH, VISIBLE_HEIGHT};
-use super::game::{attack_for, t_spin_kind, ClearKind, DEADLY_COLS};
+use super::board::{ActivePiece, BOARD_HEIGHT, BOARD_WIDTH, Board, VISIBLE_HEIGHT};
+use super::game::{ClearKind, DEADLY_COLS, attack_for, t_spin_kind};
 use super::piece::{PieceKind, Rot};
 use super::srs::kicks;
 
@@ -387,12 +387,8 @@ fn simulate(board: &Board, piece: &ActivePiece, last_kick: Option<usize>) -> Sim
     let mut b = board.clone();
     b.lock(piece);
     let cleared_rows = b.clear_full_rows();
-    let piece_cells_eroded = cells
-        .iter()
-        .filter(|c| cleared_rows.contains(&c.1))
-        .count();
-    let spawn_blocked =
-        (3..=6).any(|x| b.cell(x, 20).is_some() || b.cell(x, 21).is_some());
+    let piece_cells_eroded = cells.iter().filter(|c| cleared_rows.contains(&c.1)).count();
+    let spawn_blocked = (3..=6).any(|x| b.cell(x, 20).is_some() || b.cell(x, 21).is_some());
     Sim {
         lines: cleared_rows.len() as u32,
         tspin,
@@ -548,7 +544,8 @@ fn board_score(b: &Board, profile: &AiProfile, t_soon: bool) -> f32 {
         0.0
     };
 
-    let mut score = -3.218 * row_transitions as f32 - 9.348 * col_transitions as f32
+    let mut score = -3.218 * row_transitions as f32
+        - 9.348 * col_transitions as f32
         - 7.899 * holes as f32
         - well_weight * wells as f32
         + well_bonus;
@@ -829,7 +826,11 @@ mod tests {
         // Think time never reaches the lock delay (0.5 s).
         for stage in 1..=MAX_STAGE {
             let p = AiProfile::for_stage(stage);
-            assert!(p.think_time < 0.5, "stage {stage} think_time {}", p.think_time);
+            assert!(
+                p.think_time < 0.5,
+                "stage {stage} think_time {}",
+                p.think_time
+            );
             assert!(p.action_interval >= 0.02);
         }
     }
@@ -1044,12 +1045,8 @@ mod tests {
         board.set_cell(0, 2, Some(Cell::Garbage));
         let start = ActivePiece::spawn(PieceKind::T);
         let covers = |ps: &[Placement]| {
-            ps.iter().any(|p| {
-                p.piece
-                    .board_cells()
-                    .iter()
-                    .any(|&(x, y)| x == 0 && y < 2)
-            })
+            ps.iter()
+                .any(|p| p.piece.board_cells().iter().any(|&(x, y)| x == 0 && y < 2))
         };
         assert!(
             covers(&reachable_placements(&board, start, true)),

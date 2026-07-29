@@ -176,7 +176,10 @@ mod tests {
     #[test]
     fn o_piece_rotation_invariant() {
         for rot in Rot::ALL {
-            assert_eq!(set(cells(PieceKind::O, rot)), set(cells(PieceKind::O, Rot::R0)));
+            assert_eq!(
+                set(cells(PieceKind::O, rot)),
+                set(cells(PieceKind::O, Rot::R0))
+            );
         }
     }
 

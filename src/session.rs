@@ -57,11 +57,15 @@ fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
     let mut game = Game::new(seed, start_level);
     match mode {
         GameMode::VsCpu { .. } => {
-            game.leveling = Leveling::Timed { seconds_per_level: VS_SECONDS_PER_LEVEL };
+            game.leveling = Leveling::Timed {
+                seconds_per_level: VS_SECONDS_PER_LEVEL,
+            };
             game.margin_time = Some(MARGIN_TIME_SECS);
         }
         GameMode::ZoneBattle { .. } => {
-            game.leveling = Leveling::Timed { seconds_per_level: VS_SECONDS_PER_LEVEL };
+            game.leveling = Leveling::Timed {
+                seconds_per_level: VS_SECONDS_PER_LEVEL,
+            };
             game.margin_time = Some(MARGIN_TIME_SECS);
             game.zone = Some(Zone::default());
         }
@@ -74,7 +78,9 @@ fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
             game.leveling = if custom.speed_level > 0 {
                 Leveling::Fixed
             } else {
-                Leveling::Timed { seconds_per_level: VS_SECONDS_PER_LEVEL }
+                Leveling::Timed {
+                    seconds_per_level: VS_SECONDS_PER_LEVEL,
+                }
             };
             if custom.margin_secs > 0 {
                 game.margin_time = Some(custom.margin_secs as f32);
@@ -101,7 +107,12 @@ fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
 /// Elapsed race time as "m:ss.cc".
 pub fn format_race_time(secs: f64) -> String {
     let ms = (secs * 1000.0).round() as u64;
-    format!("{}:{:02}.{:02}", ms / 60_000, ms / 1000 % 60, ms % 1000 / 10)
+    format!(
+        "{}:{:02}.{:02}",
+        ms / 60_000,
+        ms / 1000 % 60,
+        ms % 1000 / 10
+    )
 }
 
 /// One playfield (either the human's or the CPU's).
@@ -305,7 +316,8 @@ impl Plugin for SessionPlugin {
             )
             .add_systems(
                 Update,
-                pause_toggle.run_if(in_state(PlayState::Running).or_else(in_state(PlayState::Paused))),
+                pause_toggle
+                    .run_if(in_state(PlayState::Running).or_else(in_state(PlayState::Paused))),
             );
     }
 }
@@ -322,7 +334,9 @@ fn spawn_session(mut commands: Commands, mode: Res<GameMode>, settings: Res<Game
     commands.insert_resource(MatchState::new(*mode, &custom));
 
     commands.spawn((
-        GameSession { game: new_game(seed, *mode, &custom) },
+        GameSession {
+            game: new_game(seed, *mode, &custom),
+        },
         BoardIndex(0),
         HumanControlled,
         DasState::default(),
@@ -343,7 +357,9 @@ fn spawn_session(mut commands: Commands, mode: Res<GameMode>, settings: Res<Game
     };
     if let Some(profile) = cpu_profile {
         commands.spawn((
-            GameSession { game: new_game(seed, *mode, &custom) },
+            GameSession {
+                game: new_game(seed, *mode, &custom),
+            },
             BoardIndex(1),
             CpuControlled::new(profile, seed),
             DespawnOnExit(AppState::Playing),
@@ -429,8 +445,8 @@ fn human_input(
         || pad.action_just_pressed(Action::MoveRight);
     let left_down =
         keys.pressed(settings.key_for(Action::MoveLeft)) || pad.action_pressed(Action::MoveLeft);
-    let right_down = keys.pressed(settings.key_for(Action::MoveRight))
-        || pad.action_pressed(Action::MoveRight);
+    let right_down =
+        keys.pressed(settings.key_for(Action::MoveRight)) || pad.action_pressed(Action::MoveRight);
     let das_secs = settings.das_ms as f32 / 1000.0;
     let arr_secs = settings.arr_ms as f32 / 1000.0;
 
@@ -520,10 +536,7 @@ fn human_input(
     }
 }
 
-fn cpu_drive(
-    time: Res<Time>,
-    mut query: Query<(&mut GameSession, &mut CpuControlled)>,
-) {
+fn cpu_drive(time: Res<Time>, mut query: Query<(&mut GameSession, &mut CpuControlled)>) {
     for (mut session, mut cpu) in &mut query {
         let CpuControlled {
             profile,
@@ -542,7 +555,11 @@ fn cpu_drive(
 
         // Zone policy: fire when in trouble (tall stack or garbage on the
         // way); if the gauge just sits full for a while, use it anyway.
-        if game.zone.as_ref().is_some_and(|z| z.charge >= 1.0 && z.active.is_none()) {
+        if game
+            .zone
+            .as_ref()
+            .is_some_and(|z| z.charge >= 1.0 && z.active.is_none())
+        {
             *zone_full_secs += time.delta_secs();
             let stack = game.board.column_heights().into_iter().max().unwrap_or(0);
             if stack >= 10 || game.incoming_total() >= 4 || *zone_full_secs > 8.0 {
@@ -640,10 +657,8 @@ fn compute_grade(ms: &MatchState) -> Grade {
     let apm = ms.agg.attack as f32 / minutes;
     pts += (apm * 1.1).min(35.0);
     // Style: big clears, spins, combos, perfect clears.
-    let style = ms.agg.tetrises * 5
-        + ms.agg.tspins * 7
-        + ms.agg.max_combo * 2
-        + ms.agg.perfect_clears * 12;
+    let style =
+        ms.agg.tetrises * 5 + ms.agg.tspins * 7 + ms.agg.max_combo * 2 + ms.agg.perfect_clears * 12;
     pts += (style as f32).min(30.0);
 
     if pts >= 85.0 {
@@ -791,18 +806,28 @@ fn tick_games(
                 } else {
                     1
                 };
-                commands.insert_resource(SessionResult::VsWin { winner: match_winner });
+                commands.insert_resource(SessionResult::VsWin {
+                    winner: match_winner,
+                });
                 // Both VS campaigns grade wins; each unlocks its own track.
                 if match_winner == 0 {
                     let grade = compute_grade(&match_state);
                     match *mode {
                         GameMode::VsCpu { stage } => {
                             let new_best = progress.record_clear(stage, grade);
-                            commands.insert_resource(StageClear { stage, grade, new_best });
+                            commands.insert_resource(StageClear {
+                                stage,
+                                grade,
+                                new_best,
+                            });
                         }
                         GameMode::ZoneBattle { stage } => {
                             let new_best = progress.record_zone_clear(stage, grade);
-                            commands.insert_resource(StageClear { stage, grade, new_best });
+                            commands.insert_resource(StageClear {
+                                stage,
+                                grade,
+                                new_best,
+                            });
                         }
                         _ => {}
                     }
@@ -852,7 +877,7 @@ mod tests {
     #[test]
     fn dominant_fast_stylish_earns_s() {
         let agg = MatchAggregate {
-            attack: 64,          // 32 APM over 2 minutes
+            attack: 64, // 32 APM over 2 minutes
             tetrises: 2,
             tspins: 1,
             max_combo: 3,

@@ -3,9 +3,9 @@
 
 use bevy::prelude::*;
 
-use crate::core::board::{Cell, BOARD_WIDTH, VISIBLE_HEIGHT};
-use crate::core::game::{gravity_seconds, ZONE_DURATION};
-use crate::core::piece::{cells, PieceKind, Rot};
+use crate::core::board::{BOARD_WIDTH, Cell, VISIBLE_HEIGHT};
+use crate::core::game::{ZONE_DURATION, gravity_seconds};
+use crate::core::piece::{PieceKind, Rot, cells};
 use crate::i18n::Locale;
 use crate::session::{
     BoardIndex, Countdown, CpuControlled, GameSession, HumanControlled, MatchState,
@@ -251,7 +251,10 @@ pub fn setup_board_visuals(
                 let hold_y = h / 2.0 - cell * 1.2;
                 parent.spawn((
                     Text2d::new(s.hold),
-                    TextFont { font_size: FontSize::Px(cell * 0.62), ..default() },
+                    TextFont {
+                        font_size: FontSize::Px(cell * 0.62),
+                        ..default()
+                    },
                     TextColor(Color::srgb(0.6, 0.7, 0.8)),
                     Transform::from_xyz(hold_x, hold_y + cell * 1.7, 2.0),
                 ));
@@ -272,14 +275,20 @@ pub fn setup_board_visuals(
                 let next_x = w / 2.0 + cell * 2.8;
                 parent.spawn((
                     Text2d::new(s.next),
-                    TextFont { font_size: FontSize::Px(cell * 0.62), ..default() },
+                    TextFont {
+                        font_size: FontSize::Px(cell * 0.62),
+                        ..default()
+                    },
                     TextColor(Color::srgb(0.6, 0.7, 0.8)),
                     Transform::from_xyz(next_x, h / 2.0 + cell * 0.5, 2.0),
                 ));
                 for slot in 0..5 {
                     let slot_y = h / 2.0 - cell * 1.2 - slot as f32 * cell * 2.4;
                     parent.spawn((
-                        Sprite::from_color(Color::srgba(0.0, 0.0, 0.0, 0.85), Vec2::splat(cell * 3.4)),
+                        Sprite::from_color(
+                            Color::srgba(0.0, 0.0, 0.0, 0.85),
+                            Vec2::splat(cell * 3.4),
+                        ),
                         Transform::from_xyz(next_x, slot_y, 0.7),
                     ));
                     for i in 0..4 {
@@ -303,10 +312,7 @@ pub fn setup_board_visuals(
                 // a dark track with a fill that charges bottom-up.
                 if zone_on {
                     parent.spawn((
-                        Sprite::from_color(
-                            Color::srgba(0.07, 0.1, 0.18, 0.9),
-                            Vec2::new(7.0, h),
-                        ),
+                        Sprite::from_color(Color::srgba(0.07, 0.1, 0.18, 0.9), Vec2::new(7.0, h)),
                         Transform::from_xyz(w / 2.0 + 14.0, 0.0, 1.5),
                     ));
                     parent.spawn((
@@ -316,7 +322,10 @@ pub fn setup_board_visuals(
                     ));
                     parent.spawn((
                         Text2d::new(s.zone_gauge),
-                        TextFont { font_size: FontSize::Px(cell * 0.45), ..default() },
+                        TextFont {
+                            font_size: FontSize::Px(cell * 0.45),
+                            ..default()
+                        },
                         TextColor(Color::srgb(0.5, 0.6, 0.7)),
                         Transform::from_xyz(w / 2.0 + 14.0, -h / 2.0 - cell * 0.7, 2.0),
                     ));
@@ -350,13 +359,19 @@ pub fn setup_board_visuals(
                     let base_y = hold_y - cell * 3.2 - row as f32 * cell * 2.2;
                     parent.spawn((
                         Text2d::new(*label),
-                        TextFont { font_size: FontSize::Px(cell * 0.5), ..default() },
+                        TextFont {
+                            font_size: FontSize::Px(cell * 0.5),
+                            ..default()
+                        },
                         TextColor(Color::srgb(0.5, 0.6, 0.7)),
                         Transform::from_xyz(hud_x, base_y, 2.0),
                     ));
                     parent.spawn((
                         Text2d::new("0"),
-                        TextFont { font_size: FontSize::Px(cell * 0.7), ..default() },
+                        TextFont {
+                            font_size: FontSize::Px(cell * 0.7),
+                            ..default()
+                        },
                         TextColor(Color::WHITE),
                         Transform::from_xyz(hud_x, base_y - cell * 0.85, 2.0),
                         *marker,
@@ -378,7 +393,10 @@ pub fn setup_board_visuals(
                 };
                 parent.spawn((
                     Text2d::new(name),
-                    TextFont { font_size: FontSize::Px(cell * 0.75), ..default() },
+                    TextFont {
+                        font_size: FontSize::Px(cell * 0.75),
+                        ..default()
+                    },
                     TextColor(Color::srgb(0.85, 0.9, 1.0)),
                     Transform::from_xyz(0.0, h / 2.0 + cell * 1.5, 2.0),
                 ));
@@ -388,7 +406,10 @@ pub fn setup_board_visuals(
     // Central countdown text.
     commands.spawn((
         Text2d::new("3"),
-        TextFont { font_size: FontSize::Px(128.0), ..default() },
+        TextFont {
+            font_size: FontSize::Px(128.0),
+            ..default()
+        },
         TextColor(Color::srgb(1.0, 0.9, 0.3)),
         Transform::from_xyz(0.0, 40.0, 50.0),
         CountdownText,
@@ -399,7 +420,10 @@ pub fn setup_board_visuals(
     if vs {
         commands.spawn((
             Text2d::new(""),
-            TextFont { font_size: FontSize::Px(24.0), ..default() },
+            TextFont {
+                font_size: FontSize::Px(24.0),
+                ..default()
+            },
             TextColor(Color::srgb(0.85, 0.9, 1.0)),
             Transform::from_xyz(0.0, 332.0, 30.0),
             MatchHudText,
@@ -627,7 +651,11 @@ fn sync_hud(
                 }
                 HudText::Incoming => {
                     let n = game.incoming_total();
-                    let s = if n == 0 { "-".to_string() } else { format!("{n}!") };
+                    let s = if n == 0 {
+                        "-".to_string()
+                    } else {
+                        format!("{n}!")
+                    };
                     if **text != s {
                         **text = s;
                     }
@@ -675,7 +703,9 @@ fn sync_zone_gauge(
 ) {
     let t = time.elapsed_secs();
     for (session, theme, children) in &boards {
-        let Some(zone) = &session.game.zone else { continue };
+        let Some(zone) = &session.game.zone else {
+            continue;
+        };
         let h = theme.cell * VISIBLE_HEIGHT as f32;
         let (frac, color) = match zone.active {
             Some(remaining) => {

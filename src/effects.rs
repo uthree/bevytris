@@ -13,7 +13,7 @@ use crate::audio::{PlaySfx, Sfx, SfxBank};
 use crate::background::StarSurge;
 use crate::config::GameSettings;
 use crate::core::board::{BOARD_WIDTH, VISIBLE_HEIGHT};
-use crate::core::game::{ClearKind, GameEvent, GARBAGE_CAP_PER_PIECE};
+use crate::core::game::{ClearKind, GARBAGE_CAP_PER_PIECE, GameEvent};
 use crate::emissive;
 use crate::render::{BoardKick, BoardTheme, FrameGlow};
 use crate::session::{BoardEvent, BoardIndex, GameSession, SessionResult};
@@ -50,10 +50,9 @@ impl Plugin for EffectsPlugin {
             )
             .add_systems(OnEnter(PlayState::Finished), finish_fanfare)
             .add_systems(Update, run_celebration)
-            .add_systems(
-                OnExit(PlayState::Finished),
-                |mut commands: Commands| commands.remove_resource::<Celebration>(),
-            )
+            .add_systems(OnExit(PlayState::Finished), |mut commands: Commands| {
+                commands.remove_resource::<Celebration>()
+            })
             .add_systems(
                 PostUpdate,
                 apply_camera_shake.before(TransformSystems::Propagate),
@@ -364,7 +363,11 @@ fn update_banners(
         }
         let t = 1.0 - b.life / b.max_life;
         // Pop in, drift up, fade out.
-        let scale = if t < 0.15 { 0.3 + t / 0.15 * 0.9 } else { 1.2 - (t - 0.15) * 0.15 };
+        let scale = if t < 0.15 {
+            0.3 + t / 0.15 * 0.9
+        } else {
+            1.2 - (t - 0.15) * 0.15
+        };
         tf.scale = Vec3::splat(scale);
         tf.translation.y += 34.0 * dt;
         let alpha = if t > 0.6 { 1.0 - (t - 0.6) / 0.4 } else { 1.0 };
@@ -394,7 +397,10 @@ fn spawn_zone_tally(
 ) {
     let gold = Color::srgb(1.0, 0.85, 0.25);
     let life = 1.7;
-    let tally = || ZoneTally { life, max_life: life };
+    let tally = || ZoneTally {
+        life,
+        max_life: life,
+    };
     // Gold sheet over the entire playfield.
     commands.spawn((
         Sprite {
@@ -520,9 +526,7 @@ fn update_flashes(
             commands.entity(entity).despawn();
             continue;
         }
-        sprite
-            .color
-            .set_alpha(f.peak_alpha * (f.life / f.max_life));
+        sprite.color.set_alpha(f.peak_alpha * (f.life / f.max_life));
     }
 }
 
@@ -626,12 +630,13 @@ fn map_events_to_effects(
 ) {
     let glow_tex = assets.glow.clone();
     let bar_tex = assets.bar.clone();
-    let pulse_frame = |glows: &mut Query<&mut FrameGlow>, board: Entity, color: Color, strength: f32| {
-        if let Ok(mut glow) = glows.get_mut(board) {
-            glow.color = color;
-            glow.t = glow.t.max(strength.min(1.0));
-        }
-    };
+    let pulse_frame =
+        |glows: &mut Query<&mut FrameGlow>, board: Entity, color: Color, strength: f32| {
+            if let Ok(mut glow) = glows.get_mut(board) {
+                glow.color = color;
+                glow.t = glow.t.max(strength.min(1.0));
+            }
+        };
     let mut banner_stagger = 0.0f32;
     for msg in events.read() {
         let Ok((board_tf, theme, index, session)) = boards.get(msg.board) else {
@@ -831,10 +836,7 @@ fn map_events_to_effects(
                     if row >= VISIBLE_HEIGHT {
                         continue;
                     }
-                    let row_center = Vec2::new(
-                        center.x,
-                        cell_world(board_tf, theme, 0, row).y,
-                    );
+                    let row_center = Vec2::new(center.x, cell_world(board_tf, theme, 0, row).y);
                     spawn_streak(
                         &mut commands,
                         &bar_tex,
@@ -956,7 +958,17 @@ fn map_events_to_effects(
                 let gold = Color::srgb(1.0, 0.85, 0.25);
                 pulse_frame(&mut glows, msg.board, gold, 0.9);
                 spawn_shockwave(&mut commands, center, gold, false);
-                spawn_burst(&mut commands, &glow_tex, center, gold, 24, 260.0, 10.0, 0.7, 90.0);
+                spawn_burst(
+                    &mut commands,
+                    &glow_tex,
+                    center,
+                    gold,
+                    24,
+                    260.0,
+                    10.0,
+                    0.7,
+                    90.0,
+                );
                 spawn_banner(
                     &mut commands,
                     center + Vec2::new(0.0, 60.0),
@@ -975,7 +987,17 @@ fn map_events_to_effects(
                 let cyan = Color::srgb(0.3, 0.9, 1.0);
                 pulse_frame(&mut glows, msg.board, cyan, 1.0);
                 spawn_shockwave(&mut commands, center, cyan, true);
-                spawn_burst(&mut commands, &glow_tex, center, cyan, 80, 520.0, 15.0, 0.9, 60.0);
+                spawn_burst(
+                    &mut commands,
+                    &glow_tex,
+                    center,
+                    cyan,
+                    80,
+                    520.0,
+                    15.0,
+                    0.9,
+                    60.0,
+                );
                 spawn_banner(
                     &mut commands,
                     center + Vec2::new(0.0, 60.0),
@@ -1031,7 +1053,14 @@ fn map_events_to_effects(
                     // Payday: fanfare, gold flash, confetti scaled by the
                     // haul, a heavy slam — and the line count filling the
                     // entire board (sheet + giant number + burst-away).
-                    play(if *lines >= 8 { Sfx::Clear(4) } else { Sfx::TSpinClear }, gain);
+                    play(
+                        if *lines >= 8 {
+                            Sfx::Clear(4)
+                        } else {
+                            Sfx::TSpinClear
+                        },
+                        gain,
+                    );
                     let gold = Color::srgb(1.0, 0.85, 0.25);
                     pulse_frame(&mut glows, msg.board, gold, 1.0);
                     spawn_shockwave(&mut commands, center, gold, true);
@@ -1332,7 +1361,17 @@ fn run_celebration(
         Color::srgb(1.0, 0.55, 0.4),
     ];
     let color = palette[rng.random_range(0..palette.len())];
-    spawn_burst(&mut commands, &assets.glow, pos, color, 26, 340.0, 7.0, 0.85, 170.0);
+    spawn_burst(
+        &mut commands,
+        &assets.glow,
+        pos,
+        color,
+        26,
+        340.0,
+        7.0,
+        0.85,
+        170.0,
+    );
     spawn_shockwave(&mut commands, pos, color, false);
     if rng.random_range(0..3) == 0 {
         spawn_confetti_wave(&mut commands, c.center, c.center.y + 260.0, 26);

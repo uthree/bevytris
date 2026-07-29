@@ -6,8 +6,8 @@
 
 use bevytris_core::ai::{self, AiProfile, Step};
 use bevytris_core::game::Game;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 const PIECES: u32 = 300;
 const GAMES: u64 = 5;

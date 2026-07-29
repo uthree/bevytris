@@ -1,23 +1,26 @@
 //! Menus: title screen, settings (with live key rebinding), pause overlay
 //! and the result screen. Fully keyboard-navigable, mouse also works.
 
+use bevy::input::ButtonState;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
-use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::ui::UiGlobalTransform;
 
 use crate::audio::{PlaySfx, Sfx};
-use crate::config::{key_label, save_settings, Action, GameSettings};
-use crate::i18n::{action_label, Locale, Strings};
-use crate::input::{PadAction, PadInput};
+use crate::config::{Action, GameSettings, key_label, save_settings};
 use crate::core::ai::{AiProfile, MAX_STAGE};
+use crate::i18n::{Locale, Strings, action_label};
+use crate::input::{PadAction, PadInput};
+use crate::music::{Jukebox, MusicEngine};
 use crate::progress::Progress;
 use crate::session::{
-    format_race_time, GameSession, HumanControlled, LastRound, MatchState, RaceResult,
-    SessionResult, StageClear,
+    GameSession, HumanControlled, LastRound, MatchState, RaceResult, SessionResult, StageClear,
+    format_race_time,
 };
 use crate::state::{AppState, GameMode, PlayState};
+use bevytris_chiptune::compose::{Kit, Meter, Profile};
+use rand::Rng as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
@@ -49,6 +52,8 @@ enum MenuAction {
     CustomPlayerAtk,
     CustomCpuAtk,
     CustomGarbage,
+    /// Open the listening room.
+    Jukebox,
     Settings,
     Quit,
     Bind(Action),
@@ -114,6 +119,14 @@ impl Plugin for MenuPlugin {
             .add_systems(OnEnter(AppState::ZoneSelect), setup_zone_select)
             .add_systems(OnEnter(AppState::StageSelect), setup_stage_select)
             .add_systems(OnEnter(AppState::CustomSetup), setup_custom)
+            .init_resource::<JukeboxCursor>()
+            .add_systems(OnEnter(AppState::Jukebox), setup_jukebox)
+            .add_systems(
+                Update,
+                (jukebox_input, refresh_jukebox)
+                    .chain()
+                    .run_if(in_state(AppState::Jukebox)),
+            )
             .add_systems(OnExit(AppState::Settings), persist_settings)
             .add_systems(OnEnter(PlayState::Paused), setup_pause_overlay)
             .add_systems(OnEnter(PlayState::RoundOver), setup_round_overlay)
@@ -128,9 +141,8 @@ impl Plugin for MenuPlugin {
                     refresh_stage_footer.run_if(
                         in_state(AppState::StageSelect).or_else(in_state(AppState::ZoneSelect)),
                     ),
-                    refresh_menu_footer.run_if(
-                        in_state(AppState::Title).or_else(in_state(AppState::SoloSelect)),
-                    ),
+                    refresh_menu_footer
+                        .run_if(in_state(AppState::Title).or_else(in_state(AppState::SoloSelect))),
                 )
                     .run_if(
                         in_state(AppState::Title)
@@ -157,9 +169,8 @@ impl Plugin for MenuPlugin {
             )
             .add_systems(
                 Update,
-                (settings_scroll_wheel, settings_keep_cursor_visible).run_if(
-                    in_state(AppState::Settings).or_else(in_state(AppState::CustomSetup)),
-                ),
+                (settings_scroll_wheel, settings_keep_cursor_visible)
+                    .run_if(in_state(AppState::Settings).or_else(in_state(AppState::CustomSetup))),
             );
     }
 }
@@ -214,6 +225,7 @@ fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: R
         (MenuAction::VsSelect, s.vs_cpu.to_string()),
         (MenuAction::ZoneSelect, s.zone_battle.to_string()),
         (MenuAction::CustomSetup, s.custom_match.to_string()),
+        (MenuAction::Jukebox, s.jukebox.to_string()),
         (MenuAction::Settings, s.settings.to_string()),
         (MenuAction::Quit, s.quit.to_string()),
     ];
@@ -253,11 +265,7 @@ fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: R
 }
 
 /// Solo mode picker: marathon / sprint / dig.
-fn setup_solo_select(
-    mut commands: Commands,
-    mut cursor: ResMut<MenuCursor>,
-    locale: Res<Locale>,
-) {
+fn setup_solo_select(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: Res<Locale>) {
     let s = locale.s();
     cursor.0 = 0;
     let items = vec![
@@ -326,7 +334,11 @@ fn spawn_menu_footer(commands: &mut Commands, state: AppState) {
 fn action_description(action: MenuAction, progress: &Progress, s: &Strings) -> Option<String> {
     use crate::session::{DIG_ROWS, SPRINT_GOAL_LINES};
     let best = |ms: Option<u64>| match ms {
-        Some(ms) => format!("    {} {}", s.best_label, format_race_time(ms as f64 / 1000.0)),
+        Some(ms) => format!(
+            "    {} {}",
+            s.best_label,
+            format_race_time(ms as f64 / 1000.0)
+        ),
         None => String::new(),
     };
     Some(match action {
@@ -334,6 +346,7 @@ fn action_description(action: MenuAction, progress: &Progress, s: &Strings) -> O
         MenuAction::VsSelect => s.desc_vs.to_string(),
         MenuAction::ZoneSelect => s.desc_zone.to_string(),
         MenuAction::CustomSetup => s.desc_custom.to_string(),
+        MenuAction::Jukebox => s.desc_jukebox.to_string(),
         MenuAction::Settings => s.desc_settings.to_string(),
         MenuAction::Quit => s.desc_quit.to_string(),
         MenuAction::Marathon => s.desc_marathon.to_string(),
@@ -761,7 +774,12 @@ fn setup_custom(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: 
                         list.spawn(item_bundle(index, action, String::new(), 420.0));
                         index += 1;
                     }
-                    list.spawn(item_bundle(index, MenuAction::CustomStart, String::new(), 420.0));
+                    list.spawn(item_bundle(
+                        index,
+                        MenuAction::CustomStart,
+                        String::new(),
+                        420.0,
+                    ));
                     index += 1;
                     list.spawn(item_bundle(index, MenuAction::Back, String::new(), 420.0));
                 });
@@ -778,6 +796,302 @@ fn setup_custom(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: 
                 },
             ));
         });
+}
+
+// ---------------------------------------------------------------------------
+// Listening room
+// ---------------------------------------------------------------------------
+
+/// One adjustable row of the listening room. Deliberately not built on
+/// [`MenuAction`]: those rows all read and write `GameSettings`, and none
+/// of this belongs in a file that gets saved to disk.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+struct JukeboxRow(usize);
+
+const JUKEBOX_ROWS: usize = 6;
+
+#[derive(Resource, Default)]
+struct JukeboxCursor(usize);
+
+fn setup_jukebox(mut commands: Commands, mut cursor: ResMut<JukeboxCursor>, locale: Res<Locale>) {
+    let s = locale.s();
+    cursor.0 = 0;
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                top: px(0),
+                width: percent(100),
+                height: percent(100),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                row_gap: px(6),
+                ..default()
+            },
+            DespawnOnExit(AppState::Jukebox),
+        ))
+        .with_children(|outer| {
+            // The piano roll runs right behind this, and a bright note
+            // crossing a line of text makes it unreadable. A panel is
+            // cheaper than fighting the contrast.
+            outer
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: px(6),
+                        padding: UiRect::axes(px(48), px(28)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.02, 0.03, 0.06, 0.82)),
+                ))
+                .with_children(|parent| {
+                    parent.spawn((
+                        Text::new(s.jukebox),
+                        TextFont {
+                            font_size: FontSize::Px(40.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.3, 0.85, 1.0)),
+                        TextShadow::default(),
+                        Node {
+                            margin: UiRect::bottom(px(14)),
+                            ..default()
+                        },
+                    ));
+                    for i in 0..JUKEBOX_ROWS {
+                        parent.spawn((
+                            Text::new(""),
+                            TextFont {
+                                font_size: FontSize::Px(20.0),
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.75, 0.8, 0.9)),
+                            TextShadow::default(),
+                            JukeboxRow(i),
+                        ));
+                    }
+                    parent.spawn((
+                        Text::new(s.jukebox_now),
+                        TextFont {
+                            font_size: FontSize::Px(18.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.55, 0.95, 0.85)),
+                        TextShadow::default(),
+                        Node {
+                            margin: UiRect::top(px(18)),
+                            ..default()
+                        },
+                        JukeboxRow(JUKEBOX_ROWS),
+                    ));
+                    parent.spawn((
+                        Text::new(s.jukebox_hint),
+                        TextFont {
+                            font_size: FontSize::Px(16.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.45, 0.5, 0.6)),
+                        Node {
+                            margin: UiRect::top(px(20)),
+                            ..default()
+                        },
+                    ));
+                });
+        });
+}
+
+fn jukebox_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    pad: Res<PadInput>,
+    mut cursor: ResMut<JukeboxCursor>,
+    mut jukebox: ResMut<Jukebox>,
+    mut sfx: MessageWriter<PlaySfx>,
+    mut next_app: ResMut<NextState<AppState>>,
+) {
+    if keys.just_pressed(KeyCode::Escape) || pad.just_pressed(PadAction::Back) {
+        sfx.write(PlaySfx::new(Sfx::MenuBack));
+        next_app.set(AppState::Title);
+        return;
+    }
+    let down = keys.just_pressed(KeyCode::ArrowDown)
+        || keys.just_pressed(KeyCode::KeyS)
+        || pad.just_pressed(PadAction::Down);
+    let up = keys.just_pressed(KeyCode::ArrowUp)
+        || keys.just_pressed(KeyCode::KeyW)
+        || pad.just_pressed(PadAction::Up);
+    if down {
+        cursor.0 = (cursor.0 + 1) % JUKEBOX_ROWS;
+        sfx.write(PlaySfx::new(Sfx::MenuMove));
+    }
+    if up {
+        cursor.0 = (cursor.0 + JUKEBOX_ROWS - 1) % JUKEBOX_ROWS;
+        sfx.write(PlaySfx::new(Sfx::MenuMove));
+    }
+
+    // WASD alongside the arrows, matching the up/down keys above.
+    let right = keys.just_pressed(KeyCode::ArrowRight)
+        || keys.just_pressed(KeyCode::KeyD)
+        || pad.just_pressed(PadAction::Right);
+    let left = keys.just_pressed(KeyCode::ArrowLeft)
+        || keys.just_pressed(KeyCode::KeyA)
+        || pad.just_pressed(PadAction::Left);
+    // Confirm re-rolls the seed wherever the cursor is: it is the thing
+    // you want most often, and there is nothing else to confirm.
+    let reroll = keys.just_pressed(KeyCode::Enter)
+        || keys.just_pressed(KeyCode::KeyR)
+        || pad.just_pressed(PadAction::Confirm);
+    if reroll {
+        jukebox.seed = rand::rng().random();
+        sfx.write(PlaySfx::new(Sfx::MenuSelect));
+        return;
+    }
+    let step = if right {
+        1
+    } else if left {
+        -1
+    } else {
+        return;
+    };
+    sfx.write(PlaySfx::new(Sfx::MenuMove));
+    match cursor.0 {
+        // Walking the seed one at a time is useless; a nudge that lands
+        // somewhere else entirely is the point.
+        0 => jukebox.seed = jukebox.seed.wrapping_add(step as u64),
+        1 => {
+            let i = Profile::ALL
+                .iter()
+                .position(|p| *p == jukebox.profile)
+                .unwrap_or(0);
+            jukebox.profile =
+                Profile::ALL[(i as i32 + step).rem_euclid(Profile::ALL.len() as i32) as usize];
+        }
+        2 => jukebox.meter = cycle_option(jukebox.meter, &Meter::ALL, step),
+        3 => jukebox.kit = cycle_option(jukebox.kit, &Kit::ALL, step),
+        4 => jukebox.intensity = (jukebox.intensity + 0.1 * step as f32).clamp(0.0, 1.0),
+        _ => jukebox.zone = !jukebox.zone,
+    }
+}
+
+/// Cycle through `AUTO` and then every value, so the roll can always be
+/// handed back to the composer.
+fn cycle_option<T: Copy + PartialEq>(current: Option<T>, all: &[T], step: i32) -> Option<T> {
+    let len = all.len() as i32 + 1;
+    let i = match current {
+        None => 0,
+        Some(v) => all.iter().position(|x| *x == v).unwrap_or(0) as i32 + 1,
+    };
+    let next = (i + step).rem_euclid(len);
+    if next == 0 {
+        None
+    } else {
+        Some(all[(next - 1) as usize])
+    }
+}
+
+fn refresh_jukebox(
+    locale: Res<Locale>,
+    cursor: Res<JukeboxCursor>,
+    jukebox: Res<Jukebox>,
+    engine: Res<MusicEngine>,
+    mut rows: Query<(&JukeboxRow, &mut Text, &mut TextColor)>,
+) {
+    let s = locale.s();
+    let auto = s.jukebox_auto;
+    for (row, mut text, mut color) in &mut rows {
+        if row.0 == JUKEBOX_ROWS {
+            // The engine's own report, so what is on screen is what is
+            // actually sounding rather than what was asked for.
+            text.0 = match engine.now_playing() {
+                Some(info) => format!("♪ {}  [{}]", info.label(), info.layer_list()),
+                None => String::new(),
+            };
+            continue;
+        }
+        let (label, value) = match row.0 {
+            0 => (s.jb_seed, format!("0x{:x}", jukebox.seed)),
+            1 => (s.jb_preset, jukebox.profile.name().to_string()),
+            2 => (
+                s.jb_meter,
+                jukebox
+                    .meter
+                    .map_or(auto.to_string(), |m| m.name().to_string()),
+            ),
+            3 => (
+                s.jb_kit,
+                jukebox
+                    .kit
+                    .map_or(auto.to_string(), |k| k.name().to_string()),
+            ),
+            4 => (s.jb_intensity, format!("{:.0}%", jukebox.intensity * 100.0)),
+            _ => (
+                s.jb_zone,
+                if jukebox.zone { "ON" } else { "OFF" }.to_string(),
+            ),
+        };
+        let selected = cursor.0 == row.0;
+        text.0 = format!(
+            "{} {:<11} {}",
+            if selected { ">" } else { " " },
+            label,
+            value
+        );
+        color.0 = if selected {
+            Color::srgb(0.95, 0.98, 1.0)
+        } else {
+            Color::srgb(0.6, 0.65, 0.75)
+        };
+    }
+}
+
+#[cfg(test)]
+mod jukebox_tests {
+    use super::*;
+
+    #[test]
+    fn cycling_an_option_visits_auto_and_every_value() {
+        // Right from AUTO walks the values in order and comes back.
+        let mut m = None;
+        let mut seen = Vec::new();
+        for _ in 0..Meter::ALL.len() + 1 {
+            m = cycle_option(m, &Meter::ALL, 1);
+            seen.push(m);
+        }
+        assert_eq!(seen.len(), 4);
+        assert_eq!(seen[0], Some(Meter::Four));
+        assert_eq!(seen[1], Some(Meter::Three));
+        assert_eq!(seen[2], Some(Meter::Six));
+        assert_eq!(seen[3], None, "the cycle must return to AUTO");
+
+        // Left is the exact inverse.
+        assert_eq!(cycle_option(None, &Meter::ALL, -1), Some(Meter::Six));
+        assert_eq!(cycle_option(Some(Meter::Four), &Meter::ALL, -1), None);
+
+        // Two values behave the same way.
+        assert_eq!(cycle_option(None, &Kit::ALL, 1), Some(Kit::Chip));
+        assert_eq!(cycle_option(Some(Kit::Sampled), &Kit::ALL, 1), None);
+    }
+
+    #[test]
+    fn every_jukebox_row_is_reachable_and_labelled() {
+        // The cursor wraps over exactly the rows the screen spawns, and
+        // the extra row index is the now-playing line rather than a
+        // seventh setting.
+        assert_eq!(JUKEBOX_ROWS, 6);
+        let s = crate::i18n::EN;
+        for label in [
+            s.jb_seed,
+            s.jb_preset,
+            s.jb_meter,
+            s.jb_kit,
+            s.jb_intensity,
+            s.jb_zone,
+        ] {
+            assert!(!label.is_empty());
+        }
+    }
 }
 
 /// Mouse wheel scrolls the settings list.
@@ -881,13 +1195,18 @@ fn settings_label(
             if settings.fullscreen { "ON" } else { "OFF" }
         ),
         MenuAction::CustomCpuLevel => {
-            format!("{:<12} {:02} / 30", s.cm_cpu_level, settings.custom.cpu_level)
+            format!(
+                "{:<12} {:02} / 30",
+                s.cm_cpu_level, settings.custom.cpu_level
+            )
         }
         MenuAction::CustomStyle => {
             let value = match settings.custom.cpu_style {
                 crate::config::CpuStyle::Auto => format!(
                     "AUTO ({})",
-                    AiProfile::for_stage(settings.custom.cpu_level).archetype.label()
+                    AiProfile::for_stage(settings.custom.cpu_level)
+                        .archetype
+                        .label()
                 ),
                 style => style.label().to_string(),
             };
@@ -918,7 +1237,10 @@ fn settings_label(
             format!("{:<12} {}", s.cm_speed, value)
         }
         MenuAction::CustomPlayerAtk => {
-            format!("{:<12} {}%", s.cm_player_atk, settings.custom.player_attack_pct)
+            format!(
+                "{:<12} {}%",
+                s.cm_player_atk, settings.custom.player_attack_pct
+            )
         }
         MenuAction::CustomCpuAtk => {
             format!("{:<12} {}%", s.cm_cpu_atk, settings.custom.cpu_attack_pct)
@@ -1163,8 +1485,7 @@ fn run_menu_action(
                     .iter()
                     .position(|&m| m == s.custom.margin_secs)
                     .unwrap_or(0) as i32;
-                s.custom.margin_secs =
-                    STEPS[(i + adjust).rem_euclid(STEPS.len() as i32) as usize];
+                s.custom.margin_secs = STEPS[(i + adjust).rem_euclid(STEPS.len() as i32) as usize];
                 true
             }
             MenuAction::CustomSpeed => {
@@ -1182,7 +1503,8 @@ fn run_menu_action(
                 true
             }
             MenuAction::CustomGarbage => {
-                s.custom.start_garbage = (s.custom.start_garbage as i32 + adjust).clamp(0, 8) as u32;
+                s.custom.start_garbage =
+                    (s.custom.start_garbage as i32 + adjust).clamp(0, 8) as u32;
                 true
             }
             _ => false,
@@ -1265,6 +1587,10 @@ fn run_menu_action(
             p.settings.custom.cpu_style = p.settings.custom.cpu_style.cycled(1);
             save_settings(&p.settings);
             sfx.write(PlaySfx::quiet(Sfx::MenuMove));
+        }
+        MenuAction::Jukebox => {
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            p.next_app.set(AppState::Jukebox);
         }
         MenuAction::Settings => {
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
@@ -1433,11 +1759,7 @@ fn overlay_text(text: &str, size: f32, color: Color) -> impl Bundle {
     )
 }
 
-fn setup_pause_overlay(
-    mut commands: Commands,
-    settings: Res<GameSettings>,
-    locale: Res<Locale>,
-) {
+fn setup_pause_overlay(mut commands: Commands, settings: Res<GameSettings>, locale: Res<Locale>) {
     let s = locale.s();
     let pause_key = key_label(settings.key_for(Action::Pause));
     commands
@@ -1514,11 +1836,13 @@ fn setup_result_overlay(
     let (headline, color) = match (result.as_deref(), stage_label) {
         (Some(SessionResult::RaceDone), _) => (t.finish.to_string(), Color::srgb(1.0, 0.9, 0.3)),
         (Some(SessionResult::VsWin { winner: 0 }), Some((prefix, s))) => (
-            t.stage_clear.replace("{stage}", &format!("{prefix} {s:02}")),
+            t.stage_clear
+                .replace("{stage}", &format!("{prefix} {s:02}")),
             Color::srgb(1.0, 0.9, 0.3),
         ),
         (Some(SessionResult::VsWin { .. }), Some((prefix, s))) => (
-            t.stage_failed.replace("{stage}", &format!("{prefix} {s:02}")),
+            t.stage_failed
+                .replace("{stage}", &format!("{prefix} {s:02}")),
             Color::srgb(0.9, 0.3, 0.3),
         ),
         // Custom matches have no stage to clear: plain win/lose.
@@ -1564,7 +1888,14 @@ fn setup_result_overlay(
             let g = &s.game;
             format!(
                 "{} {}    {} {}    {} {}    {} {}",
-                t.score, g.score, t.level, g.level, t.lines, g.lines, t.max_combo, g.stats.max_combo
+                t.score,
+                g.score,
+                t.level,
+                g.level,
+                t.lines,
+                g.lines,
+                t.max_combo,
+                g.stats.max_combo
             )
         })
     };

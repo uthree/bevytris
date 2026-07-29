@@ -15,6 +15,8 @@ pub enum AppState {
     ZoneSelect,
     /// Rule sheet editor for a custom match.
     CustomSetup,
+    /// Listening room: pick a seed and a preset, watch the piano roll.
+    Jukebox,
     Playing,
     /// One-frame bounce state used to restart a match. A Playing→Playing
     /// identity transition would leave the `PlayState` sub-state untouched
@@ -45,10 +47,14 @@ pub enum GameMode {
     Sprint,
     /// Race: dig through a pre-stacked field of holed garbage rows.
     Dig,
-    VsCpu { stage: u32 },
+    VsCpu {
+        stage: u32,
+    },
     /// VS with the zone super move; `stage` picks the CPU profile but the
     /// match never touches campaign progress.
-    ZoneBattle { stage: u32 },
+    ZoneBattle {
+        stage: u32,
+    },
     /// VS under the user-authored rule sheet (`GameSettings::custom`);
     /// never touches campaign progress.
     Custom,

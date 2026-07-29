@@ -32,83 +32,86 @@ use state::{AppState, GameMode, PlayState};
 fn main() -> AppExit {
     let settings = config::load_settings();
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins
-        .set(bevy::log::LogPlugin {
-            // The bundled ICU4X data has no CJK segmentation dictionary, so
-            // laying out Japanese text warns on every reshape; the fallback
-            // segmentation is fine for our UI, silence the noise.
-            filter: format!("{},icu_provider=error", bevy::log::DEFAULT_FILTER),
-            ..Default::default()
-        })
-        .set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "BEVYTRIS".into(),
-                resolution: (1280, 720).into(),
-                present_mode: present_mode(settings.vsync),
-                mode: window_mode(settings.fullscreen),
-                // Keep the swapchain away from degenerate sizes while the
-                // user drags the window edges.
-                resize_constraints: WindowResizeConstraints {
-                    min_width: 640.0,
-                    min_height: 360.0,
+    app.add_plugins(
+        DefaultPlugins
+            .set(bevy::log::LogPlugin {
+                // The bundled ICU4X data has no CJK segmentation dictionary, so
+                // laying out Japanese text warns on every reshape; the fallback
+                // segmentation is fine for our UI, silence the noise.
+                filter: format!("{},icu_provider=error", bevy::log::DEFAULT_FILTER),
+                ..Default::default()
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "BEVYTRIS".into(),
+                    resolution: (1280, 720).into(),
+                    present_mode: present_mode(settings.vsync),
+                    mode: window_mode(settings.fullscreen),
+                    // Keep the swapchain away from degenerate sizes while the
+                    // user drags the window edges.
+                    resize_constraints: WindowResizeConstraints {
+                        min_width: 640.0,
+                        min_height: 360.0,
+                        ..default()
+                    },
                     ..default()
-                },
+                }),
                 ..default()
             }),
-            ..default()
-        }))
-        .insert_resource(ClearColor(Color::srgb(0.02, 0.025, 0.06)))
-        .insert_resource(i18n::Locale(settings.language.resolve()))
-        .insert_resource(settings)
-        // Dev helpers: BEVYTRIS_SCREEN=settings|solo|stages|zones|custom|
-        // playing skips the title menu, BEVYTRIS_MODE=sprint|dig|zone|
-        // custom|vs-stage-N|vs-easy|vs-normal|vs-hard preselects the game
-        // mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages,
-        // BEVYTRIS_ZONE_CHARGE=1 starts zone gauges full, and
-        // BEVYTRIS_SCENE=formation|cyber|galaxy|visualizer|garden|fractal|
-        // sunset|automaton|pianoroll pins the background scene.
-        .insert_state(match std::env::var("BEVYTRIS_SCREEN").as_deref() {
-            Ok("settings") => AppState::Settings,
-            Ok("solo") => AppState::SoloSelect,
-            Ok("stages") => AppState::StageSelect,
-            Ok("zones") => AppState::ZoneSelect,
-            Ok("custom") => AppState::CustomSetup,
-            Ok("playing") => AppState::Playing,
-            _ => AppState::Title,
-        })
-        .insert_resource(match std::env::var("BEVYTRIS_MODE").as_deref() {
-            Ok("sprint") => GameMode::Sprint,
-            Ok("dig") => GameMode::Dig,
-            Ok("zone") => GameMode::ZoneBattle { stage: 15 },
-            Ok("custom") => GameMode::Custom,
-            Ok("vs-easy") => GameMode::VsCpu { stage: 5 },
-            Ok("vs-normal") => GameMode::VsCpu { stage: 15 },
-            Ok("vs-hard") => GameMode::VsCpu { stage: 25 },
-            Ok(mode) => match mode.strip_prefix("vs-stage-").and_then(|n| n.parse().ok()) {
-                Some(stage) => GameMode::VsCpu { stage },
-                None => GameMode::Single,
-            },
-            _ => GameMode::Single,
-        })
-        .insert_resource(progress::load_progress_with_env())
-        .add_sub_state::<PlayState>()
-        .add_plugins((
-            i18n::I18nPlugin,
-            input::PadInputPlugin,
-            audio::GameAudioPlugin,
-            music::MusicPlugin,
-            session::SessionPlugin,
-            render::RenderPlugin,
-            background::BackgroundPlugin,
-            effects::EffectsPlugin,
-            menu::MenuPlugin,
-        ))
-        .add_systems(PreStartup, use_misaki_font)
-        .add_systems(Startup, setup_camera)
-        .add_systems(
-            Update,
-            (fullscreen_hotkey, apply_window_settings, sync_ui_scale),
-        );
+    )
+    .insert_resource(ClearColor(Color::srgb(0.02, 0.025, 0.06)))
+    .insert_resource(i18n::Locale(settings.language.resolve()))
+    .insert_resource(settings)
+    // Dev helpers: BEVYTRIS_SCREEN=settings|solo|stages|zones|custom|
+    // music|playing skips the title menu, BEVYTRIS_MODE=sprint|dig|zone|
+    // custom|vs-stage-N|vs-easy|vs-normal|vs-hard preselects the game
+    // mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages,
+    // BEVYTRIS_ZONE_CHARGE=1 starts zone gauges full, and
+    // BEVYTRIS_SCENE=formation|cyber|galaxy|visualizer|garden|fractal|
+    // sunset|automaton|pianoroll pins the background scene.
+    .insert_state(match std::env::var("BEVYTRIS_SCREEN").as_deref() {
+        Ok("settings") => AppState::Settings,
+        Ok("solo") => AppState::SoloSelect,
+        Ok("stages") => AppState::StageSelect,
+        Ok("zones") => AppState::ZoneSelect,
+        Ok("custom") => AppState::CustomSetup,
+        Ok("music") | Ok("jukebox") => AppState::Jukebox,
+        Ok("playing") => AppState::Playing,
+        _ => AppState::Title,
+    })
+    .insert_resource(match std::env::var("BEVYTRIS_MODE").as_deref() {
+        Ok("sprint") => GameMode::Sprint,
+        Ok("dig") => GameMode::Dig,
+        Ok("zone") => GameMode::ZoneBattle { stage: 15 },
+        Ok("custom") => GameMode::Custom,
+        Ok("vs-easy") => GameMode::VsCpu { stage: 5 },
+        Ok("vs-normal") => GameMode::VsCpu { stage: 15 },
+        Ok("vs-hard") => GameMode::VsCpu { stage: 25 },
+        Ok(mode) => match mode.strip_prefix("vs-stage-").and_then(|n| n.parse().ok()) {
+            Some(stage) => GameMode::VsCpu { stage },
+            None => GameMode::Single,
+        },
+        _ => GameMode::Single,
+    })
+    .insert_resource(progress::load_progress_with_env())
+    .add_sub_state::<PlayState>()
+    .add_plugins((
+        i18n::I18nPlugin,
+        input::PadInputPlugin,
+        audio::GameAudioPlugin,
+        music::MusicPlugin,
+        session::SessionPlugin,
+        render::RenderPlugin,
+        background::BackgroundPlugin,
+        effects::EffectsPlugin,
+        menu::MenuPlugin,
+    ))
+    .add_systems(PreStartup, use_misaki_font)
+    .add_systems(Startup, setup_camera)
+    .add_systems(
+        Update,
+        (fullscreen_hotkey, apply_window_settings, sync_ui_scale),
+    );
 
     // Workaround for https://github.com/bevyengine/bevy/issues/20141:
     // on Windows, `Continuous` mode drives frames solely through the
@@ -161,10 +164,7 @@ fn window_mode(fullscreen: bool) -> WindowMode {
 }
 
 /// F11 toggles fullscreen from anywhere (persisted like the settings row).
-fn fullscreen_hotkey(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut settings: ResMut<config::GameSettings>,
-) {
+fn fullscreen_hotkey(keys: Res<ButtonInput<KeyCode>>, mut settings: ResMut<config::GameSettings>) {
     if keys.just_pressed(KeyCode::F11) {
         settings.fullscreen = !settings.fullscreen;
         config::save_settings(&settings);
@@ -172,10 +172,7 @@ fn fullscreen_hotkey(
 }
 
 /// Live-apply the VSync / Fullscreen toggles.
-fn apply_window_settings(
-    settings: Res<config::GameSettings>,
-    mut windows: Query<&mut Window>,
-) {
+fn apply_window_settings(settings: Res<config::GameSettings>, mut windows: Query<&mut Window>) {
     if !settings.is_changed() {
         return;
     }

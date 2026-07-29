@@ -120,6 +120,8 @@ impl Meter {
             Meter::Six => "6/8",
         }
     }
+
+    pub const ALL: [Meter; 3] = [Meter::Four, Meter::Three, Meter::Six];
     /// 0 = downbeat, 1 = the offbeat subdivision, 2 = everything else.
     fn prio(self, step: u8) -> u8 {
         if step as u32 % self.steps_per_beat() == 0 {
@@ -228,12 +230,7 @@ fn rhythm_bank(meter: Meter) -> &'static [&'static [(u8, u8)]] {
 /// is the whole point of storing degrees). Only the victory fanfare uses
 /// these; everything else stays in a minor mode, which is both cooler and
 /// closer to the genre.
-const CALM_LOOPS: [[i32; 4]; 4] = [
-    [0, 4, 5, 3],
-    [5, 3, 0, 4],
-    [0, 3, 4, 0],
-    [0, 5, 3, 4],
-];
+const CALM_LOOPS: [[i32; 4]; 4] = [[0, 4, 5, 3], [5, 3, 0, 4], [0, 3, 4, 0], [0, 5, 3, 4]];
 /// The minor set. `[0, 6, 5, 4]` is the Andalusian cadence — the harmonic
 /// cousin of the Korobeiniki idiom, so it reads as genre-correct without
 /// quoting anything.
@@ -307,6 +304,27 @@ impl Kit {
         match self {
             Kit::Chip => "chip",
             Kit::Sampled => "pcm",
+        }
+    }
+
+    pub const ALL: [Kit; 2] = [Kit::Chip, Kit::Sampled];
+}
+
+impl Profile {
+    pub const ALL: [Profile; 4] = [
+        Profile::Ambient,
+        Profile::SoloCalm,
+        Profile::VsIntense,
+        Profile::Victory,
+    ];
+
+    /// Short English name, for the listening screen.
+    pub fn name(self) -> &'static str {
+        match self {
+            Profile::Ambient => "AMBIENT",
+            Profile::SoloCalm => "SOLO",
+            Profile::VsIntense => "VERSUS",
+            Profile::Victory => "VICTORY",
         }
     }
 }
@@ -518,7 +536,11 @@ fn roll_kit(profile: Profile, rng: &mut Rng) -> Kit {
         Profile::VsIntense => 0.45,
         Profile::Victory => 0.5,
     };
-    if rng.chance(sampled) { Kit::Sampled } else { Kit::Chip }
+    if rng.chance(sampled) {
+        Kit::Sampled
+    } else {
+        Kit::Chip
+    }
 }
 
 fn roll_tempo(profile: Profile, meter: Meter, rng: &mut Rng) -> f32 {
@@ -630,9 +652,7 @@ impl Arrangement {
 }
 
 /// Names matching the bits of [`Arrangement::layers`].
-pub const LAYER_NAMES: [&str; 8] = [
-    "bass", "harm", "pad", "perc", "lead", "cntr", "saw", "shkr",
-];
+pub const LAYER_NAMES: [&str; 8] = ["bass", "harm", "pad", "perc", "lead", "cntr", "saw", "shkr"];
 
 fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
     let i = ctx.intensity.clamp(0.0, 1.0);
@@ -682,7 +702,11 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             lead: t >= l_at,
             harmony: t >= h_at,
             perc: t >= p_at,
-            pad: Some(if i < 0.55 { Inst::WaveOrgan } else { Inst::Glass }),
+            pad: Some(if i < 0.55 {
+                Inst::WaveOrgan
+            } else {
+                Inst::Glass
+            }),
             counter: (t >= l_at + 14.0).then_some(Counter::Echo),
             saw: (i >= 0.66).then_some(SawRole::LeadDouble),
             shaker: i >= 0.82,
@@ -1771,8 +1795,14 @@ mod tests {
                 Meter::Six => seen[2] += 1,
             }
         }
-        assert!(seen.iter().all(|&n| n > 20), "a meter never came up: {seen:?}");
-        assert!(seen[0] > seen[1] + seen[2], "4/4 should stay the house style");
+        assert!(
+            seen.iter().all(|&n| n > 20),
+            "a meter never came up: {seen:?}"
+        );
+        assert!(
+            seen[0] > seen[1] + seen[2],
+            "4/4 should stay the house style"
+        );
         // Versus keeps a floor to stand on far more often.
         let mut vs_four = 0;
         for seed in 0..400u64 {
@@ -1780,7 +1810,10 @@ mod tests {
                 vs_four += 1;
             }
         }
-        assert!(vs_four > 280, "versus wandered off 4/4 too often: {vs_four}");
+        assert!(
+            vs_four > 280,
+            "versus wandered off 4/4 too often: {vs_four}"
+        );
         // The fanfare is never in an odd meter.
         for seed in 0..64u64 {
             assert_eq!(
@@ -1956,7 +1989,10 @@ mod tests {
             // song, not a bass line.
             let layers = c.info().layer_list();
             for want in ["bass", "harm", "pad"] {
-                assert!(layers.contains(want), "{profile:?} opens without {want}: {layers}");
+                assert!(
+                    layers.contains(want),
+                    "{profile:?} opens without {want}: {layers}"
+                );
             }
         }
     }
@@ -2043,8 +2079,7 @@ mod tests {
             "no crash on the downbeat of the final chorus"
         );
         // ...and every voice is playing.
-        let voices: std::collections::HashSet<u8> =
-            bar.iter().map(|e| e.voice() as u8).collect();
+        let voices: std::collections::HashSet<u8> = bar.iter().map(|e| e.voice() as u8).collect();
         assert_eq!(voices.len(), crate::VOICE_COUNT, "not all in: {voices:?}");
     }
 
@@ -2069,7 +2104,11 @@ mod tests {
         c.plan_bar(&ctx, &mut out);
         let bar = &out[mark..];
 
-        assert_eq!(c.info().tonic, before, "the run-up must stay in the old key");
+        assert_eq!(
+            c.info().tonic,
+            before,
+            "the run-up must stay in the old key"
+        );
         let mut snares: Vec<u8> = bar
             .iter()
             .filter(|e| e.inst.is_snare())
@@ -2090,7 +2129,10 @@ mod tests {
             .map(|e| e.midi)
             .collect();
         assert!(run.len() >= 6);
-        assert!(run.windows(2).all(|w| w[1] >= w[0]), "the run is not rising");
+        assert!(
+            run.windows(2).all(|w| w[1] >= w[0]),
+            "the run is not rising"
+        );
     }
 
     /// The point of the outro: however long a session runs, the song is a
@@ -2122,10 +2164,7 @@ mod tests {
         // Every cycle ends at home, which is what makes the seam a repeat.
         for c_i in 0..10u32 {
             let last_bar_of_cycle = (c_i * cycle + cycle - 1) as usize;
-            assert_eq!(
-                lifts[last_bar_of_cycle], 0,
-                "cycle {c_i} did not come home"
-            );
+            assert_eq!(lifts[last_bar_of_cycle], 0, "cycle {c_i} did not come home");
         }
         // Notes must still be playable after the lift.
         for e in &out {
@@ -2139,7 +2178,12 @@ mod tests {
     /// the flat-seventh chord is built on the home tonic.
     #[test]
     fn the_outro_pivots_through_the_home_tonic() {
-        for mode in [Mode::Aeolian, Mode::Dorian, Mode::Phrygian, Mode::HarmonicMinor] {
+        for mode in [
+            Mode::Aeolian,
+            Mode::Dorian,
+            Mode::Phrygian,
+            Mode::HarmonicMinor,
+        ] {
             let lifted_flat_seven = LIFT_STEP + mode.with_flat_seventh().pitch(6);
             assert_eq!(
                 lifted_flat_seven.rem_euclid(12),
@@ -2370,7 +2414,10 @@ mod tests {
         let two = run(Profile::VsIntense, 0.55, 40);
         assert_eq!(one.len(), two.len());
         for (a, b) in one.iter().zip(&two) {
-            assert_eq!((a.at, a.midi, a.vel, a.frames), (b.at, b.midi, b.vel, b.frames));
+            assert_eq!(
+                (a.at, a.midi, a.vel, a.frames),
+                (b.at, b.midi, b.vel, b.frames)
+            );
         }
     }
 
@@ -2387,7 +2434,11 @@ mod tests {
                     // Drums carry no pitch, so only the tonal voices are
                     // checked against the playable range.
                     if !e.inst.is_drum() {
-                        assert!((21..=108).contains(&e.midi), "{p:?} emitted midi {}", e.midi);
+                        assert!(
+                            (21..=108).contains(&e.midi),
+                            "{p:?} emitted midi {}",
+                            e.midi
+                        );
                     }
                     assert!(e.frames >= 2);
                     assert!(e.vel > 0);

@@ -66,11 +66,9 @@ impl LangChoice {
 /// OS display language, detected once.
 pub fn system_lang() -> Lang {
     static DETECTED: OnceLock<Lang> = OnceLock::new();
-    *DETECTED.get_or_init(|| {
-        match sys_locale::get_locale() {
-            Some(tag) if tag.to_ascii_lowercase().starts_with("ja") => Lang::Japanese,
-            _ => Lang::English,
-        }
+    *DETECTED.get_or_init(|| match sys_locale::get_locale() {
+        Some(tag) if tag.to_ascii_lowercase().starts_with("ja") => Lang::Japanese,
+        _ => Lang::English,
     })
 }
 
@@ -124,6 +122,17 @@ pub struct Strings {
     pub vs_cpu: &'static str,
     pub zone_battle: &'static str,
     pub custom_match: &'static str,
+    /// Listening room: pick a seed and a preset, watch the piano roll.
+    pub jukebox: &'static str,
+    pub jukebox_hint: &'static str,
+    pub jukebox_now: &'static str,
+    pub jukebox_auto: &'static str,
+    pub jb_seed: &'static str,
+    pub jb_preset: &'static str,
+    pub jb_meter: &'static str,
+    pub jb_kit: &'static str,
+    pub jb_intensity: &'static str,
+    pub jb_zone: &'static str,
     pub settings: &'static str,
     pub quit: &'static str,
     pub marathon: &'static str,
@@ -138,6 +147,7 @@ pub struct Strings {
     pub desc_vs: &'static str,
     pub desc_zone: &'static str,
     pub desc_custom: &'static str,
+    pub desc_jukebox: &'static str,
     pub desc_settings: &'static str,
     pub desc_quit: &'static str,
     pub desc_marathon: &'static str,
@@ -254,6 +264,16 @@ pub const EN: Strings = Strings {
     vs_cpu: "VS CPU",
     zone_battle: "ZONE BATTLE",
     custom_match: "CUSTOM MATCH",
+    jukebox: "MUSIC",
+    jukebox_hint: "UP/DOWN: SELECT    LEFT/RIGHT: ADJUST    ENTER: NEW SEED    ESC: BACK",
+    jukebox_now: "",
+    jukebox_auto: "AUTO",
+    jb_seed: "SEED",
+    jb_preset: "PRESET",
+    jb_meter: "METER",
+    jb_kit: "DRUMS",
+    jb_intensity: "INTENSITY",
+    jb_zone: "ZONE",
     settings: "SETTINGS",
     quit: "QUIT",
     marathon: "MARATHON",
@@ -267,6 +287,7 @@ pub const EN: Strings = Strings {
     desc_vs: "BATTLE CPU RIVALS THROUGH 30 STAGES",
     desc_zone: "VS WITH A SUPER MOVE: CANCEL OR DIG GARBAGE TO CHARGE, STOP TIME, STRIKE BIG",
     desc_custom: "BUILD YOUR OWN VS MATCH: CPU SKILL & STYLE, RULES AND HANDICAPS",
+    desc_jukebox: "LISTEN TO GENERATED MUSIC AND WATCH THE PIANO ROLL",
     desc_settings: "KEY BINDINGS, HANDLING AND VOLUME",
     desc_quit: "EXIT THE GAME",
     desc_marathon: "CLASSIC ENDLESS MODE - GRAVITY RISES EVERY 10 LINES",
@@ -368,6 +389,16 @@ pub const JA: Strings = Strings {
     vs_cpu: "VS CPU",
     zone_battle: "ゾーンバトル",
     custom_match: "カスタムマッチ",
+    jukebox: "ミュージック",
+    jukebox_hint: "↑↓: 選択    ←→: 変更    ENTER: シード再抽選    ESC: 戻る",
+    jukebox_now: "",
+    jukebox_auto: "おまかせ",
+    jb_seed: "シード",
+    jb_preset: "プリセット",
+    jb_meter: "拍子",
+    jb_kit: "ドラム",
+    jb_intensity: "テンション",
+    jb_zone: "ゾーン",
     settings: "設定",
     quit: "終了",
     marathon: "マラソン",
@@ -381,6 +412,7 @@ pub const JA: Strings = Strings {
     desc_vs: "全30ステージのCPU対戦",
     desc_zone: "必殺技つき対戦: ガベージの相殺や掘りでゲージを溜め、時を止めて一撃",
     desc_custom: "ルールを自由に設定して対戦: CPUの強さ・タイプ・ハンデなど",
+    desc_jukebox: "自動生成された曲を聴きながらピアノロールを眺める",
     desc_settings: "キー設定・操作感・音量",
     desc_quit: "ゲームを終了",
     desc_marathon: "定番のエンドレス。10ラインごとに落下が速くなる",

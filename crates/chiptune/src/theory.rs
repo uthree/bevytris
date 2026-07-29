@@ -56,7 +56,11 @@ impl Mode {
         if self.pitch(6) == 10 {
             return self;
         }
-        if self.is_minor() { Mode::Aeolian } else { Mode::Mixolydian }
+        if self.is_minor() {
+            Mode::Aeolian
+        } else {
+            Mode::Mixolydian
+        }
     }
 
     /// English name for the "now playing" toast.
