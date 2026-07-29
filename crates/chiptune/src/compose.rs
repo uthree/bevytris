@@ -1160,14 +1160,16 @@ pub struct Composer {
     bpm: f32,
     meter: Meter,
     kit: Kit,
-    /// The instrument this piece sings its melody with, rolled per piece.
+    /// The melody instrument the last planned bar actually used. It is
+    /// one of the two below, and which one depends on where in the form
+    /// that bar sat.
     lead: Inst,
     /// Set by [`Composer::force_lead`]; survives re-rolls.
     lead_override: Option<Inst>,
-    /// The second instrument the melody switches to partway through the
-    /// form, and whichever of the two the last planned bar used.
+    /// The pair this piece rolled: the first half of the form, and the
+    /// one the melody switches to for the second half.
+    lead_first: Inst,
     lead_alt: Inst,
-    lead_now: Inst,
     /// How stepwise this piece's melodies are, 0..=1 (see [`contour`]).
     smoothness: f32,
     /// Set by [`Composer::force_smoothness`]; survives re-rolls, where
@@ -1203,8 +1205,8 @@ impl Composer {
             kit: Kit::Chip,
             lead: lead_palette(profile)[0],
             lead_override: None,
+            lead_first: lead_palette(profile)[0],
             lead_alt: lead_palette(profile)[0],
-            lead_now: lead_palette(profile)[0],
             smoothness: default_smoothness(profile),
             smooth_override: None,
             piece: 0,
@@ -1230,7 +1232,7 @@ impl Composer {
             mode: self.mode,
             meter: self.meter,
             kit: self.kit,
-            lead: self.lead,
+            lead: self.lead_first,
             bpm: self.bpm,
             bar: self.bar,
             layers: self.layers,
@@ -1267,12 +1269,12 @@ impl Composer {
         // and someone auditioning an instrument wants to hear it on
         // whatever preset they picked. It still has to belong to the lead
         // channel, or it would silently land on someone else's voice.
-        self.lead = self
+        self.lead_first = self
             .lead_override
             .filter(|i| i.is_melody())
             .unwrap_or_else(|| palette[rng.below(palette.len())]);
         self.lead_alt = self.roll_alt_lead(&mut rng, palette);
-        self.lead_now = self.lead;
+        self.lead = self.lead_first;
         self.material = build_material(
             self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
             profile,
@@ -1352,7 +1354,7 @@ impl Composer {
             // A pin holds for the whole form: no mid-piece switch either,
             // or auditioning one instrument would still play the other.
             Some(pinned) => {
-                self.lead = pinned;
+                self.lead_first = pinned;
                 self.lead_alt = pinned;
             }
             None => {
@@ -1362,42 +1364,42 @@ impl Composer {
                 roll_meter(self.profile, &mut rng);
                 roll_tempo(self.profile, self.meter, &mut rng);
                 roll_kit(self.profile, &mut rng);
-                self.lead = palette[rng.below(palette.len())];
+                self.lead_first = palette[rng.below(palette.len())];
                 self.lead_alt = self.roll_alt_lead(&mut rng, palette);
             }
         }
-        self.lead_now = self.lead;
+        self.lead = self.lead_first;
     }
 
-    /// A different instrument from `self.lead`, for the second half of
+    /// A different instrument from `self.lead_first`, for the second half of
     /// the form. A pinned lead pins both — someone auditioning one
     /// instrument does not want the other one turning up.
     fn roll_alt_lead(&self, rng: &mut Rng, palette: &[Inst]) -> Inst {
         if self.lead_override.is_some() || palette.len() < 2 {
-            return self.lead;
+            return self.lead_first;
         }
         for _ in 0..8 {
             let pick = palette[rng.below(palette.len())];
-            if pick != self.lead {
+            if pick != self.lead_first {
                 return pick;
             }
         }
         // Vanishingly unlikely; take whatever is not the first entry.
         *palette
             .iter()
-            .find(|i| **i != self.lead)
-            .unwrap_or(&self.lead)
+            .find(|i| **i != self.lead_first)
+            .unwrap_or(&self.lead_first)
     }
 
     /// The instrument the melody is on right now. This moves partway
     /// through the form, so it is what the readouts should show.
     pub fn lead(&self) -> Inst {
-        self.lead_now
+        self.lead
     }
 
     /// The instrument this piece rolled for the first half of the form.
     pub fn lead_first(&self) -> Inst {
-        self.lead
+        self.lead_first
     }
 
     /// Drop the playhead at `at` — used once, when the audio stream starts.
@@ -1489,13 +1491,13 @@ impl Composer {
         // fault rather than as an arrangement, and it puts the second
         // instrument on the final chorus, where a new colour pays off.
         let role = self.material.roles[block];
-        self.lead_now = if block >= blocks / 2 {
+        self.lead = if block >= blocks / 2 {
             self.lead_alt
         } else {
-            self.lead
+            self.lead_first
         };
 
-        let mut arr = arrange(self.profile, ctx, self.lead_now);
+        let mut arr = arrange(self.profile, ctx, self.lead);
         match role {
             BlockRole::Full => {}
             BlockRole::Chords => {
@@ -2444,8 +2446,8 @@ mod tests {
         assert_eq!(FORM_ROLES[FORM_ROLES.len() - 1], BlockRole::Full);
         assert_eq!(FORM_ROLES.len(), 10);
         // And there has to be some contrast in there at all.
-        assert!(FORM_ROLES.iter().any(|r| *r == BlockRole::Chords));
-        assert!(FORM_ROLES.iter().any(|r| *r == BlockRole::Break));
+        assert!(FORM_ROLES.contains(&BlockRole::Chords));
+        assert!(FORM_ROLES.contains(&BlockRole::Break));
     }
 
     #[test]
