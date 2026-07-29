@@ -21,6 +21,7 @@ use rand::Rng;
 
 use crate::audio::PlaySfx;
 use crate::emissive;
+use crate::state::AppState;
 
 /// Pseudo-spectrum band count for the visualizer.
 pub const BANDS: usize = 24;
@@ -72,6 +73,9 @@ struct SceneState {
     prev: usize,
     /// Crossfade progress toward `active` (1 = fully shown).
     fade: f32,
+    /// Master gate: scenes only show during gameplay. Menus keep the
+    /// calm starfield so the title screen stays quiet.
+    master: f32,
     timer: Timer,
     /// Dev pin (`BEVYTRIS_SCENE=formation|cyber|galaxy|visualizer`).
     pinned: bool,
@@ -99,6 +103,7 @@ impl Plugin for BackgroundPlugin {
                 active: start,
                 prev: start,
                 fade: 1.0,
+                master: 0.0,
                 timer: Timer::from_seconds(rand::rng().random_range(40.0..70.0), TimerMode::Once),
                 pinned,
             })
@@ -366,7 +371,7 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
                 let color = Color::srgb(0.2 + 0.8 * f, 0.9 - 0.6 * f, 1.0 - 0.2 * f);
                 for top in [false, true] {
                     parent.spawn((
-                        Sprite::from_color(emissive(color, 1.8), Vec2::new(w - 6.0, 10.0)),
+                        Sprite::from_color(emissive(color, 1.3), Vec2::new(w - 6.0, 8.0)),
                         Transform::from_xyz(x, if top { 366.0 } else { -366.0 }, 0.0),
                         EqBar { band, top },
                     ));
@@ -374,7 +379,7 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
             }
             for idx in 0..WAVE_DOTS {
                 parent.spawn((
-                    Sprite::from_color(emissive(Color::srgb(0.5, 0.95, 1.0), 1.8), Vec2::splat(5.0)),
+                    Sprite::from_color(emissive(Color::srgb(0.5, 0.95, 1.0), 1.4), Vec2::splat(4.0)),
                     Transform::from_xyz(
                         -640.0 + (idx as f32 + 0.5) * 1280.0 / WAVE_DOTS as f32,
                         0.0,
@@ -422,12 +427,21 @@ fn update_audio_pulse(
 
 fn update_scene_state(
     time: Res<Time>,
+    app_state: Res<State<AppState>>,
     mut state: ResMut<SceneState>,
     mut weights: ResMut<SceneWeights>,
     mut roots: Query<(&SceneRoot, &mut Visibility)>,
 ) {
     let dt = time.delta_secs();
     state.fade = (state.fade + dt / FADE_SECS).min(1.0);
+
+    // The show only runs during gameplay; menus fade back to the quiet
+    // starfield (in over ~2 s, out faster so the title calms right down).
+    let playing = matches!(*app_state.get(), AppState::Playing | AppState::Restarting);
+    let rate = if playing { dt / 2.0 } else { dt / 0.8 };
+    let target = if playing { 1.0 } else { 0.0 };
+    state.master += (target - state.master).clamp(-rate, rate);
+
     if !state.pinned && state.timer.tick(time.delta()).is_finished() {
         let mut rng = rand::rng();
         let mut next = rng.random_range(0..SCENE_COUNT);
@@ -441,9 +455,10 @@ fn update_scene_state(
     }
 
     let ease = state.fade * state.fade * (3.0 - 2.0 * state.fade);
+    let master = state.master * state.master * (3.0 - 2.0 * state.master);
     weights.0 = [0.0; SCENE_COUNT];
-    weights.0[state.prev] = 1.0 - ease;
-    weights.0[state.active] = ease;
+    weights.0[state.prev] = (1.0 - ease) * master;
+    weights.0[state.active] = ease * master;
 
     for (root, mut vis) in &mut roots {
         let target = if weights.0[root.0] > 0.001 {
@@ -712,8 +727,8 @@ fn animate_visualizer(
     }
     let t = time.elapsed_secs();
     for (bar, mut tf, mut sprite) in &mut bars {
-        let h = 10.0 + pulse.bands[bar.band] * 240.0;
-        let size = sprite.custom_size.unwrap_or(Vec2::new(40.0, 10.0));
+        let h = 8.0 + pulse.bands[bar.band] * 120.0;
+        let size = sprite.custom_size.unwrap_or(Vec2::new(40.0, 8.0));
         sprite.custom_size = Some(Vec2::new(size.x, h));
         tf.translation.y = if bar.top {
             366.0 - h / 2.0
@@ -722,14 +737,14 @@ fn animate_visualizer(
         };
         sprite
             .color
-            .set_alpha(weight * if bar.top { 0.30 } else { 0.5 });
+            .set_alpha(weight * if bar.top { 0.14 } else { 0.26 });
     }
     for (dot, mut tf, mut sprite) in &mut dots {
         let f = dot.idx as f32 / WAVE_DOTS as f32;
         let band = pulse.bands[(dot.idx * BANDS / WAVE_DOTS).min(BANDS - 1)];
-        let y = (f * 21.0 + t * 3.2).sin() * (14.0 + 130.0 * band)
-            + (f * 9.0 - t * 1.4).sin() * 10.0;
+        let y = (f * 21.0 + t * 3.2).sin() * (10.0 + 70.0 * band)
+            + (f * 9.0 - t * 1.4).sin() * 8.0;
         tf.translation.y = y;
-        sprite.color.set_alpha(weight * 0.5);
+        sprite.color.set_alpha(weight * 0.3);
     }
 }
