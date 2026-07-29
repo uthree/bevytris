@@ -608,10 +608,12 @@ fn cell_world(board_tf: &Transform, theme: &BoardTheme, x: i8, y: i8) -> Vec2 {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn map_events_to_effects(
     mut commands: Commands,
     mut events: MessageReader<BoardEvent>,
     mut sfx: MessageWriter<PlaySfx>,
+    mode: Res<GameMode>,
     mut shake: ResMut<CameraShake>,
     mut surge: ResMut<StarSurge>,
     mut glows: Query<&mut FrameGlow>,
@@ -935,13 +937,17 @@ fn map_events_to_effects(
                     pulse_frame(&mut glows, msg.board, green, 0.8);
                     spawn_shockwave(&mut commands, center, green, true);
                     surge.0 = surge.0.max(4.0);
-                    spawn_banner(
-                        &mut commands,
-                        center + Vec2::new(0.0, 80.0),
-                        format!("LEVEL {level}"),
-                        green,
-                        theme.cell,
-                    );
+                    // The banner is a marathon reward; under the timed VS
+                    // ramp it would just spam "LEVEL n" every 25 seconds.
+                    if *mode == GameMode::Single {
+                        spawn_banner(
+                            &mut commands,
+                            center + Vec2::new(0.0, 80.0),
+                            format!("LEVEL {level}"),
+                            green,
+                            theme.cell,
+                        );
+                    }
                 }
             }
             GameEvent::ZoneReady => {
