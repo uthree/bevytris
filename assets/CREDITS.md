@@ -17,24 +17,18 @@
   at runtime as combos climb.
 - Although CC0 requires no attribution, we credit the author with pleasure.
 
-**"Music Jingles"** by **Kenney** (kenney.nl)
-
-- Source: https://kenney.nl/assets/music-jingles
-- License: **CC0 1.0** (public domain dedication), as stated on the source
-  page and in the pack's License.txt.
-- File: `phrase_perfect.wav` (pack's `jingles_NES00.ogg`).
-- Modifications: mixed down to mono, peak-normalized to -1 dBFS (loudness
-  matched to the rest of the SFX), converted to 16-bit PCM WAV.
-
 **"Impact Sounds"** by **Kenney** (kenney.nl)
 
 - Source: https://kenney.nl/assets/impact-sounds
 - License: **CC0 1.0** (public domain dedication).
-- Files: `clear_note.wav` (pack's `impactMetal_heavy_003.ogg`, mono +
-  soft-limited; pitch-shifted up a major triad at runtime for 1-3 line
-  clears), `phrase_tetris.wav` and `phrase_tspin.wav` (derived works:
-  rising major-chord arpeggios mixed from pitch-shifted copies of
-  `impactBell_heavy_002.ogg`).
+- Files (all derived from `impactBell_heavy_002.ogg`): `phrase_tetris.wav`
+  and `phrase_tspin.wav` (rising major-chord arpeggios mixed from
+  pitch-shifted copies of the tuned bell hit), `clear_note.wav` (the
+  tetris arpeggio's first bell note isolated — its real attack extended
+  with a partial-resynthesis ring-out), `phrase_perfect.wav` (two-octave
+  rising bell arpeggio into a high chord over a sub-octave bell, mixed
+  from pitch-shifted copies of that same note), and `zone_ready.wav`
+  (two-note rising chime — octave, then octave+5th — from the same bell).
 
 ## Music (`assets/music/`)
 
@@ -50,6 +44,26 @@
   otherwise unchanged.
 - Although CC0 requires no attribution, we credit the author with pleasure.
   Contact for commissions: juhani.junkala@musician.org
+
+**"4 Chiptunes (Adventure)"** by **Juhani Junkala** (SubspaceAudio)
+
+- Source: https://opengameart.org/content/4-chiptunes-adventure
+- License: **CC0 1.0** (public domain dedication) — confirmed in the pack's
+  INFO.txt: "These music tracks have been released under CC0 creative
+  commons license. You can do anything you want with these tunes."
+- Files: `stage1.ogg` (Stage 1), `stage2.ogg` (Stage 2), `boss_fight.ogg`
+  (Boss Fight), `stage_select.ogg` (Stage Select)
+- Modifications: renamed only (the pack ships OGG Vorbis).
+
+**"NES Shooter Music (5 tracks, 3 jingles)"** by **SketchyLogic**
+
+- Source: https://opengameart.org/content/nes-shooter-music-5-tracks-3-jingles
+- License: **CC0 1.0** (public domain dedication), as stated on the source
+  page ("Attribution is completely optional").
+- Files: `venus.wav` (Venus), `map.wav` (Map), `mars.wav` (Mars),
+  `mercury.wav` (Mercury) — the pack's remaining tracks and jingles are
+  not shipped.
+- Modifications: renamed only.
 
 ## Images (`assets/images/`)
 
@@ -78,5 +92,6 @@ Bevy's bundled default font (a **Fira Mono** subset © Mozilla Foundation,
 
 ## Everything else
 
-Particle/glow textures and other visuals are generated procedurally by code
-in this repository and carry the repository license.
+Particle/glow textures and other visuals, plus the synthesized
+zone-activation boom (`sfx/zone_boom.wav`), are generated procedurally by
+code from this repository and carry the repository license.

@@ -4,9 +4,12 @@
 use bevy::prelude::*;
 
 use crate::core::board::{Cell, BOARD_WIDTH, VISIBLE_HEIGHT};
-use crate::core::game::gravity_seconds;
+use crate::core::game::{gravity_seconds, ZONE_DURATION};
 use crate::core::piece::{cells, PieceKind, Rot};
-use crate::session::{BoardIndex, Countdown, CpuControlled, GameSession, MatchState};
+use crate::i18n::Locale;
+use crate::session::{
+    BoardIndex, Countdown, CpuControlled, GameSession, HumanControlled, MatchState,
+};
 use crate::state::{AppState, GameMode, PlayState};
 
 /// Rows rendered above the visible field so pieces peek over the skyline.
@@ -122,14 +125,22 @@ struct NextSprite {
     i: usize,
 }
 
-#[derive(Component, PartialEq)]
+#[derive(Component, Clone, Copy, PartialEq)]
 enum HudText {
     Score,
     Level,
     Lines,
     Speed,
     Incoming,
+    /// Elapsed race time (sprint / dig).
+    Time,
+    /// Race goal countdown: lines left (sprint) or garbage rows left (dig).
+    Left,
 }
+
+/// Fill sprite of the zone gauge hugging the board's right edge.
+#[derive(Component)]
+struct ZoneGaugeFill;
 
 #[derive(Component)]
 struct DangerBar;
@@ -152,6 +163,7 @@ impl Plugin for RenderPlugin {
                 sync_previews,
                 sync_hud,
                 sync_danger_bar,
+                sync_zone_gauge,
                 sync_countdown,
                 sync_frame_glow,
                 sync_match_hud,
@@ -166,9 +178,11 @@ impl Plugin for RenderPlugin {
 pub fn setup_board_visuals(
     mut commands: Commands,
     mode: Res<GameMode>,
+    locale: Res<Locale>,
     boards: Query<(Entity, &BoardIndex), With<GameSession>>,
 ) {
-    let vs = matches!(*mode, GameMode::VsCpu { .. });
+    let s = locale.s();
+    let vs = matches!(*mode, GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. });
     let cell = if vs { 26.0 } else { 30.0 };
 
     for (entity, index) in &boards {
@@ -224,7 +238,7 @@ pub fn setup_board_visuals(
                 let hold_x = -w / 2.0 - cell * 2.8;
                 let hold_y = h / 2.0 - cell * 1.2;
                 parent.spawn((
-                    Text2d::new("HOLD"),
+                    Text2d::new(s.hold),
                     TextFont { font_size: FontSize::Px(cell * 0.62), ..default() },
                     TextColor(Color::srgb(0.6, 0.7, 0.8)),
                     Transform::from_xyz(hold_x, hold_y + cell * 1.7, 2.0),
@@ -245,7 +259,7 @@ pub fn setup_board_visuals(
                 // Next queue (right of the board).
                 let next_x = w / 2.0 + cell * 2.8;
                 parent.spawn((
-                    Text2d::new("NEXT"),
+                    Text2d::new(s.next),
                     TextFont { font_size: FontSize::Px(cell * 0.62), ..default() },
                     TextColor(Color::srgb(0.6, 0.7, 0.8)),
                     Transform::from_xyz(next_x, h / 2.0 + cell * 0.5, 2.0),
@@ -273,17 +287,54 @@ pub fn setup_board_visuals(
                     DangerBar,
                 ));
 
-                // HUD text column (left side, under hold box).
+                // Zone gauge hugging the right edge (zone battle only):
+                // a dark track with a fill that charges bottom-up.
+                if matches!(*mode, GameMode::ZoneBattle { .. }) {
+                    parent.spawn((
+                        Sprite::from_color(
+                            Color::srgba(0.07, 0.1, 0.18, 0.9),
+                            Vec2::new(7.0, h),
+                        ),
+                        Transform::from_xyz(w / 2.0 + 14.0, 0.0, 1.5),
+                    ));
+                    parent.spawn((
+                        Sprite::from_color(Color::NONE, Vec2::new(7.0, 1.0)),
+                        Transform::from_xyz(w / 2.0 + 14.0, -h / 2.0, 2.0),
+                        ZoneGaugeFill,
+                    ));
+                    parent.spawn((
+                        Text2d::new(s.zone_gauge),
+                        TextFont { font_size: FontSize::Px(cell * 0.45), ..default() },
+                        TextColor(Color::srgb(0.5, 0.6, 0.7)),
+                        Transform::from_xyz(w / 2.0 + 14.0, -h / 2.0 - cell * 0.7, 2.0),
+                    ));
+                }
+
+                // HUD text column (left side, under hold box). Races swap
+                // the marathon columns for a timer and a goal countdown.
                 let hud_x = -w / 2.0 - cell * 2.8;
-                let entries: &[(&str, HudText, f32)] = &[
-                    ("SCORE", HudText::Score, 0.0),
-                    ("LEVEL", HudText::Level, 1.0),
-                    ("LINES", HudText::Lines, 2.0),
-                    ("SPEED", HudText::Speed, 3.0),
-                    ("ATK IN", HudText::Incoming, 4.0),
-                ];
-                for (label, marker, row) in entries {
-                    let base_y = hold_y - cell * 3.2 - row * cell * 2.2;
+                let entries: Vec<(&str, HudText)> = match *mode {
+                    GameMode::Sprint | GameMode::Dig => vec![
+                        (s.time, HudText::Time),
+                        (s.left, HudText::Left),
+                        (s.score, HudText::Score),
+                    ],
+                    GameMode::ZoneBattle { .. } => vec![
+                        (s.score, HudText::Score),
+                        (s.level, HudText::Level),
+                        (s.lines, HudText::Lines),
+                        (s.atk_in, HudText::Incoming),
+                    ],
+                    _ => vec![
+                        (s.score, HudText::Score),
+                        (s.level, HudText::Level),
+                        (s.lines, HudText::Lines),
+                        (s.speed, HudText::Speed),
+                        (s.atk_in, HudText::Incoming),
+                    ],
+                };
+                for (row, (label, marker)) in entries.iter().enumerate() {
+                    let base_y = hold_y - cell * 3.2 - row as f32 * cell * 2.2;
                     parent.spawn((
                         Text2d::new(*label),
                         TextFont { font_size: FontSize::Px(cell * 0.5), ..default() },
@@ -295,23 +346,22 @@ pub fn setup_board_visuals(
                         TextFont { font_size: FontSize::Px(cell * 0.7), ..default() },
                         TextColor(Color::WHITE),
                         Transform::from_xyz(hud_x, base_y - cell * 0.85, 2.0),
-                        match marker {
-                            HudText::Score => HudText::Score,
-                            HudText::Level => HudText::Level,
-                            HudText::Lines => HudText::Lines,
-                            HudText::Speed => HudText::Speed,
-                            HudText::Incoming => HudText::Incoming,
-                        },
+                        *marker,
                     ));
                 }
 
                 // Player name over the board.
-                let name = if !vs {
-                    "MARATHON"
-                } else if index.0 == 0 {
-                    "YOU"
-                } else {
-                    "CPU"
+                let name = match *mode {
+                    GameMode::Single => s.marathon,
+                    GameMode::Sprint => s.sprint,
+                    GameMode::Dig => s.dig,
+                    GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } => {
+                        if index.0 == 0 {
+                            s.you
+                        } else {
+                            s.cpu
+                        }
+                    }
                 };
                 parent.spawn((
                     Text2d::new(name),
@@ -346,22 +396,47 @@ pub fn setup_board_visuals(
 }
 
 fn sync_match_hud(
+    mode: Res<GameMode>,
+    locale: Res<Locale>,
     match_state: Option<Res<MatchState>>,
     cpus: Query<&CpuControlled>,
+    players: Query<&GameSession, With<HumanControlled>>,
     mut texts: Query<&mut Text2d, With<MatchHudText>>,
 ) {
     let Ok(mut text) = texts.single_mut() else {
         return;
     };
+    let s = locale.s();
     let Some(ms) = match_state else { return };
-    let Some(stage) = ms.stage else { return };
+    let title = match (ms.stage, *mode) {
+        (Some(stage), GameMode::ZoneBattle { .. }) => {
+            format!("{} {stage:02}", s.zone_prefix)
+        }
+        (Some(stage), _) => format!("{} {stage:02}", s.stage_prefix),
+        _ => return,
+    };
     let archetype = cpus
         .single()
         .map(|c| c.profile.archetype.label())
         .unwrap_or("");
+    // Margin time is symmetric, so the player's board speaks for both.
+    let ramp = players
+        .single()
+        .map(|s| s.game.attack_multiplier())
+        .unwrap_or(1.0);
+    let ramp = if ramp > 1.0 {
+        format!("   {}", s.atk_mult.replace("{m}", &ramp.to_string()))
+    } else {
+        String::new()
+    };
+    let score = s
+        .vs_score
+        .replace("{p}", &ms.player_wins.to_string())
+        .replace("{c}", &ms.cpu_wins.to_string());
+    let first_to = s.first_to.replace("{n}", &ms.wins_needed.to_string());
     let line = format!(
-        "STAGE {stage:02} {archetype}   ROUND {}   YOU {} - {} CPU   (FIRST TO {})",
-        ms.round, ms.player_wins, ms.cpu_wins, ms.wins_needed
+        "{title} {archetype}   {} {}   {score}   ({first_to}){ramp}",
+        s.round, ms.round
     );
     if **text != line {
         **text = line;
@@ -420,6 +495,9 @@ fn sync_cells(
                         }
                     }
                     Cell::Garbage => Color::srgb(0.42, 0.44, 0.50),
+                    // Banked zone lines glow white so the growing payload
+                    // reads as charged energy, not dead garbage.
+                    Cell::Zone => crate::emissive(Color::srgb(0.92, 0.95, 1.0), 1.4),
                 }
             } else if !game.game_over && ghost_cells.contains(&p) {
                 piece_color(game.active.kind, 1.1, 0.30)
@@ -497,6 +575,7 @@ fn sync_previews(
 }
 
 fn sync_hud(
+    mode: Res<GameMode>,
     boards: Query<(&GameSession, &Children)>,
     mut texts: Query<(&HudText, &mut Text2d, &mut TextColor)>,
 ) {
@@ -544,7 +623,74 @@ fn sync_hud(
                         Color::srgb(1.0, 0.25, 0.25)
                     };
                 }
+                HudText::Time => {
+                    let s = crate::session::format_race_time(game.stats.time);
+                    if **text != s {
+                        **text = s;
+                    }
+                }
+                HudText::Left => {
+                    let left = match *mode {
+                        GameMode::Sprint => {
+                            crate::session::SPRINT_GOAL_LINES.saturating_sub(game.lines)
+                        }
+                        _ => game.board.garbage_rows(),
+                    };
+                    let s = left.to_string();
+                    if **text != s {
+                        **text = s;
+                    }
+                    // Glow gold on the home stretch.
+                    color.0 = if left <= 5 {
+                        Color::srgb(1.0, 0.85, 0.3)
+                    } else {
+                        Color::WHITE
+                    };
+                }
             }
+        }
+    }
+}
+
+/// Zone gauge: fills cyan while charging, pulses gold when full, and
+/// drains as a pulsing white bar while the zone runs.
+fn sync_zone_gauge(
+    time: Res<Time>,
+    boards: Query<(&GameSession, &BoardTheme, &Children)>,
+    mut fills: Query<(&mut Sprite, &mut Transform), With<ZoneGaugeFill>>,
+) {
+    let t = time.elapsed_secs();
+    for (session, theme, children) in &boards {
+        let Some(zone) = &session.game.zone else { continue };
+        let h = theme.cell * VISIBLE_HEIGHT as f32;
+        let (frac, color) = match zone.active {
+            Some(remaining) => {
+                let pulse = 0.5 + 0.5 * (t * 14.0).sin();
+                (
+                    (remaining / ZONE_DURATION).clamp(0.0, 1.0),
+                    crate::emissive(Color::srgb(0.95, 0.97, 1.0), 1.4 + 0.8 * pulse),
+                )
+            }
+            None if zone.charge >= 1.0 => {
+                let pulse = 0.5 + 0.5 * (t * 9.0).sin();
+                (
+                    1.0,
+                    crate::emissive(Color::srgb(1.0, 0.85, 0.25), 1.2 + 1.0 * pulse),
+                )
+            }
+            None => (
+                zone.charge.clamp(0.0, 1.0),
+                crate::emissive(Color::srgb(0.25, 0.85, 1.0), 1.15),
+            ),
+        };
+        for child in children.iter() {
+            let Ok((mut sprite, mut tf)) = fills.get_mut(child) else {
+                continue;
+            };
+            let bar_h = (frac * h).max(0.001);
+            sprite.custom_size = Some(Vec2::new(7.0, bar_h));
+            tf.translation.y = -h / 2.0 + bar_h / 2.0;
+            sprite.color = color;
         }
     }
 }

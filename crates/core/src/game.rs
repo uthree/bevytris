@@ -30,6 +30,29 @@ pub fn gravity_seconds(level: u32) -> f32 {
 /// there anyway, so climbing further would only inflate the HUD number.
 pub const MAX_TIMED_LEVEL: u32 = 20;
 
+/// Seconds an activated zone lasts.
+pub const ZONE_DURATION: f32 = 12.0;
+/// Zone gauge fill per cancelled garbage row (1.0 = full). Defense is
+/// the battery: offsetting incoming garbage is the main way to charge.
+pub const ZONE_CHARGE_PER_CANCEL: f32 = 0.12;
+/// Smaller fill per cleared row that contained garbage — digging out
+/// garbage that already rose still earns a little charge.
+pub const ZONE_CHARGE_PER_GARBAGE_LINE: f32 = 0.05;
+
+/// Tetris-Effect-style super move: charge the gauge by cancelling (or
+/// digging out) garbage, then stop time — cleared rows bank at the
+/// bottom instead of vanishing and all fire as one attack when the zone
+/// ends.
+#[derive(Debug, Clone, Default)]
+pub struct Zone {
+    /// Gauge fill, 0..=1. Activation requires a full gauge.
+    pub charge: f32,
+    /// Remaining seconds while active.
+    pub active: Option<f32>,
+    /// Rows banked at the bottom so far this zone.
+    pub lines: u32,
+}
+
 /// How `level` (and with it gravity) advances during play.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Leveling {
@@ -40,6 +63,9 @@ pub enum Leveling {
     /// Cleared lines never change it, so efficient downstacking is never
     /// punished with extra gravity and stalling never keeps a match slow.
     Timed { seconds_per_level: f32 },
+    /// Race rule (sprint / dig): the level never moves — runs are timed,
+    /// so gravity stays constant and only execution speed matters.
+    Fixed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +119,17 @@ pub enum GameEvent {
     Held,
     HoldBlocked,
     LevelUp { level: u32 },
+    /// Margin time kicked in (or stepped up): attack now scales by this.
+    AttackRamp { multiplier: f32 },
     GarbageRose { rows: u32 },
+    /// The zone gauge just reached full charge.
+    ZoneReady,
+    /// The zone super move started.
+    ZoneActivated,
+    /// A lock during an active zone banked full rows at the bottom.
+    ZoneLines { banked: u32, total: u32 },
+    /// The zone ended: banked lines cleared and fired as one attack.
+    ZoneEnded { lines: u32, attack: u32 },
     TopOut,
 }
 
@@ -146,6 +182,15 @@ pub struct Game {
     pub incoming: VecDeque<(u32, i8)>,
     garbage_rng: StdRng,
 
+    /// Margin time: seconds of play after which attack scales up (see
+    /// [`Game::attack_multiplier`]). None disables the ramp (solo modes).
+    pub margin_time: Option<f32>,
+    /// Last multiplier announced via [`GameEvent::AttackRamp`].
+    last_attack_mult: f32,
+
+    /// Zone super-move state; None disables the mechanic entirely.
+    pub zone: Option<Zone>,
+
     pub game_over: bool,
     pub events: Vec<GameEvent>,
     pub stats: Stats,
@@ -183,6 +228,9 @@ impl Game {
             soft_drop_factor: SOFT_DROP_FACTOR,
             incoming: VecDeque::new(),
             garbage_rng: StdRng::seed_from_u64(seed ^ 0x6761_7262_6167_65),
+            margin_time: None,
+            last_attack_mult: 1.0,
+            zone: None,
             game_over: false,
             events: Vec::new(),
             stats: Stats::default(),
@@ -198,6 +246,27 @@ impl Game {
     /// Total queued garbage rows (for the danger meter UI).
     pub fn incoming_total(&self) -> u32 {
         self.incoming.iter().map(|(n, _)| n).sum()
+    }
+
+    /// Margin-time attack multiplier: x1 until `margin_time`, then x1.5,
+    /// stepping up every 30 s (x2, x3) and capping at x4. Long rounds
+    /// escalate until somebody falls.
+    pub fn attack_multiplier(&self) -> f32 {
+        let Some(margin) = self.margin_time else {
+            return 1.0;
+        };
+        let over = self.stats.time as f32 - margin;
+        if over < 0.0 {
+            1.0
+        } else if over < 30.0 {
+            1.5
+        } else if over < 60.0 {
+            2.0
+        } else if over < 90.0 {
+            3.0
+        } else {
+            4.0
+        }
     }
 
     /// Y position the active piece would land at if hard-dropped.
@@ -229,13 +298,39 @@ impl Game {
             }
         }
 
-        let mut sec_per_row = gravity_seconds(self.level);
-        if self.soft_dropping {
-            sec_per_row /= self.soft_drop_factor.max(1.0);
+        if self.margin_time.is_some() {
+            let mult = self.attack_multiplier();
+            if mult > self.last_attack_mult {
+                self.last_attack_mult = mult;
+                self.events.push(GameEvent::AttackRamp { multiplier: mult });
+            }
         }
-        self.gravity_acc += dt / sec_per_row.max(1e-6);
-        // One frame can never need more than the board height in steps.
-        self.gravity_acc = self.gravity_acc.min(64.0);
+
+        // Zone countdown; expiry fires the banked lines.
+        let expired = match &mut self.zone {
+            Some(Zone { active: Some(t), .. }) => {
+                *t -= dt;
+                *t <= 0.0
+            }
+            _ => false,
+        };
+        if expired {
+            self.end_zone();
+        }
+
+        // Time stands still inside the zone: no gravity (soft drop still
+        // works) and no lockdown — only a hard drop commits a piece.
+        let zone_frozen = self.zone_active();
+
+        if !zone_frozen || self.soft_dropping {
+            let mut sec_per_row = gravity_seconds(self.level);
+            if self.soft_dropping {
+                sec_per_row /= self.soft_drop_factor.max(1.0);
+            }
+            self.gravity_acc += dt / sec_per_row.max(1e-6);
+            // One frame can never need more than the board height in steps.
+            self.gravity_acc = self.gravity_acc.min(64.0);
+        }
 
         let mut descended = false;
         while self.gravity_acc >= 1.0 {
@@ -261,7 +356,7 @@ impl Game {
         // stall. A frame in which the piece descended charges nothing, so a
         // lag spike that both lands the piece and exceeds LOCK_DELAY cannot
         // insta-lock it.
-        if self.grounded() {
+        if self.grounded() && !zone_frozen {
             self.touched_down = true;
             if !descended {
                 self.lock_timer += dt;
@@ -270,6 +365,53 @@ impl Game {
                 self.lock_active();
             }
         }
+    }
+
+    /// True while the zone super move is running.
+    pub fn zone_active(&self) -> bool {
+        matches!(&self.zone, Some(z) if z.active.is_some())
+    }
+
+    /// Fire the zone if the gauge is full. Returns whether it started.
+    pub fn activate_zone(&mut self) -> bool {
+        if self.game_over {
+            return false;
+        }
+        let Some(zone) = &mut self.zone else {
+            return false;
+        };
+        if zone.active.is_some() || zone.charge < 1.0 {
+            return false;
+        }
+        zone.charge = 0.0;
+        zone.active = Some(ZONE_DURATION);
+        self.events.push(GameEvent::ZoneActivated);
+        true
+    }
+
+    /// Zone end: banked rows vanish and fire as a single attack. The
+    /// margin-time multiplier applies, and the attack cancels queued
+    /// garbage first like any other clear.
+    fn end_zone(&mut self) {
+        let Some(zone) = &mut self.zone else { return };
+        if zone.active.take().is_none() {
+            return;
+        }
+        let lines = std::mem::take(&mut zone.lines);
+        self.board.clear_zone_rows();
+        let mut attack = lines
+            + match lines {
+                0..=3 => 0,
+                4..=5 => 1,
+                6..=7 => 2,
+                8..=9 => 4,
+                _ => 6,
+            };
+        attack = (attack as f32 * self.attack_multiplier()).floor() as u32;
+        attack = self.cancel_incoming(attack);
+        self.stats.attack_sent += attack;
+        self.score += (150 * lines * lines * self.level) as u64;
+        self.events.push(GameEvent::ZoneEnded { lines, attack });
     }
 
     fn note_descent(&mut self) {
@@ -382,7 +524,13 @@ impl Game {
     }
 
     fn spawn_active(&mut self, kind: PieceKind) {
-        let piece = ActivePiece::spawn(kind);
+        let mut piece = ActivePiece::spawn(kind);
+        if !self.board.fits(&piece) && self.zone_active() {
+            // The banked zone rows pushed the stack into the spawn area;
+            // ending the zone early frees them and may save the spawn.
+            self.end_zone();
+            piece = ActivePiece::spawn(kind);
+        }
         if !self.board.fits(&piece) {
             // Block out: the new piece overlaps the stack.
             self.active = piece;
@@ -458,32 +606,65 @@ impl Game {
         self.stats.pieces += 1;
         self.events.push(GameEvent::Locked { piece });
 
-        // Lock out: the whole piece settled above the visible field.
+        // Lock out: the whole piece settled above the visible field. In a
+        // zone the banked rows caused the squeeze — end it (dropping the
+        // stack back down) instead of ending the game.
         if piece.board_cells().iter().all(|&(_, y)| y >= VISIBLE_HEIGHT) {
-            self.top_out();
-            return;
+            if self.zone_active() {
+                self.end_zone();
+            } else {
+                self.top_out();
+                return;
+            }
         }
 
-        let rows = self.board.clear_full_rows();
-        let lines = rows.len() as u32;
-
-        if lines > 0 {
-            self.apply_clear(lines, rows, tspin);
-        } else {
-            match tspin {
-                Some(kind) => {
-                    let mini = kind == ClearKind::TSpinMini;
-                    let base = if mini { 100 } else { 400 };
-                    self.score += (base * self.level) as u64;
-                    if !mini {
-                        self.stats.tspins += 1;
+        if self.zone_active() {
+            // Time is stopped: full rows sink to the bottom as zone lines
+            // instead of clearing; combo, b2b and garbage stay frozen.
+            let banked = self.board.bank_full_rows();
+            if banked > 0 {
+                let total = match &mut self.zone {
+                    Some(zone) => {
+                        zone.lines += banked;
+                        zone.lines
                     }
-                    self.events.push(GameEvent::TSpinNoLines { mini });
-                }
-                None => {}
+                    None => banked,
+                };
+                self.score += (100 * banked * self.level) as u64;
+                self.events.push(GameEvent::ZoneLines { banked, total });
             }
-            self.combo = -1;
-            self.rise_garbage();
+        } else {
+            // Count, before the collapse, how many of the rows about to
+            // clear contain garbage (they feed the zone gauge a little).
+            let garbage_rows_cleared = (0..super::board::BOARD_HEIGHT)
+                .filter(|&y| {
+                    (0..super::board::BOARD_WIDTH)
+                        .all(|x| self.board.cell(x, y).is_some())
+                        && (0..super::board::BOARD_WIDTH)
+                            .any(|x| self.board.cell(x, y) == Some(super::board::Cell::Garbage))
+                })
+                .count() as u32;
+            let rows = self.board.clear_full_rows();
+            let lines = rows.len() as u32;
+
+            if lines > 0 {
+                self.apply_clear(lines, rows, tspin, garbage_rows_cleared);
+            } else {
+                match tspin {
+                    Some(kind) => {
+                        let mini = kind == ClearKind::TSpinMini;
+                        let base = if mini { 100 } else { 400 };
+                        self.score += (base * self.level) as u64;
+                        if !mini {
+                            self.stats.tspins += 1;
+                        }
+                        self.events.push(GameEvent::TSpinNoLines { mini });
+                    }
+                    None => {}
+                }
+                self.combo = -1;
+                self.rise_garbage();
+            }
         }
 
         if self.game_over {
@@ -494,10 +675,17 @@ impl Game {
         self.spawn_active(kind);
     }
 
-    fn apply_clear(&mut self, lines: u32, rows: Vec<i8>, tspin: Option<ClearKind>) {
+    fn apply_clear(
+        &mut self,
+        lines: u32,
+        rows: Vec<i8>,
+        tspin: Option<ClearKind>,
+        garbage_rows_cleared: u32,
+    ) {
         let kind = tspin.unwrap_or(ClearKind::Normal);
         let difficult = lines == 4 || tspin.is_some();
         let b2b = difficult && self.b2b_armed;
+
 
         self.combo += 1;
         let combo = self.combo as u32;
@@ -566,9 +754,29 @@ impl Game {
         if perfect_clear {
             attack += 10;
         }
+        // Margin time: long rounds scale everyone's attack to force an end.
+        attack = (attack as f32 * self.attack_multiplier()).floor() as u32;
         // Line clears cancel queued garbage before sending the remainder.
-        attack = self.cancel_incoming(attack);
+        let sent = self.cancel_incoming(attack);
+        let cancelled = attack - sent;
+        attack = sent;
         self.stats.attack_sent += attack;
+
+        // Garbage feeds the zone gauge: cancelling it pays well, digging
+        // out rows that already rose pays a little. Clean clears pay zero.
+        let charge_gain = cancelled as f32 * ZONE_CHARGE_PER_CANCEL
+            + garbage_rows_cleared as f32 * ZONE_CHARGE_PER_GARBAGE_LINE;
+        if charge_gain > 0.0 {
+            if let Some(zone) = &mut self.zone {
+                if zone.active.is_none() {
+                    let was_full = zone.charge >= 1.0;
+                    zone.charge = (zone.charge + charge_gain).min(1.0);
+                    if !was_full && zone.charge >= 1.0 {
+                        self.events.push(GameEvent::ZoneReady);
+                    }
+                }
+            }
+        }
 
         // --- Lines / level -------------------------------------------------
         self.lines += lines;
@@ -911,6 +1119,213 @@ mod tests {
         assert_eq!(game.lines, 30);
         assert_eq!(game.level, 1, "line clears must not level up in timed mode");
         assert!(!game.events.iter().any(|e| matches!(e, GameEvent::LevelUp { .. })));
+    }
+
+    /// Drop a vertical I into the hole at column 4 of row 0.
+    fn drop_i_into_col4(game: &mut Game) {
+        force_piece(game, PieceKind::I);
+        game.rotate(true);
+        while game.active.x + 2 != 4 {
+            let dir = if game.active.x + 2 < 4 { 1 } else { -1 };
+            if !game.move_horizontal(dir) {
+                break;
+            }
+        }
+        game.hard_drop();
+    }
+
+    #[test]
+    fn clean_clear_charges_nothing() {
+        let mut game = Game::new(1, 1);
+        game.zone = Some(Zone::default());
+        // Row built purely of piece cells: no garbage anywhere involved.
+        for x in 0..BOARD_WIDTH {
+            if x != 4 {
+                game.board.set_cell(x, 0, Some(Cell::Piece(PieceKind::O)));
+            }
+        }
+        drop_i_into_col4(&mut game);
+        assert_eq!(game.lines, 1);
+        assert_eq!(game.zone.as_ref().unwrap().charge, 0.0);
+    }
+
+    #[test]
+    fn digging_garbage_charges_a_little() {
+        let mut game = Game::new(1, 1);
+        game.zone = Some(Zone::default());
+        fill_row(&mut game, 0, &[4]); // a garbage row on the board
+        drop_i_into_col4(&mut game);
+        let charge = game.zone.as_ref().unwrap().charge;
+        assert!(
+            (charge - ZONE_CHARGE_PER_GARBAGE_LINE).abs() < 1e-6,
+            "got {charge}"
+        );
+        assert!(!game.activate_zone(), "partial gauge must not activate");
+    }
+
+    #[test]
+    fn cancelling_charges_more_than_digging() {
+        let mut game = Game::new(1, 1);
+        game.zone = Some(Zone::default());
+        // A tetris (attack 4) against 3 queued garbage cancels 3 rows;
+        // the 4 cleared rows are garbage-built and pay the small rate too.
+        game.queue_garbage(3);
+        for y in 0..4 {
+            fill_row(&mut game, y, &[9]);
+        }
+        game.board.set_cell(0, 4, Some(Cell::Garbage));
+        force_piece(&mut game, PieceKind::I);
+        game.rotate(true);
+        while game.active.x + 2 < 9 {
+            if !game.move_horizontal(1) {
+                break;
+            }
+        }
+        game.hard_drop();
+        let charge = game.zone.as_ref().unwrap().charge;
+        let expected = 3.0 * ZONE_CHARGE_PER_CANCEL + 4.0 * ZONE_CHARGE_PER_GARBAGE_LINE;
+        assert!((charge - expected).abs() < 1e-6, "got {charge}");
+        assert_eq!(game.incoming_total(), 0, "garbage fully cancelled");
+    }
+
+    #[test]
+    fn zone_banks_cleared_rows_and_fires_on_end() {
+        let mut game = Game::new(1, 1);
+        game.zone = Some(Zone { charge: 1.0, ..Default::default() });
+        assert!(game.activate_zone());
+        assert!(game.zone_active());
+
+        fill_row(&mut game, 0, &[4]);
+        drop_i_into_col4(&mut game);
+        // The full row banks at the bottom instead of clearing.
+        assert!(!game.events.iter().any(|e| matches!(e, GameEvent::Cleared(_))));
+        assert!(game
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::ZoneLines { banked: 1, total: 1 })));
+        assert!(
+            (0..BOARD_WIDTH).all(|x| game.board.cell(x, 0) == Some(Cell::Zone)),
+            "bottom row must be a zone line"
+        );
+
+        // Time stands still: the active piece must not fall.
+        let y0 = game.active.y;
+        game.tick(2.0);
+        assert_eq!(game.active.y, y0, "gravity must freeze during the zone");
+
+        // Timer expiry fires the banked line as attack.
+        game.tick(ZONE_DURATION);
+        assert!(!game.zone_active());
+        assert!(game
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::ZoneEnded { lines: 1, attack: 1 })));
+        assert!(
+            (0..BOARD_WIDTH).all(|x| game.board.cell(x, 0) != Some(Cell::Zone)),
+            "zone rows must clear when the zone ends"
+        );
+        assert_eq!(game.zone.as_ref().unwrap().charge, 0.0, "gauge spent");
+    }
+
+    #[test]
+    fn garbage_stays_queued_during_zone() {
+        let mut game = Game::new(3, 1);
+        game.zone = Some(Zone { charge: 1.0, ..Default::default() });
+        assert!(game.activate_zone());
+        game.queue_garbage(3);
+        game.hard_drop(); // non-clearing lock during the zone
+        assert_eq!(game.incoming_total(), 3, "garbage must not rise in a zone");
+        game.tick(ZONE_DURATION + 0.1); // zone ends
+        game.hard_drop(); // now it rises as usual
+        assert_eq!(game.incoming_total(), 0);
+    }
+
+    #[test]
+    fn margin_time_multiplier_ladder() {
+        let mut game = Game::new(1, 1);
+        assert_eq!(game.attack_multiplier(), 1.0, "disabled without margin time");
+        game.margin_time = Some(90.0);
+        for (t, expected) in [
+            (0.0, 1.0),
+            (89.9, 1.0),
+            (90.0, 1.5),
+            (120.0, 2.0),
+            (150.0, 3.0),
+            (180.0, 4.0),
+            (600.0, 4.0), // capped
+        ] {
+            game.stats.time = t;
+            assert_eq!(game.attack_multiplier(), expected, "at t={t}");
+        }
+    }
+
+    #[test]
+    fn margin_time_scales_attack_and_announces() {
+        let mut game = Game::new(1, 1);
+        game.margin_time = Some(90.0);
+        game.stats.time = 121.0; // x2 window
+        game.tick(1.0 / 60.0);
+        assert!(
+            game.events
+                .iter()
+                .any(|e| matches!(e, GameEvent::AttackRamp { multiplier } if *multiplier == 2.0)),
+            "crossing margin time must announce the ramp"
+        );
+        // Tetris at x2 sends 8 instead of 4.
+        for y in 0..4 {
+            fill_row(&mut game, y, &[9]);
+        }
+        game.board.set_cell(0, 4, Some(Cell::Garbage));
+        force_piece(&mut game, PieceKind::I);
+        game.rotate(true);
+        while game.active.x + 2 < 9 {
+            if !game.move_horizontal(1) {
+                break;
+            }
+        }
+        game.hard_drop();
+        let clear = game
+            .events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::Cleared(c) => Some(c.clone()),
+                _ => None,
+            })
+            .expect("tetris cleared");
+        assert_eq!(clear.attack, 8);
+    }
+
+    #[test]
+    fn fixed_leveling_never_moves() {
+        let mut game = Game::new(1, 1);
+        game.leveling = Leveling::Fixed;
+        game.tick(500.0); // time cannot level it up...
+        assert_eq!(game.level, 1);
+        game.lines = 39; // ...and neither can cleared lines
+        fill_row(&mut game, 0, &[4]);
+        force_piece(&mut game, PieceKind::I);
+        game.rotate(true);
+        while game.active.x + 2 != 4 {
+            let dir = if game.active.x + 2 < 4 { 1 } else { -1 };
+            if !game.move_horizontal(dir) {
+                break;
+            }
+        }
+        game.hard_drop();
+        assert_eq!(game.lines, 40);
+        assert_eq!(game.level, 1);
+        assert!(!game.events.iter().any(|e| matches!(e, GameEvent::LevelUp { .. })));
+    }
+
+    #[test]
+    fn garbage_rows_counts_rows_with_garbage_left() {
+        let mut game = Game::new(1, 1);
+        assert_eq!(game.board.garbage_rows(), 0);
+        game.board.add_garbage(3, 4);
+        assert_eq!(game.board.garbage_rows(), 3);
+        // A stray piece cell does not count as garbage.
+        game.board.set_cell(0, 5, Some(Cell::Piece(PieceKind::O)));
+        assert_eq!(game.board.garbage_rows(), 3);
     }
 
     #[test]

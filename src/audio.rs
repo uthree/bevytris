@@ -21,13 +21,17 @@ pub enum Sfx {
     Lock,
     Hold,
     HoldFail,
-    /// Clear(4) is the TETRIS jingle phrase; 1-3 are short synth risers.
+    /// Clear(4) is the TETRIS arpeggio; 1-3 play its first bell alone.
     Clear(u32),
     /// Sparkle for spins that clear no lines.
     TSpin,
     /// Jingle phrase for T-spins that clear lines.
     TSpinClear,
     PerfectClear,
+    /// The zone gauge just filled: a bright two-note bell chime.
+    ZoneReady,
+    /// Zone activation: a deep descending sub-bass boom.
+    ZoneBoom,
     B2b,
     /// Coin chime pitched up a pentatonic step per combo count.
     Combo(u32),
@@ -61,13 +65,15 @@ pub struct SfxBank {
     lock: Handle<AudioSource>,
     hold: Handle<AudioSource>,
     hold_fail: Handle<AudioSource>,
-    /// Single stable-pitch note for 1-3 line clears (pitched up a major
-    /// triad by line count so the scale reads clearly).
+    /// The tetris arpeggio's first bell note isolated, shared by all 1-3
+    /// line clears — a modest single ding in the same voice as the fanfare.
     clear_note: Handle<AudioSource>,
     tetris: Handle<AudioSource>,
     tspin: Handle<AudioSource>,
     tspin_clear: Handle<AudioSource>,
     perfect: Handle<AudioSource>,
+    zone_ready: Handle<AudioSource>,
+    zone_boom: Handle<AudioSource>,
     danger_alarm: Handle<AudioSource>,
     b2b: Handle<AudioSource>,
     combo: Handle<AudioSource>,
@@ -106,16 +112,18 @@ impl SfxBank {
             Sfx::Hold => (self.hold.clone(), 0.5, 1.0),
             Sfx::HoldFail => (self.hold_fail.clone(), 0.5, 1.0),
             Sfx::Clear(n) => match n.clamp(1, 4) {
-                // Same metallic hit stepping up a major triad: the pitch
-                // difference between single/double/triple is unmistakable.
-                1 => (self.clear_note.clone(), 1.0, 1.0),
-                2 => (self.clear_note.clone(), 1.0, 2f32.powf(4.0 / 12.0)),
-                3 => (self.clear_note.clone(), 1.0, 2f32.powf(7.0 / 12.0)),
+                // 1-3 share the fanfare's single opening bell; the count
+                // is already told by score/combo cues.
+                1..=3 => (self.clear_note.clone(), 0.9, 1.0),
                 _ => (self.tetris.clone(), 1.0, 1.0),
             },
             Sfx::TSpin => (self.tspin.clone(), 0.9, 1.0),
             Sfx::TSpinClear => (self.tspin_clear.clone(), 1.0, 1.0),
             Sfx::PerfectClear => (self.perfect.clone(), 1.0, 1.0),
+            Sfx::ZoneReady => (self.zone_ready.clone(), 0.95, 1.0),
+            // The boom is synthesized dense (rms -8 dB), so it sits a bit
+            // lower to leave room for the rest of the mix.
+            Sfx::ZoneBoom => (self.zone_boom.clone(), 0.85, 1.0),
             Sfx::B2b => (self.b2b.clone(), 0.6, 1.0),
             Sfx::Combo(n) => {
                 let i = (n.max(1) as usize - 1).min(COMBO_SEMITONES.len() - 1);
@@ -153,6 +161,8 @@ fn build_sfx_bank(asset_server: &AssetServer) -> SfxBank {
         tspin: asset_server.load("sfx/tspin.wav"),
         tspin_clear: asset_server.load("sfx/phrase_tspin.wav"),
         perfect: asset_server.load("sfx/phrase_perfect.wav"),
+        zone_ready: asset_server.load("sfx/zone_ready.wav"),
+        zone_boom: asset_server.load("sfx/zone_boom.wav"),
         danger_alarm: asset_server.load("sfx/danger_alarm.wav"),
         b2b: asset_server.load("sfx/b2b.wav"),
         combo: asset_server.load("sfx/combo.wav"),
@@ -174,13 +184,22 @@ fn build_sfx_bank(asset_server: &AssetServer) -> SfxBank {
 // Bevy plumbing
 // ---------------------------------------------------------------------------
 
-/// BGM streamed from CC0 assets ("Retro Game Music Pack" by Juhani Junkala,
-/// see assets/CREDITS.md). In-game tracks are picked at random per match.
+/// BGM streamed from CC0 assets (Juhani Junkala's "Retro Game Music Pack"
+/// and "4 Chiptunes (Adventure)", SketchyLogic's "NES Shooter Music"; see
+/// assets/CREDITS.md). In-game tracks are picked at random per match.
 #[derive(Resource)]
 pub struct BgmBank {
-    title: Handle<AudioSource>,
-    game: Vec<Handle<AudioSource>>,
+    title: BgmTrack,
+    stage_select: BgmTrack,
+    game: Vec<BgmTrack>,
     victory: Handle<AudioSource>,
+}
+
+/// A music track plus what the corner toast should call it.
+#[derive(Clone)]
+struct BgmTrack {
+    name: &'static str,
+    handle: Handle<AudioSource>,
 }
 
 /// Marker for the currently playing BGM entity.
@@ -219,20 +238,35 @@ impl Plugin for GameAudioPlugin {
         // added after DefaultPlugins, which registers the AssetServer).
         let asset_server = app.world().resource::<AssetServer>().clone();
         app.insert_resource(build_sfx_bank(&asset_server));
+        let track = |name: &'static str, file: &str| BgmTrack {
+            name,
+            handle: asset_server.load(format!("music/{file}")),
+        };
         app.insert_resource(BgmBank {
-            title: asset_server.load("music/title.ogg"),
+            title: track("Title Screen - Juhani Junkala", "title.ogg"),
+            stage_select: track("Stage Select - Juhani Junkala", "stage_select.ogg"),
             game: vec![
-                asset_server.load("music/level1.ogg"),
-                asset_server.load("music/level2.ogg"),
-                asset_server.load("music/level3.ogg"),
+                track("Level 1 - Juhani Junkala", "level1.ogg"),
+                track("Level 2 - Juhani Junkala", "level2.ogg"),
+                track("Level 3 - Juhani Junkala", "level3.ogg"),
+                track("Stage 1 - Juhani Junkala", "stage1.ogg"),
+                track("Stage 2 - Juhani Junkala", "stage2.ogg"),
+                track("Boss Fight - Juhani Junkala", "boss_fight.ogg"),
+                track("Venus - SketchyLogic", "venus.wav"),
+                track("Map - SketchyLogic", "map.wav"),
+                track("Mars - SketchyLogic", "mars.wav"),
+                track("Mercury - SketchyLogic", "mercury.wav"),
             ],
             victory: asset_server.load("music/ending.ogg"),
         });
 
         app.add_message::<PlaySfx>()
             .init_resource::<CurrentBgm>()
-            .add_systems(Update, (play_sfx, apply_bgm_volume))
+            .add_systems(Update, (play_sfx, apply_bgm_volume, update_bgm_toasts))
             .add_systems(OnEnter(AppState::Title), start_title_bgm)
+            .add_systems(OnEnter(AppState::SoloSelect), start_stage_select_bgm)
+            .add_systems(OnEnter(AppState::ZoneSelect), start_stage_select_bgm)
+            .add_systems(OnEnter(AppState::StageSelect), start_stage_select_bgm)
             .add_systems(OnEnter(AppState::Playing), start_game_bgm)
             .add_systems(OnEnter(PlayState::Paused), pause_bgm)
             .add_systems(OnExit(PlayState::Paused), resume_bgm)
@@ -269,7 +303,17 @@ fn start_title_bgm(
     current: ResMut<CurrentBgm>,
     sinks: Query<&AudioSink, With<Bgm>>,
 ) {
-    swap_bgm(commands, bank.title.clone(), &settings, current, sinks);
+    swap_bgm(commands, &bank.title, &settings, current, sinks);
+}
+
+fn start_stage_select_bgm(
+    commands: Commands,
+    bank: Res<BgmBank>,
+    settings: Res<GameSettings>,
+    current: ResMut<CurrentBgm>,
+    sinks: Query<&AudioSink, With<Bgm>>,
+) {
+    swap_bgm(commands, &bank.stage_select, &settings, current, sinks);
 }
 
 fn start_game_bgm(
@@ -284,17 +328,20 @@ fn start_game_bgm(
         .choose(&mut rand::rng())
         .expect("game BGM list is never empty")
         .clone();
-    swap_bgm(commands, track, &settings, current, sinks);
+    swap_bgm(commands, &track, &settings, current, sinks);
 }
 
-/// On a VS win, celebrate with the (CC0) ending jingle.
+/// On a VS win or a finished race, celebrate with the (CC0) ending jingle.
 fn play_victory_jingle(
     mut commands: Commands,
     bank: Res<BgmBank>,
     settings: Res<GameSettings>,
     result: Option<Res<SessionResult>>,
 ) {
-    if matches!(result.as_deref(), Some(SessionResult::VsWin { winner: 0 })) {
+    if matches!(
+        result.as_deref(),
+        Some(SessionResult::VsWin { winner: 0 } | SessionResult::RaceDone)
+    ) {
         commands.spawn((
             AudioPlayer::new(bank.victory.clone()),
             PlaybackSettings::DESPAWN.with_volume(Volume::Linear(settings.bgm_linear())),
@@ -306,12 +353,12 @@ fn play_victory_jingle(
 
 fn swap_bgm(
     mut commands: Commands,
-    track: Handle<AudioSource>,
+    track: &BgmTrack,
     settings: &GameSettings,
     mut current: ResMut<CurrentBgm>,
     sinks: Query<&AudioSink, With<Bgm>>,
 ) {
-    if current.0.as_ref() == Some(&track) {
+    if current.0.as_ref() == Some(&track.handle) {
         // Same track: keep playing where it is (it may have been paused by
         // a result screen — a match restart must un-pause it).
         for sink in &sinks {
@@ -319,11 +366,11 @@ fn swap_bgm(
         }
         return;
     }
-    current.0 = Some(track.clone());
-    debug!("bgm: starting {:?}", track.path());
+    current.0 = Some(track.handle.clone());
+    debug!("bgm: starting {:?}", track.handle.path());
     commands.queue(|world: &mut World| {
         let old: Vec<Entity> = world
-            .query_filtered::<Entity, With<Bgm>>()
+            .query_filtered::<Entity, Or<(With<Bgm>, With<BgmToast>)>>()
             .iter(world)
             .collect();
         for e in old {
@@ -331,10 +378,63 @@ fn swap_bgm(
         }
     });
     commands.spawn((
-        AudioPlayer::new(track),
+        AudioPlayer::new(track.handle.clone()),
         PlaybackSettings::LOOP.with_volume(Volume::Linear(settings.bgm_linear())),
         Bgm,
     ));
+    spawn_bgm_toast(&mut commands, track.name);
+}
+
+// ---------------------------------------------------------------------------
+// "Now playing" toast
+// ---------------------------------------------------------------------------
+
+/// Corner note naming the track whenever the BGM actually changes.
+#[derive(Component)]
+struct BgmToast {
+    life: f32,
+}
+
+const BGM_TOAST_LIFE: f32 = 4.5;
+
+fn spawn_bgm_toast(commands: &mut Commands, name: &str) {
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(14.0),
+            bottom: Val::Px(10.0),
+            ..default()
+        },
+        Text::new(format!("♪ {name}")),
+        TextFont {
+            font_size: FontSize::Px(16.0),
+            ..default()
+        },
+        TextColor(Color::srgba(0.72, 0.82, 1.0, 0.0)),
+        GlobalZIndex(30),
+        Pickable::IGNORE,
+        BgmToast {
+            life: BGM_TOAST_LIFE,
+        },
+    ));
+}
+
+fn update_bgm_toasts(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut toasts: Query<(Entity, &mut BgmToast, &mut TextColor)>,
+) {
+    for (entity, mut toast, mut color) in &mut toasts {
+        toast.life -= time.delta_secs();
+        if toast.life <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        // Fade in over 0.4 s, hold, fade out over the last 0.9 s.
+        let elapsed = BGM_TOAST_LIFE - toast.life;
+        let alpha = (elapsed / 0.4).min(toast.life / 0.9).clamp(0.0, 1.0);
+        color.0.set_alpha(alpha * 0.85);
+    }
 }
 
 /// Keep the BGM sink in sync with the settings sliders.

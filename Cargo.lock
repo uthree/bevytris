@@ -1802,6 +1802,7 @@ dependencies = [
  "rand 0.9.5",
  "ron",
  "serde",
+ "sys-locale",
 ]
 
 [[package]]

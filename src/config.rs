@@ -15,11 +15,13 @@ pub enum Action {
     RotateCw,
     RotateCcw,
     Hold,
+    /// Fire the zone super move (zone battle mode).
+    Zone,
     Pause,
 }
 
 impl Action {
-    pub const ALL: [Action; 8] = [
+    pub const ALL: [Action; 9] = [
         Action::MoveLeft,
         Action::MoveRight,
         Action::SoftDrop,
@@ -27,21 +29,10 @@ impl Action {
         Action::RotateCw,
         Action::RotateCcw,
         Action::Hold,
+        Action::Zone,
         Action::Pause,
     ];
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Action::MoveLeft => "Move Left",
-            Action::MoveRight => "Move Right",
-            Action::SoftDrop => "Soft Drop",
-            Action::HardDrop => "Hard Drop",
-            Action::RotateCw => "Rotate CW",
-            Action::RotateCcw => "Rotate CCW",
-            Action::Hold => "Hold",
-            Action::Pause => "Pause",
-        }
-    }
 }
 
 /// All key codes offered for rebinding; also the parse table for the
@@ -102,6 +93,8 @@ struct SettingsFile {
     sdf: u32,
     #[serde(default)]
     fullscreen: bool,
+    #[serde(default)]
+    language: crate::i18n::LangChoice,
 }
 
 fn default_sdf() -> u32 {
@@ -130,6 +123,8 @@ pub struct GameSettings {
     pub sdf: u32,
     /// Borderless fullscreen (also toggled with F11).
     pub fullscreen: bool,
+    /// UI language: follow the OS or force one.
+    pub language: crate::i18n::LangChoice,
 }
 
 impl Default for GameSettings {
@@ -142,6 +137,7 @@ impl Default for GameSettings {
         bindings.insert(Action::RotateCw, KeyCode::ArrowUp);
         bindings.insert(Action::RotateCcw, KeyCode::KeyZ);
         bindings.insert(Action::Hold, KeyCode::KeyC);
+        bindings.insert(Action::Zone, KeyCode::KeyV);
         bindings.insert(Action::Pause, KeyCode::Escape);
         Self {
             bindings,
@@ -153,6 +149,7 @@ impl Default for GameSettings {
             vsync: false,
             sdf: 20,
             fullscreen: false,
+            language: crate::i18n::LangChoice::Auto,
         }
     }
 }
@@ -226,6 +223,7 @@ impl GameSettings {
             vsync: self.vsync,
             sdf: self.sdf,
             fullscreen: self.fullscreen,
+            language: self.language,
         }
     }
 
@@ -234,6 +232,23 @@ impl GameSettings {
         for (action, name) in &file.bindings {
             if let Some(key) = parse_key(name) {
                 settings.bindings.insert(*action, key);
+            }
+        }
+        // Older files may predate an action (e.g. Zone); its default key
+        // could then collide with a user rebinding. Give any action missing
+        // from the file a key nothing else uses.
+        for action in Action::ALL {
+            let key = settings.key_for(action);
+            let taken_by_other = Action::ALL
+                .iter()
+                .any(|a| *a != action && settings.key_for(*a) == key);
+            if taken_by_other && !file.bindings.contains_key(&action) {
+                if let Some(free) = bindable_keys()
+                    .into_iter()
+                    .find(|k| Action::ALL.iter().all(|a| settings.key_for(*a) != *k))
+                {
+                    settings.bindings.insert(action, free);
+                }
             }
         }
         settings.das_ms = file.das_ms.clamp(0, 500);
@@ -248,6 +263,7 @@ impl GameSettings {
             (file.sdf.clamp(5, 40) / 5) * 5
         };
         settings.fullscreen = file.fullscreen;
+        settings.language = file.language;
         settings
     }
 }

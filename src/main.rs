@@ -8,6 +8,8 @@ use bevy::window::{MonitorSelection, PresentMode, WindowMode, WindowResizeConstr
 mod audio;
 mod config;
 mod effects;
+mod i18n;
+mod input;
 mod menu;
 mod progress;
 mod render;
@@ -42,17 +44,24 @@ fn main() -> AppExit {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.02, 0.025, 0.06)))
+        .insert_resource(i18n::Locale(settings.language.resolve()))
         .insert_resource(settings)
-        // Dev helpers: BEVYTRIS_SCREEN=settings|stages|playing skips the
-        // title menu, BEVYTRIS_MODE=vs-stage-N|vs-easy|vs-normal|vs-hard
-        // preselects the game mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages.
+        // Dev helpers: BEVYTRIS_SCREEN=settings|solo|stages|zones|playing
+        // skips the title menu, BEVYTRIS_MODE=sprint|dig|zone|vs-stage-N|
+        // vs-easy|vs-normal|vs-hard preselects the game mode,
+        // BEVYTRIS_UNLOCK_ALL=1 opens all stages.
         .insert_state(match std::env::var("BEVYTRIS_SCREEN").as_deref() {
             Ok("settings") => AppState::Settings,
+            Ok("solo") => AppState::SoloSelect,
             Ok("stages") => AppState::StageSelect,
+            Ok("zones") => AppState::ZoneSelect,
             Ok("playing") => AppState::Playing,
             _ => AppState::Title,
         })
         .insert_resource(match std::env::var("BEVYTRIS_MODE").as_deref() {
+            Ok("sprint") => GameMode::Sprint,
+            Ok("dig") => GameMode::Dig,
+            Ok("zone") => GameMode::ZoneBattle { stage: 15 },
             Ok("vs-easy") => GameMode::VsCpu { stage: 5 },
             Ok("vs-normal") => GameMode::VsCpu { stage: 15 },
             Ok("vs-hard") => GameMode::VsCpu { stage: 25 },
@@ -65,6 +74,8 @@ fn main() -> AppExit {
         .insert_resource(progress::load_progress_with_env())
         .add_sub_state::<PlayState>()
         .add_plugins((
+            i18n::I18nPlugin,
+            input::PadInputPlugin,
             audio::GameAudioPlugin,
             session::SessionPlugin,
             render::RenderPlugin,

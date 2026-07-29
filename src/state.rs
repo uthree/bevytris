@@ -7,8 +7,12 @@ pub enum AppState {
     #[default]
     Title,
     Settings,
+    /// Mode picker for the solo modes (marathon / sprint / dig).
+    SoloSelect,
     /// Stage picker for VS CPU mode.
     StageSelect,
+    /// Difficulty picker for zone battle mode.
+    ZoneSelect,
     Playing,
     /// One-frame bounce state used to restart a match. A Playing→Playing
     /// identity transition would leave the `PlayState` sub-state untouched
@@ -35,7 +39,14 @@ pub enum PlayState {
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameMode {
     Single,
+    /// Race: clear 40 lines as fast as possible.
+    Sprint,
+    /// Race: dig through a pre-stacked field of holed garbage rows.
+    Dig,
     VsCpu { stage: u32 },
+    /// VS with the zone super move; `stage` picks the CPU profile but the
+    /// match never touches campaign progress.
+    ZoneBattle { stage: u32 },
 }
 
 impl Default for GameMode {

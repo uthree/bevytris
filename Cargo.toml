@@ -10,6 +10,7 @@ members = [".", "crates/core"]
 bevytris-core = { path = "crates/core" }
 bevy = { version = "0.19", features = ["wav"] }
 dirs = "6"
+sys-locale = "0.3"
 rand = "0.9"
 ron = "0.12.2"
 serde = { version = "1.0.229", features = ["derive"] }

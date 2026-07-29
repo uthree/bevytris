@@ -9,6 +9,9 @@ pub const VISIBLE_HEIGHT: i8 = 20;
 /// Contents of a single locked cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cell {
+    /// A banked line from an active zone, parked at the bottom of the
+    /// field until the zone ends.
+    Zone,
     Piece(PieceKind),
     Garbage,
 }
@@ -134,6 +137,53 @@ impl Board {
             self.grid.pop();
             self.grid.insert(0, row);
         }
+    }
+
+    /// Zone banking: remove every full row that holds at least one
+    /// non-zone cell, then push the same number of solid zone rows in at
+    /// the bottom (existing content shifts up). Rows that are already
+    /// pure zone lines don't re-bank. Returns how many rows were banked.
+    pub fn bank_full_rows(&mut self) -> u32 {
+        let full: Vec<i8> = (0..BOARD_HEIGHT)
+            .filter(|&y| {
+                let row = &self.grid[y as usize];
+                row.iter().all(|c| c.is_some()) && row.iter().any(|c| *c != Some(Cell::Zone))
+            })
+            .collect();
+        for &y in full.iter().rev() {
+            self.grid.remove(y as usize);
+            self.grid.push([None; BOARD_WIDTH as usize]);
+        }
+        for _ in 0..full.len() {
+            self.grid.pop();
+            self.grid.insert(0, [Some(Cell::Zone); BOARD_WIDTH as usize]);
+        }
+        full.len() as u32
+    }
+
+    /// Remove the stack of zone rows at the bottom (zone end), letting the
+    /// rest of the field drop back down. Returns how many were cleared.
+    pub fn clear_zone_rows(&mut self) -> u32 {
+        let mut n = 0;
+        while self
+            .grid
+            .first()
+            .is_some_and(|row| row.iter().all(|c| *c == Some(Cell::Zone)))
+        {
+            self.grid.remove(0);
+            self.grid.push([None; BOARD_WIDTH as usize]);
+            n += 1;
+        }
+        n
+    }
+
+    /// Rows still holding at least one garbage cell — dig mode's clear
+    /// target counts rows, matching what the player sees on the field.
+    pub fn garbage_rows(&self) -> u32 {
+        self.grid
+            .iter()
+            .filter(|row| row.iter().any(|c| *c == Some(Cell::Garbage)))
+            .count() as u32
     }
 
     /// Height of the tallest filled cell in each column (0 = empty column).

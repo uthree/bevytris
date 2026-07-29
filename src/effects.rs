@@ -12,7 +12,7 @@ use bevy::audio::Volume;
 use crate::audio::{PlaySfx, Sfx, SfxBank};
 use crate::config::GameSettings;
 use crate::core::board::{BOARD_WIDTH, VISIBLE_HEIGHT};
-use crate::core::game::{ClearKind, GameEvent};
+use crate::core::game::{ClearKind, GameEvent, GARBAGE_CAP_PER_PIECE};
 use crate::emissive;
 use crate::render::{BoardKick, BoardTheme, FrameGlow};
 use crate::session::{BoardEvent, BoardIndex, GameSession, SessionResult};
@@ -28,7 +28,12 @@ impl Plugin for EffectsPlugin {
             .add_systems(Startup, (setup_effect_assets, spawn_starfield))
             .add_systems(
                 Update,
-                (update_danger, sync_danger_vignette, sync_danger_alarm)
+                (
+                    update_danger,
+                    sync_danger_vignette,
+                    sync_danger_alarm,
+                    zone_presentation,
+                )
                     .run_if(in_state(AppState::Playing)),
             )
             .add_systems(
@@ -903,6 +908,146 @@ fn map_events_to_effects(
                     );
                 }
             }
+            GameEvent::ZoneReady => {
+                // Unmissable "gauge full" cue: bright chime, gold banner
+                // and a ripple off the board.
+                play(Sfx::ZoneReady, gain);
+                let gold = Color::srgb(1.0, 0.85, 0.25);
+                pulse_frame(&mut glows, msg.board, gold, 0.9);
+                spawn_shockwave(&mut commands, center, gold, false);
+                spawn_burst(&mut commands, &glow_tex, center, gold, 24, 260.0, 10.0, 0.7, 90.0);
+                spawn_banner(
+                    &mut commands,
+                    center + Vec2::new(0.0, 60.0),
+                    "ZONE READY!".to_string(),
+                    gold,
+                    theme.cell * 1.1,
+                );
+                if index.0 == 0 {
+                    shake.add(0.15);
+                }
+            }
+            GameEvent::ZoneActivated => {
+                // Time stops: deep descending boom, full-screen flash,
+                // particle nova, heavy shake and a star surge.
+                play(Sfx::ZoneBoom, gain);
+                let cyan = Color::srgb(0.3, 0.9, 1.0);
+                pulse_frame(&mut glows, msg.board, cyan, 1.0);
+                spawn_shockwave(&mut commands, center, cyan, true);
+                spawn_burst(&mut commands, &glow_tex, center, cyan, 80, 520.0, 15.0, 0.9, 60.0);
+                spawn_banner(
+                    &mut commands,
+                    center + Vec2::new(0.0, 60.0),
+                    "ZONE!".to_string(),
+                    cyan,
+                    theme.cell * 1.6,
+                );
+                if let Ok(mut kick) = kicks.get_mut(msg.board) {
+                    kick.spin(1.2);
+                }
+                if index.0 == 0 {
+                    spawn_flash(&mut commands, cyan, 0.38, 0.7);
+                    shake.add(0.55);
+                    surge.0 = surge.0.max(9.0);
+                } else {
+                    spawn_flash(&mut commands, cyan, 0.14, 0.4);
+                }
+            }
+            GameEvent::ZoneLines { banked, total } => {
+                // Rising coin ladder as the payload stacks up; the board
+                // physically heaves upward with each banked wave.
+                play(Sfx::Combo(*total), 0.9 * gain);
+                let cyan = Color::srgb(0.3, 0.9, 1.0);
+                pulse_frame(&mut glows, msg.board, cyan, 0.75);
+                let h = theme.cell * VISIBLE_HEIGHT as f32;
+                spawn_burst(
+                    &mut commands,
+                    &glow_tex,
+                    center + Vec2::new(0.0, -h / 2.0),
+                    cyan,
+                    8 + 6 * *banked as usize,
+                    300.0,
+                    11.0,
+                    0.6,
+                    -160.0,
+                );
+                if let Ok(mut kick) = kicks.get_mut(msg.board) {
+                    kick.impulse(Vec2::new(0.0, 70.0 + *banked as f32 * 12.0));
+                }
+                spawn_banner(
+                    &mut commands,
+                    center,
+                    format!("x{total}"),
+                    cyan,
+                    theme.cell * (0.9 + 0.07 * *total as f32).min(1.8),
+                );
+                if index.0 == 0 {
+                    shake.add(0.08 + 0.03 * *banked as f32);
+                }
+            }
+            GameEvent::ZoneEnded { lines, attack } => {
+                if *lines > 0 {
+                    // Payday: fanfare, gold flash, confetti scaled by the
+                    // haul, and a heavy slam.
+                    play(if *lines >= 8 { Sfx::Clear(4) } else { Sfx::TSpinClear }, gain);
+                    let gold = Color::srgb(1.0, 0.85, 0.25);
+                    pulse_frame(&mut glows, msg.board, gold, 1.0);
+                    spawn_shockwave(&mut commands, center, gold, true);
+                    spawn_burst(
+                        &mut commands,
+                        &glow_tex,
+                        center,
+                        gold,
+                        40 + 10 * *lines as usize,
+                        480.0,
+                        14.0,
+                        0.9,
+                        140.0,
+                    );
+                    let h = theme.cell * VISIBLE_HEIGHT as f32;
+                    spawn_confetti_wave(
+                        &mut commands,
+                        center,
+                        center.y + h / 2.0,
+                        (20 + 8 * *lines as usize).min(120),
+                    );
+                    spawn_banner(
+                        &mut commands,
+                        center + Vec2::new(0.0, 40.0),
+                        format!("{lines} LINES!"),
+                        gold,
+                        theme.cell * 1.5,
+                    );
+                    if let Ok(mut kick) = kicks.get_mut(msg.board) {
+                        kick.impulse(Vec2::new(0.0, -160.0));
+                    }
+                    if index.0 == 0 {
+                        spawn_flash(&mut commands, gold, 0.3, 0.7);
+                        shake.add(0.35 + *lines as f32 * 0.05);
+                        surge.0 = surge.0.max(8.0);
+                    }
+                    if *attack > 0 && boards.iter().count() > 1 {
+                        play(Sfx::GarbageWarn, 0.8);
+                    }
+                }
+            }
+            GameEvent::AttackRamp { multiplier } => {
+                // Both boards ramp on the same frame; announce once, over
+                // the player's board.
+                if index.0 == 0 {
+                    play(Sfx::GarbageWarn, 1.0);
+                    let orange = Color::srgb(1.0, 0.55, 0.15);
+                    pulse_frame(&mut glows, msg.board, orange, 0.9);
+                    shake.add(0.2);
+                    spawn_banner(
+                        &mut commands,
+                        center + Vec2::new(0.0, 40.0),
+                        format!("ATTACK x{multiplier}"),
+                        orange,
+                        theme.cell * 1.15,
+                    );
+                }
+            }
             GameEvent::GarbageRose { rows } => {
                 play(Sfx::GarbageRise, gain);
                 pulse_frame(
@@ -1008,7 +1153,8 @@ fn finish_fanfare(
     let board_of = |slot: usize| boards.iter().find(|(_, _, i, _)| i.0 == slot);
 
     match *result {
-        SessionResult::VsWin { winner: 0 } => {
+        // A finished race celebrates like a match win.
+        SessionResult::VsWin { winner: 0 } | SessionResult::RaceDone => {
             // ---- VICTORY: fireworks show over the player's board --------
             sfx.write(PlaySfx::new(Sfx::Win));
             if let Some((tf, theme, _, _)) = board_of(0) {
@@ -1138,7 +1284,8 @@ fn run_celebration(
 // Danger (pinch) presentation
 // ---------------------------------------------------------------------------
 
-/// Smoothed 0..1 danger per board, driven by locked-stack height.
+/// Smoothed 0..1 danger per board, driven by the locked-stack height plus
+/// the garbage that will rise on the next non-clearing lock.
 #[derive(Resource, Default)]
 pub struct DangerLevel(pub [f32; 2]);
 
@@ -1148,10 +1295,11 @@ struct DangerVignette;
 #[derive(Component)]
 struct DangerAlarm;
 
-/// Stack height (rows) where the danger presentation starts / peaks.
+/// Effective height (rows) where the danger presentation starts / peaks.
 /// The visible field is 20 rows; below 15 the player still has plenty of
 /// room, so the vignette only creeps in from 15 and the alarm waits for
-/// [`DANGER_ALARM_LEVEL`] (~16 rows).
+/// [`DANGER_ALARM_LEVEL`] (~16 rows). "Effective" height includes queued
+/// garbage about to rise, so the warning fires before the wave lands.
 const DANGER_START: f32 = 15.0;
 const DANGER_FULL: f32 = 19.0;
 /// Danger level (0..1) above which the alarm loop starts.
@@ -1166,14 +1314,26 @@ fn update_danger(
     mut boards: Query<(&GameSession, &BoardIndex, &mut FrameGlow)>,
 ) {
     for (session, index, mut glow) in &mut boards {
-        let height = session
+        let stack = session
             .game
             .board
             .column_heights()
             .into_iter()
             .max()
             .unwrap_or(0) as f32;
-        let target = if matches!(state.get(), PlayState::Running | PlayState::Paused) {
+        // Queued garbage lands on top of the stack after the next
+        // non-clearing lock; only one piece's cap can rise at once, so
+        // anything past the cap is not an immediate threat yet.
+        let pending = session
+            .game
+            .incoming_total()
+            .min(GARBAGE_CAP_PER_PIECE) as f32;
+        let height = stack + pending;
+        // Inside the zone the banked lines pile up by design and garbage
+        // is frozen — an alarm there would be pure noise.
+        let target = if session.game.zone_active() {
+            0.0
+        } else if matches!(state.get(), PlayState::Running | PlayState::Paused) {
             ((height - DANGER_START) / (DANGER_FULL - DANGER_START)).clamp(0.0, 1.0)
         } else {
             0.0
@@ -1187,6 +1347,60 @@ fn update_danger(
         }
         glow.danger = *slot;
     }
+}
+
+/// Cyan full-screen tint while the player's zone runs, plus a breathing
+/// frame glow on every board with an active zone.
+#[derive(Component)]
+struct ZoneVignette;
+
+fn zone_presentation(
+    mut commands: Commands,
+    time: Res<Time>,
+    assets: Res<EffectAssets>,
+    boards: Query<(Entity, &BoardIndex, &GameSession)>,
+    mut glows: Query<&mut FrameGlow>,
+    mut vignette: Query<&mut ImageNode, With<ZoneVignette>>,
+) {
+    let t = time.elapsed_secs();
+    for (entity, _, session) in &boards {
+        if session.game.zone_active() {
+            if let Ok(mut glow) = glows.get_mut(entity) {
+                glow.color = Color::srgb(0.3, 0.9, 1.0);
+                glow.t = glow.t.max(0.45 + 0.3 * (t * 9.0).sin().abs());
+            }
+        }
+    }
+    let Ok(mut node) = vignette.single_mut() else {
+        commands.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            ImageNode {
+                image: assets.vignette.clone(),
+                color: Color::NONE,
+                image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+                ..default()
+            },
+            GlobalZIndex(-1),
+            Pickable::IGNORE,
+            ZoneVignette,
+            DespawnOnExit(AppState::Playing),
+        ));
+        return;
+    };
+    let player_active = boards
+        .iter()
+        .any(|(_, i, s)| i.0 == 0 && s.game.zone_active());
+    let alpha = if player_active {
+        0.17 + 0.05 * (t * 8.0).sin()
+    } else {
+        0.0
+    };
+    node.color = Color::srgba(0.25, 0.85, 1.0, alpha);
 }
 
 /// Red screen-edge vignette that pulses with the human board's danger.

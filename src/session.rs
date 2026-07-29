@@ -9,7 +9,9 @@ use rand::{Rng, SeedableRng};
 use crate::audio::{PlaySfx, Sfx};
 use crate::config::{Action, GameSettings};
 use crate::core::ai::{self, AiProfile, Plan};
-use crate::core::game::{Game, GameEvent, Leveling, Stats};
+use crate::core::board::BOARD_WIDTH;
+use crate::core::game::{Game, GameEvent, Leveling, Stats, Zone};
+use crate::input::{PadAction, PadInput};
 use crate::progress::{Grade, Progress};
 use crate::state::{AppState, GameMode, PlayState};
 
@@ -20,13 +22,54 @@ use crate::state::{AppState, GameMode, PlayState};
 /// roughly matches the old pace at a typical ~20 lines/minute.
 const VS_SECONDS_PER_LEVEL: f32 = 25.0;
 
-/// A fresh board for `mode`; VS boards use the timed gravity ramp.
+/// Sprint race: clear this many lines to finish.
+pub const SPRINT_GOAL_LINES: u32 = 40;
+/// Dig race: garbage rows stacked at the start.
+pub const DIG_ROWS: u32 = 10;
+/// VS margin time: past this many seconds into a round, both players'
+/// attack scales up (x1.5 -> x4, see `Game::attack_multiplier`) so long
+/// rounds escalate to a finish instead of stalling.
+const MARGIN_TIME_SECS: f32 = 90.0;
+
+/// A fresh board for `mode`; VS boards use the timed gravity ramp, races
+/// pin gravity at level 1 and dig pre-stacks its cheese.
 fn new_game(seed: u64, mode: GameMode) -> Game {
     let mut game = Game::new(seed, 1);
-    if matches!(mode, GameMode::VsCpu { .. }) {
-        game.leveling = Leveling::Timed { seconds_per_level: VS_SECONDS_PER_LEVEL };
+    match mode {
+        GameMode::VsCpu { .. } => {
+            game.leveling = Leveling::Timed { seconds_per_level: VS_SECONDS_PER_LEVEL };
+            game.margin_time = Some(MARGIN_TIME_SECS);
+        }
+        GameMode::ZoneBattle { .. } => {
+            game.leveling = Leveling::Timed { seconds_per_level: VS_SECONDS_PER_LEVEL };
+            game.margin_time = Some(MARGIN_TIME_SECS);
+            game.zone = Some(Zone::default());
+        }
+        GameMode::Sprint => game.leveling = Leveling::Fixed,
+        GameMode::Dig => {
+            game.leveling = Leveling::Fixed;
+            // Cheese-style garbage: one hole per row, never directly above
+            // the previous row's hole (a shared well would trivialize it).
+            let mut rng = StdRng::seed_from_u64(seed ^ 0xD16);
+            let mut prev: i8 = -1;
+            for _ in 0..DIG_ROWS {
+                let mut hole = rng.random_range(0..BOARD_WIDTH);
+                while hole == prev {
+                    hole = rng.random_range(0..BOARD_WIDTH);
+                }
+                game.board.add_garbage(1, hole);
+                prev = hole;
+            }
+        }
+        GameMode::Single => {}
     }
     game
+}
+
+/// Elapsed race time as "m:ss.cc".
+pub fn format_race_time(secs: f64) -> String {
+    let ms = (secs * 1000.0).round() as u64;
+    format!("{}:{:02}.{:02}", ms / 60_000, ms / 1000 % 60, ms % 1000 / 10)
 }
 
 /// One playfield (either the human's or the CPU's).
@@ -59,6 +102,8 @@ pub struct CpuControlled {
     planned_piece: Option<u32>,
     hold_done: bool,
     timer: f32,
+    /// How long the CPU has been sitting on a full zone gauge.
+    zone_full_secs: f32,
 }
 
 impl CpuControlled {
@@ -70,6 +115,7 @@ impl CpuControlled {
             planned_piece: None,
             hold_done: false,
             timer: profile.think_time,
+            zone_full_secs: 0.0,
         }
     }
 
@@ -78,6 +124,7 @@ impl CpuControlled {
         self.planned_piece = None;
         self.hold_done = false;
         self.timer = self.profile.think_time;
+        self.zone_full_secs = 0.0;
     }
 }
 
@@ -97,8 +144,20 @@ pub struct BoardEvent {
 pub enum SessionResult {
     /// Single player topped out.
     SoloOver,
+    /// A race (sprint / dig) reached its goal.
+    RaceDone,
     /// VS: which board index won the match.
     VsWin { winner: usize },
+}
+
+/// Set when a race reaches its goal; consumed by the result overlay.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct RaceResult {
+    /// Finish time in seconds.
+    pub time: f64,
+    pub new_best: bool,
+    /// Personal best after this run, in milliseconds.
+    pub best_ms: u64,
 }
 
 /// Who took the round that just ended (drives the RoundOver overlay).
@@ -155,9 +214,9 @@ pub struct MatchState {
 impl MatchState {
     fn new(mode: GameMode) -> Self {
         let (stage, wins_needed) = match mode {
-            GameMode::Single => (None, 1),
+            GameMode::Single | GameMode::Sprint | GameMode::Dig => (None, 1),
             // Boss stages (10/20/30) are first-to-3, the rest first-to-2.
-            GameMode::VsCpu { stage } => {
+            GameMode::VsCpu { stage } | GameMode::ZoneBattle { stage } => {
                 (Some(stage), if stage % 10 == 0 { 3 } else { 2 })
             }
         };
@@ -221,6 +280,7 @@ fn spawn_session(mut commands: Commands, mode: Res<GameMode>) {
     commands.remove_resource::<SessionResult>();
     commands.remove_resource::<LastRound>();
     commands.remove_resource::<StageClear>();
+    commands.remove_resource::<RaceResult>();
     commands.insert_resource(MatchState::new(*mode));
 
     commands.spawn((
@@ -233,7 +293,7 @@ fn spawn_session(mut commands: Commands, mode: Res<GameMode>) {
         Visibility::default(),
     ));
 
-    if let GameMode::VsCpu { stage } = *mode {
+    if let GameMode::VsCpu { stage } | GameMode::ZoneBattle { stage } = *mode {
         let profile = AiProfile::for_stage(stage);
         commands.spawn((
             GameSession { game: new_game(seed, *mode) },
@@ -277,12 +337,13 @@ pub fn countdown_display(countdown: &Countdown) -> u32 {
 
 fn pause_toggle(
     keys: Res<ButtonInput<KeyCode>>,
+    pad: Res<PadInput>,
     settings: Res<GameSettings>,
     state: Res<State<PlayState>>,
     mut next: ResMut<NextState<PlayState>>,
     mut sfx: MessageWriter<PlaySfx>,
 ) {
-    if keys.just_pressed(settings.key_for(Action::Pause)) {
+    if keys.just_pressed(settings.key_for(Action::Pause)) || pad.just_pressed(PadAction::Pause) {
         match state.get() {
             PlayState::Running => {
                 next.set(PlayState::Paused);
@@ -300,6 +361,7 @@ fn pause_toggle(
 fn human_input(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    pad: Res<PadInput>,
     settings: Res<GameSettings>,
     mut query: Query<(&mut GameSession, &mut DasState), With<HumanControlled>>,
 ) {
@@ -311,41 +373,50 @@ fn human_input(
         return;
     }
 
-    let left = settings.key_for(Action::MoveLeft);
-    let right = settings.key_for(Action::MoveRight);
+    // Keyboard and gamepad merge into one digital state; DAS/ARR then
+    // treats both sources identically.
+    let left_just =
+        keys.just_pressed(settings.key_for(Action::MoveLeft)) || pad.just_pressed(PadAction::Left);
+    let right_just = keys.just_pressed(settings.key_for(Action::MoveRight))
+        || pad.just_pressed(PadAction::Right);
+    let left_down =
+        keys.pressed(settings.key_for(Action::MoveLeft)) || pad.pressed(PadAction::Left);
+    let right_down =
+        keys.pressed(settings.key_for(Action::MoveRight)) || pad.pressed(PadAction::Right);
     let das_secs = settings.das_ms as f32 / 1000.0;
     let arr_secs = settings.arr_ms as f32 / 1000.0;
 
     // --- Horizontal movement with DAS/ARR ---------------------------------
     // The most recently pressed direction wins while both are held.
-    if keys.just_pressed(left) {
+    if left_just {
         das.dir = -1;
         das.held_secs = 0.0;
         das.arr_acc = 0.0;
         game.move_horizontal(-1);
     }
-    if keys.just_pressed(right) {
+    if right_just {
         das.dir = 1;
         das.held_secs = 0.0;
         das.arr_acc = 0.0;
         game.move_horizontal(1);
     }
 
-    // Keys already held when control resumes (countdown end, unpause) never
-    // fire just_pressed; pick them up with a fully charged DAS so holding a
-    // direction through the countdown slides the piece immediately.
-    if das.dir == 0 && (keys.pressed(left) != keys.pressed(right)) {
-        das.dir = if keys.pressed(left) { -1 } else { 1 };
+    // Inputs already held when control resumes (countdown end, unpause)
+    // never fire just_pressed; pick them up with a fully charged DAS so
+    // holding a direction through the countdown slides the piece
+    // immediately.
+    if das.dir == 0 && (left_down != right_down) {
+        das.dir = if left_down { -1 } else { 1 };
         das.held_secs = das_secs;
         das.arr_acc = 0.0;
         game.move_horizontal(das.dir);
     }
 
-    let dir_key = if das.dir < 0 { left } else { right };
-    if das.dir != 0 && !keys.pressed(dir_key) {
+    let dir_down = if das.dir < 0 { left_down } else { right_down };
+    if das.dir != 0 && !dir_down {
         // Released the active direction; fall back to the other if held.
-        let other = if das.dir < 0 { right } else { left };
-        if keys.pressed(other) {
+        let other_down = if das.dir < 0 { right_down } else { left_down };
+        if other_down {
             das.dir = -das.dir;
             das.held_secs = 0.0;
             das.arr_acc = 0.0;
@@ -354,7 +425,7 @@ fn human_input(
             das.dir = 0;
         }
     }
-    if das.dir != 0 && keys.pressed(dir_key) {
+    if das.dir != 0 && dir_down {
         das.held_secs += time.delta_secs();
         if das.held_secs >= das_secs {
             if arr_secs <= 0.0 {
@@ -375,18 +446,27 @@ fn human_input(
 
     // --- Everything else ---------------------------------------------------
     game.soft_drop_factor = settings.sdf_factor();
-    game.set_soft_drop(keys.pressed(settings.key_for(Action::SoftDrop)));
-    if keys.just_pressed(settings.key_for(Action::RotateCw)) {
+    game.set_soft_drop(
+        keys.pressed(settings.key_for(Action::SoftDrop)) || pad.pressed(PadAction::Down),
+    );
+    if keys.just_pressed(settings.key_for(Action::RotateCw))
+        || pad.just_pressed(PadAction::RotateCw)
+    {
         game.rotate(true);
     }
-    if keys.just_pressed(settings.key_for(Action::RotateCcw)) {
+    if keys.just_pressed(settings.key_for(Action::RotateCcw))
+        || pad.just_pressed(PadAction::RotateCcw)
+    {
         game.rotate(false);
     }
-    if keys.just_pressed(settings.key_for(Action::Hold)) {
+    if keys.just_pressed(settings.key_for(Action::Hold)) || pad.just_pressed(PadAction::Hold) {
         game.hold();
     }
-    if keys.just_pressed(settings.key_for(Action::HardDrop)) {
+    if keys.just_pressed(settings.key_for(Action::HardDrop)) || pad.just_pressed(PadAction::Up) {
         game.hard_drop();
+    }
+    if keys.just_pressed(settings.key_for(Action::Zone)) || pad.just_pressed(PadAction::Zone) {
+        game.activate_zone();
     }
 }
 
@@ -402,10 +482,23 @@ fn cpu_drive(
             planned_piece,
             hold_done,
             timer,
+            zone_full_secs,
         } = &mut *cpu;
         let game = &mut session.game;
         if game.game_over {
             continue;
+        }
+
+        // Zone policy: fire when in trouble (tall stack or garbage on the
+        // way); if the gauge just sits full for a while, use it anyway.
+        if game.zone.as_ref().is_some_and(|z| z.charge >= 1.0 && z.active.is_none()) {
+            *zone_full_secs += time.delta_secs();
+            let stack = game.board.column_heights().into_iter().max().unwrap_or(0);
+            if stack >= 10 || game.incoming_total() >= 4 || *zone_full_secs > 8.0 {
+                game.activate_zone();
+            }
+        } else {
+            *zone_full_secs = 0.0;
         }
 
         // New piece? Re-plan after a "thinking" pause.
@@ -530,10 +623,15 @@ fn tick_games(
     for (entity, index, mut session) in &mut query {
         session.game.tick(time.delta_secs());
         for event in session.game.take_events() {
-            if let GameEvent::Cleared(clear) = &event {
-                if clear.attack > 0 {
+            match &event {
+                GameEvent::Cleared(clear) if clear.attack > 0 => {
                     outgoing.push((index.0, clear.attack));
                 }
+                // Zone payloads travel like any other attack.
+                GameEvent::ZoneEnded { attack, .. } if *attack > 0 => {
+                    outgoing.push((index.0, *attack));
+                }
+                _ => {}
             }
             events.write(BoardEvent {
                 board: entity,
@@ -556,6 +654,38 @@ fn tick_games(
     if result.is_some() {
         return;
     }
+
+    // Race goal detection — checked before top-out handling so a run that
+    // finishes on its very last piece still counts as a finish.
+    if matches!(*mode, GameMode::Sprint | GameMode::Dig) {
+        if let Some((_, _, player)) = query.iter().find(|(_, i, _)| i.0 == 0) {
+            let game = &player.game;
+            let goal_met = !game.game_over
+                && match *mode {
+                    GameMode::Sprint => game.lines >= SPRINT_GOAL_LINES,
+                    _ => game.board.garbage_rows() == 0,
+                };
+            if goal_met {
+                match_state.agg.absorb(&game.stats);
+                let time = game.stats.time;
+                let ms = (time * 1000.0).round() as u64;
+                let (new_best, best_ms) = if *mode == GameMode::Sprint {
+                    (progress.record_sprint(ms), progress.best_sprint_ms)
+                } else {
+                    (progress.record_dig(ms), progress.best_dig_ms)
+                };
+                commands.insert_resource(RaceResult {
+                    time,
+                    new_best,
+                    best_ms: best_ms.unwrap_or(ms),
+                });
+                commands.insert_resource(SessionResult::RaceDone);
+                next.set(PlayState::Finished);
+                return;
+            }
+        }
+    }
+
     let dead: Vec<usize> = query
         .iter()
         .filter(|(_, _, s)| s.game.game_over)
@@ -571,11 +701,11 @@ fn tick_games(
     }
 
     match *mode {
-        GameMode::Single => {
+        GameMode::Single | GameMode::Sprint | GameMode::Dig => {
             commands.insert_resource(SessionResult::SoloOver);
             next.set(PlayState::Finished);
         }
-        GameMode::VsCpu { stage } => {
+        GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } => {
             // Ties go to the player, generously.
             let winner = if dead.contains(&1) { 0 } else { 1 };
             if winner == 0 {
@@ -594,10 +724,20 @@ fn tick_games(
                     1
                 };
                 commands.insert_resource(SessionResult::VsWin { winner: match_winner });
+                // Both VS campaigns grade wins; each unlocks its own track.
                 if match_winner == 0 {
                     let grade = compute_grade(&match_state);
-                    let new_best = progress.record_clear(stage, grade);
-                    commands.insert_resource(StageClear { stage, grade, new_best });
+                    match *mode {
+                        GameMode::VsCpu { stage } => {
+                            let new_best = progress.record_clear(stage, grade);
+                            commands.insert_resource(StageClear { stage, grade, new_best });
+                        }
+                        GameMode::ZoneBattle { stage } => {
+                            let new_best = progress.record_zone_clear(stage, grade);
+                            commands.insert_resource(StageClear { stage, grade, new_best });
+                        }
+                        _ => {}
+                    }
                 }
                 next.set(PlayState::Finished);
             } else {

@@ -2,23 +2,40 @@
 //! and the result screen. Fully keyboard-navigable, mouse also works.
 
 use bevy::input::keyboard::KeyboardInput;
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
+use bevy::ui::UiGlobalTransform;
 
 use crate::audio::{PlaySfx, Sfx};
 use crate::config::{key_label, save_settings, Action, GameSettings};
+use crate::i18n::{action_label, Locale, Strings};
+use crate::input::{PadAction, PadInput};
 use crate::core::ai::{AiProfile, MAX_STAGE};
 use crate::progress::Progress;
-use crate::session::{GameSession, HumanControlled, LastRound, MatchState, SessionResult, StageClear};
+use crate::session::{
+    format_race_time, GameSession, HumanControlled, LastRound, MatchState, RaceResult,
+    SessionResult, StageClear,
+};
 use crate::state::{AppState, GameMode, PlayState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
+    /// Open the solo mode picker (marathon / sprint / dig).
+    SoloSelect,
     Marathon,
+    /// 40-line race.
+    Sprint,
+    /// Garbage-digging race.
+    Dig,
     /// Open the stage picker.
     VsSelect,
     /// Start a VS match on this stage.
     Stage(u32),
+    /// Open the zone battle difficulty picker.
+    ZoneSelect,
+    /// Start a zone battle against this stage's CPU profile.
+    ZoneStage(u32),
     Settings,
     Quit,
     Bind(Action),
@@ -28,6 +45,7 @@ enum MenuAction {
     AdjustMaster,
     AdjustBgm,
     AdjustSfx,
+    AdjustLanguage,
     ToggleVsync,
     ToggleFullscreen,
     Back,
@@ -45,6 +63,11 @@ struct MenuItemLabel;
 /// Footer line on the stage select screen describing the focused stage.
 #[derive(Component)]
 struct StageFooter;
+
+/// Bottom-of-screen line describing the focused menu item (title / solo
+/// picker).
+#[derive(Component)]
+struct MenuFooter;
 
 #[derive(Resource, Default)]
 struct MenuCursor(usize);
@@ -70,6 +93,8 @@ impl Plugin for MenuPlugin {
                 |mut next: ResMut<NextState<AppState>>| next.set(AppState::Playing),
             )
             .add_systems(OnEnter(AppState::Settings), setup_settings)
+            .add_systems(OnEnter(AppState::SoloSelect), setup_solo_select)
+            .add_systems(OnEnter(AppState::ZoneSelect), setup_zone_select)
             .add_systems(OnEnter(AppState::StageSelect), setup_stage_select)
             .add_systems(OnExit(AppState::Settings), persist_settings)
             .add_systems(OnEnter(PlayState::Paused), setup_pause_overlay)
@@ -82,11 +107,18 @@ impl Plugin for MenuPlugin {
                     menu_mouse,
                     highlight_items,
                     refresh_settings_labels,
-                    refresh_stage_footer.run_if(in_state(AppState::StageSelect)),
+                    refresh_stage_footer.run_if(
+                        in_state(AppState::StageSelect).or_else(in_state(AppState::ZoneSelect)),
+                    ),
+                    refresh_menu_footer.run_if(
+                        in_state(AppState::Title).or_else(in_state(AppState::SoloSelect)),
+                    ),
                 )
                     .run_if(
                         in_state(AppState::Title)
                             .or_else(in_state(AppState::Settings))
+                            .or_else(in_state(AppState::SoloSelect))
+                            .or_else(in_state(AppState::ZoneSelect))
                             .or_else(in_state(AppState::StageSelect)),
                     ),
             )
@@ -103,6 +135,11 @@ impl Plugin for MenuPlugin {
                 Update,
                 overlay_input
                     .run_if(in_state(PlayState::Paused).or_else(in_state(PlayState::Finished))),
+            )
+            .add_systems(
+                Update,
+                (settings_scroll_wheel, settings_keep_cursor_visible)
+                    .run_if(in_state(AppState::Settings)),
             );
     }
 }
@@ -150,13 +187,15 @@ fn item_bundle(index: usize, action: MenuAction, label: String, width: f32) -> i
     )
 }
 
-fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>) {
+fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: Res<Locale>) {
+    let s = locale.s();
     cursor.0 = 0;
     let items = vec![
-        (MenuAction::Marathon, "MARATHON".to_string()),
-        (MenuAction::VsSelect, "VS CPU".to_string()),
-        (MenuAction::Settings, "SETTINGS".to_string()),
-        (MenuAction::Quit, "QUIT".to_string()),
+        (MenuAction::SoloSelect, s.solo.to_string()),
+        (MenuAction::VsSelect, s.vs_cpu.to_string()),
+        (MenuAction::ZoneSelect, s.zone_battle.to_string()),
+        (MenuAction::Settings, s.settings.to_string()),
+        (MenuAction::Quit, s.quit.to_string()),
     ];
     commands
         .spawn((root_node(), DespawnOnExit(AppState::Title)))
@@ -178,7 +217,7 @@ fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>) {
                 parent.spawn(item_bundle(i, action, label, 300.0));
             }
             parent.spawn((
-                Text::new("Up/Down: select    ENTER: confirm"),
+                Text::new(s.title_hint),
                 TextFont {
                     font_size: FontSize::Px(16.0),
                     ..default()
@@ -190,6 +229,125 @@ fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>) {
                 },
             ));
         });
+    spawn_menu_footer(&mut commands, AppState::Title);
+}
+
+/// Solo mode picker: marathon / sprint / dig.
+fn setup_solo_select(
+    mut commands: Commands,
+    mut cursor: ResMut<MenuCursor>,
+    locale: Res<Locale>,
+) {
+    let s = locale.s();
+    cursor.0 = 0;
+    let items = vec![
+        (MenuAction::Marathon, s.marathon.to_string()),
+        (MenuAction::Sprint, s.sprint.to_string()),
+        (MenuAction::Dig, s.dig.to_string()),
+    ];
+    commands
+        .spawn((root_node(), DespawnOnExit(AppState::SoloSelect)))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new(s.solo),
+                TextFont {
+                    font_size: FontSize::Px(40.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.3, 0.85, 1.0)),
+                Node {
+                    margin: UiRect::bottom(px(14)),
+                    ..default()
+                },
+            ));
+            for (i, (action, label)) in items.into_iter().enumerate() {
+                parent.spawn(item_bundle(i, action, label, 300.0));
+            }
+            parent.spawn((
+                Text::new(s.list_hint),
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.45, 0.5, 0.6)),
+                Node {
+                    margin: UiRect::top(px(28)),
+                    ..default()
+                },
+            ));
+        });
+    spawn_menu_footer(&mut commands, AppState::SoloSelect);
+}
+
+/// Bottom-anchored description line for the focused item.
+fn spawn_menu_footer(commands: &mut Commands, state: AppState) {
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: px(36),
+            width: percent(100),
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        DespawnOnExit(state),
+        children![(
+            Text::new(""),
+            MenuFooter,
+            TextFont {
+                font_size: FontSize::Px(16.0),
+                ..default()
+            },
+            TextColor(Color::srgb(0.8, 0.85, 0.95)),
+        )],
+    ));
+}
+
+/// What the footer says about a focused item; None hides the line.
+fn action_description(action: MenuAction, progress: &Progress, s: &Strings) -> Option<String> {
+    use crate::session::{DIG_ROWS, SPRINT_GOAL_LINES};
+    let best = |ms: Option<u64>| match ms {
+        Some(ms) => format!("    {} {}", s.best_label, format_race_time(ms as f64 / 1000.0)),
+        None => String::new(),
+    };
+    Some(match action {
+        MenuAction::SoloSelect => s.desc_solo.to_string(),
+        MenuAction::VsSelect => s.desc_vs.to_string(),
+        MenuAction::ZoneSelect => s.desc_zone.to_string(),
+        MenuAction::Settings => s.desc_settings.to_string(),
+        MenuAction::Quit => s.desc_quit.to_string(),
+        MenuAction::Marathon => s.desc_marathon.to_string(),
+        MenuAction::Sprint => format!(
+            "{}{}",
+            s.desc_sprint.replace("{n}", &SPRINT_GOAL_LINES.to_string()),
+            best(progress.best_sprint_ms)
+        ),
+        MenuAction::Dig => format!(
+            "{}{}",
+            s.desc_dig.replace("{n}", &DIG_ROWS.to_string()),
+            best(progress.best_dig_ms)
+        ),
+        _ => return None,
+    })
+}
+
+fn refresh_menu_footer(
+    cursor: Res<MenuCursor>,
+    progress: Res<Progress>,
+    locale: Res<Locale>,
+    items: Query<&MenuItem>,
+    mut texts: Query<&mut Text, With<MenuFooter>>,
+) {
+    let Ok(mut text) = texts.single_mut() else {
+        return;
+    };
+    let line = items
+        .iter()
+        .find(|item| item.index == cursor.0)
+        .and_then(|item| action_description(item.action, &progress, locale.s()))
+        .unwrap_or_default();
+    if **text != line {
+        **text = line;
+    }
 }
 
 const STAGE_COLUMNS: usize = 6;
@@ -198,15 +356,60 @@ fn setup_stage_select(
     mut commands: Commands,
     mut cursor: ResMut<MenuCursor>,
     progress: Res<Progress>,
+    locale: Res<Locale>,
+) {
+    spawn_stage_grid(
+        &mut commands,
+        &mut cursor,
+        locale.s().select_stage,
+        locale.s(),
+        AppState::StageSelect,
+        progress.unlocked,
+        &progress.grades,
+        MenuAction::Stage,
+    );
+}
+
+/// Zone battle mirrors the VS campaign: same 30-stage ladder, its own
+/// unlock/grade track.
+fn setup_zone_select(
+    mut commands: Commands,
+    mut cursor: ResMut<MenuCursor>,
+    progress: Res<Progress>,
+    locale: Res<Locale>,
+) {
+    spawn_stage_grid(
+        &mut commands,
+        &mut cursor,
+        locale.s().zone_battle,
+        locale.s(),
+        AppState::ZoneSelect,
+        progress.zone_unlocked,
+        &progress.zone_grades,
+        MenuAction::ZoneStage,
+    );
+}
+
+/// Shared 30-stage picker grid used by both VS campaigns.
+#[allow(clippy::too_many_arguments)]
+fn spawn_stage_grid(
+    commands: &mut Commands,
+    cursor: &mut MenuCursor,
+    title: &str,
+    s: &'static Strings,
+    state: AppState,
+    unlocked_to: u32,
+    grades: &std::collections::HashMap<u32, crate::progress::Grade>,
+    make_action: fn(u32) -> MenuAction,
 ) {
     // Focus the newest unlocked stage.
-    cursor.0 = (progress.unlocked.clamp(1, MAX_STAGE) - 1) as usize;
+    cursor.0 = (unlocked_to.clamp(1, MAX_STAGE) - 1) as usize;
 
     commands
-        .spawn((root_node(), DespawnOnExit(AppState::StageSelect)))
+        .spawn((root_node(), DespawnOnExit(state)))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("SELECT STAGE"),
+                Text::new(title),
                 TextFont {
                     font_size: FontSize::Px(40.0),
                     ..default()
@@ -229,8 +432,8 @@ fn setup_stage_select(
                 .with_children(|grid| {
                     for i in 0..MAX_STAGE as usize {
                         let stage = (i + 1) as u32;
-                        let unlocked = progress.is_unlocked(stage);
-                        let grade = progress.grades.get(&stage).copied();
+                        let unlocked = stage <= unlocked_to;
+                        let grade = grades.get(&stage).copied();
                         let label = if !unlocked {
                             format!("{stage:02}  -")
                         } else {
@@ -251,7 +454,7 @@ fn setup_stage_select(
                             Button,
                             MenuItem {
                                 index: i,
-                                action: MenuAction::Stage(stage),
+                                action: make_action(stage),
                             },
                             Node {
                                 width: px(84),
@@ -290,7 +493,7 @@ fn setup_stage_select(
                 },
             ));
             parent.spawn((
-                Text::new("Arrows: select    ENTER: start    ESC: back"),
+                Text::new(s.grid_hint),
                 TextFont {
                     font_size: FontSize::Px(16.0),
                     ..default()
@@ -305,34 +508,75 @@ fn setup_stage_select(
 }
 
 fn refresh_stage_footer(
+    app_state: Res<State<AppState>>,
     cursor: Res<MenuCursor>,
     progress: Res<Progress>,
+    locale: Res<Locale>,
     mut texts: Query<&mut Text, With<StageFooter>>,
 ) {
     let Ok(mut text) = texts.single_mut() else {
         return;
     };
+    let s = locale.s();
+    let zone = *app_state.get() == AppState::ZoneSelect;
+    let (prefix, unlocked_to, grades) = if zone {
+        (s.zone_prefix, progress.zone_unlocked, &progress.zone_grades)
+    } else {
+        (s.stage_prefix, progress.unlocked, &progress.grades)
+    };
     let stage = (cursor.0 as u32 + 1).clamp(1, MAX_STAGE);
     let profile = AiProfile::for_stage(stage);
     let first_to = if stage % 10 == 0 { 3 } else { 2 };
-    let status = if !progress.is_unlocked(stage) {
-        "LOCKED".to_string()
+    let status = if stage > unlocked_to {
+        s.locked.to_string()
     } else {
-        match progress.grades.get(&stage) {
-            Some(g) => format!("BEST: {}", g.letter()),
-            None => "NOT CLEARED".to_string(),
+        match grades.get(&stage) {
+            Some(g) => format!("{} {}", s.best_colon, g.letter()),
+            None => s.not_cleared.to_string(),
         }
     };
     let line = format!(
-        "STAGE {stage:02}   TYPE: {}   FIRST TO {first_to}   {status}",
-        profile.archetype.label()
+        "{prefix} {stage:02}   {}: {}   {}   {status}",
+        s.type_label,
+        profile.archetype.label(),
+        s.first_to.replace("{n}", &first_to.to_string()),
     );
     if **text != line {
         **text = line;
     }
 }
 
-fn setup_settings(mut commands: Commands, mut cursor: ResMut<MenuCursor>, mut rebinding: ResMut<Rebinding>) {
+/// Marker for the scrollable list of settings rows.
+#[derive(Component)]
+struct SettingsScroll;
+
+/// Non-interactive section heading inside the settings list.
+fn section_heading(label: &'static str) -> impl Bundle {
+    (
+        Text::new(label),
+        TextFont {
+            font_size: FontSize::Px(15.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.4, 0.75, 0.9)),
+        Node {
+            margin: UiRect {
+                top: px(10),
+                bottom: px(2),
+                ..default()
+            },
+            ..default()
+        },
+    )
+}
+
+fn setup_settings(
+    mut commands: Commands,
+    mut cursor: ResMut<MenuCursor>,
+    mut rebinding: ResMut<Rebinding>,
+    locale: Res<Locale>,
+) {
+    let s = locale.s();
     cursor.0 = 0;
     rebinding.action = None;
     rebinding.just_started = false;
@@ -340,7 +584,7 @@ fn setup_settings(mut commands: Commands, mut cursor: ResMut<MenuCursor>, mut re
         .spawn((root_node(), DespawnOnExit(AppState::Settings)))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("SETTINGS"),
+                Text::new(s.settings),
                 TextFont {
                     font_size: FontSize::Px(40.0),
                     ..default()
@@ -351,32 +595,64 @@ fn setup_settings(mut commands: Commands, mut cursor: ResMut<MenuCursor>, mut re
                     ..default()
                 },
             ));
-            let mut index = 0;
-            for action in Action::ALL {
-                parent.spawn(item_bundle(
-                    index,
-                    MenuAction::Bind(action),
-                    String::new(),
-                    420.0,
-                ));
-                index += 1;
-            }
-            for action in [
-                MenuAction::AdjustDas,
-                MenuAction::AdjustArr,
-                MenuAction::AdjustSdf,
-                MenuAction::AdjustMaster,
-                MenuAction::AdjustBgm,
-                MenuAction::AdjustSfx,
-                MenuAction::ToggleVsync,
-                MenuAction::ToggleFullscreen,
-                MenuAction::Back,
-            ] {
-                parent.spawn(item_bundle(index, action, String::new(), 420.0));
-                index += 1;
-            }
+            // Rows live in a scroll container so small windows can still
+            // reach everything (wheel, or keyboard nav auto-scrolling).
+            parent
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: px(6),
+                        max_height: px(470),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ScrollPosition::default(),
+                    SettingsScroll,
+                ))
+                .with_children(|list| {
+                    let mut index = 0;
+                    list.spawn(section_heading(s.sec_keys));
+                    for action in Action::ALL {
+                        list.spawn(item_bundle(
+                            index,
+                            MenuAction::Bind(action),
+                            String::new(),
+                            420.0,
+                        ));
+                        index += 1;
+                    }
+                    list.spawn(section_heading(s.sec_handling));
+                    for action in [
+                        MenuAction::AdjustDas,
+                        MenuAction::AdjustArr,
+                        MenuAction::AdjustSdf,
+                    ] {
+                        list.spawn(item_bundle(index, action, String::new(), 420.0));
+                        index += 1;
+                    }
+                    list.spawn(section_heading(s.sec_audio));
+                    for action in [
+                        MenuAction::AdjustMaster,
+                        MenuAction::AdjustBgm,
+                        MenuAction::AdjustSfx,
+                    ] {
+                        list.spawn(item_bundle(index, action, String::new(), 420.0));
+                        index += 1;
+                    }
+                    list.spawn(section_heading(s.sec_display));
+                    for action in [
+                        MenuAction::AdjustLanguage,
+                        MenuAction::ToggleVsync,
+                        MenuAction::ToggleFullscreen,
+                    ] {
+                        list.spawn(item_bundle(index, action, String::new(), 420.0));
+                        index += 1;
+                    }
+                    list.spawn(item_bundle(index, MenuAction::Back, String::new(), 420.0));
+                });
             parent.spawn((
-                Text::new("ENTER: rebind    Left/Right: adjust    ESC: back"),
+                Text::new(s.settings_hint),
                 TextFont {
                     font_size: FontSize::Px(16.0),
                     ..default()
@@ -387,36 +663,114 @@ fn setup_settings(mut commands: Commands, mut cursor: ResMut<MenuCursor>, mut re
                     ..default()
                 },
             ));
+            parent.spawn((
+                Text::new(s.pad_hint),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.4, 0.45, 0.55)),
+                Node {
+                    margin: UiRect::top(px(6)),
+                    ..default()
+                },
+            ));
         });
 }
 
-fn settings_label(action: MenuAction, settings: &GameSettings, rebinding: &Rebinding) -> Option<String> {
+/// Mouse wheel scrolls the settings list.
+fn settings_scroll_wheel(
+    mut wheels: MessageReader<MouseWheel>,
+    mut scrolls: Query<&mut ScrollPosition, With<SettingsScroll>>,
+) {
+    for ev in wheels.read() {
+        let dy = match ev.unit {
+            MouseScrollUnit::Line => ev.y * 36.0,
+            MouseScrollUnit::Pixel => ev.y,
+        };
+        for mut pos in &mut scrolls {
+            pos.0.y -= dy;
+        }
+    }
+}
+
+/// Keyboard/pad navigation drags the view along with the focused row.
+fn settings_keep_cursor_visible(
+    cursor: Res<MenuCursor>,
+    items: Query<(&MenuItem, &ComputedNode, &UiGlobalTransform)>,
+    mut scrolls: Query<
+        (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
+        With<SettingsScroll>,
+    >,
+) {
+    if !cursor.is_changed() {
+        return;
+    }
+    let Ok((snode, stf, mut pos)) = scrolls.single_mut() else {
+        return;
+    };
+    let Some((_, inode, itf)) = items.iter().find(|(item, ..)| item.index == cursor.0) else {
+        return;
+    };
+    // Everything below is in physical pixels; ScrollPosition wants logical.
+    let inv = snode.inverse_scale_factor();
+    let margin = 10.0;
+    let view_top = stf.affine().translation.y - snode.size().y * 0.5;
+    let view_bottom = stf.affine().translation.y + snode.size().y * 0.5;
+    let item_top = itf.affine().translation.y - inode.size().y * 0.5 - margin;
+    let item_bottom = itf.affine().translation.y + inode.size().y * 0.5 + margin;
+    if item_top < view_top {
+        pos.0.y += (item_top - view_top) * inv;
+    } else if item_bottom > view_bottom {
+        pos.0.y += (item_bottom - view_bottom) * inv;
+    }
+}
+
+fn settings_label(
+    action: MenuAction,
+    settings: &GameSettings,
+    rebinding: &Rebinding,
+    s: &Strings,
+) -> Option<String> {
+    use crate::i18n::LangChoice;
     Some(match action {
         MenuAction::Bind(a) => {
             let key = if rebinding.action == Some(a) {
-                "PRESS KEY...".to_string()
+                s.press_key.to_string()
             } else {
                 format!("[{}]", key_label(settings.key_for(a)))
             };
-            format!("{:<12} {}", a.label(), key)
+            format!("{:<12} {}", action_label(s, a), key)
         }
         MenuAction::AdjustDas => format!("{:<12} {} ms", "DAS", settings.das_ms),
         MenuAction::AdjustArr => format!("{:<12} {} ms", "ARR", settings.arr_ms),
-        MenuAction::AdjustSdf => format!("{:<12} {}", "Soft Drop", settings.sdf_label()),
-        MenuAction::AdjustMaster => format!("{:<12} {}/10", "Master Vol", settings.master_volume),
-        MenuAction::AdjustBgm => format!("{:<12} {}/10", "BGM Vol", settings.bgm_volume),
-        MenuAction::AdjustSfx => format!("{:<12} {}/10", "SFX Vol", settings.sfx_volume),
+        MenuAction::AdjustSdf => format!("{:<12} {}", s.sdf_setting, settings.sdf_label()),
+        MenuAction::AdjustMaster => {
+            format!("{:<12} {}/10", s.master_vol, settings.master_volume)
+        }
+        MenuAction::AdjustBgm => format!("{:<12} {}/10", s.bgm_vol, settings.bgm_volume),
+        MenuAction::AdjustSfx => format!("{:<12} {}/10", s.sfx_vol, settings.sfx_volume),
+        MenuAction::AdjustLanguage => {
+            let value = match settings.language {
+                LangChoice::Auto => {
+                    format!("AUTO ({})", crate::i18n::system_lang().short())
+                }
+                LangChoice::En => "ENGLISH".to_string(),
+                LangChoice::Ja => "日本語".to_string(),
+            };
+            format!("{:<12} {}", s.language, value)
+        }
         MenuAction::ToggleVsync => format!(
             "{:<12} {}",
             "VSync",
-            if settings.vsync { "ON" } else { "OFF (fast)" }
+            if settings.vsync { "ON" } else { s.vsync_off }
         ),
         MenuAction::ToggleFullscreen => format!(
             "{:<12} {}",
-            "Fullscreen",
+            s.fullscreen,
             if settings.fullscreen { "ON" } else { "OFF" }
         ),
-        MenuAction::Back => "BACK".to_string(),
+        MenuAction::Back => s.back.to_string(),
         _ => return None,
     })
 }
@@ -424,11 +778,12 @@ fn settings_label(action: MenuAction, settings: &GameSettings, rebinding: &Rebin
 fn refresh_settings_labels(
     settings: Res<GameSettings>,
     rebinding: Res<Rebinding>,
+    locale: Res<Locale>,
     items: Query<(&MenuItem, &Children)>,
     mut labels: Query<&mut Text, With<MenuItemLabel>>,
 ) {
     for (item, children) in &items {
-        let Some(label) = settings_label(item.action, &settings, &rebinding) else {
+        let Some(label) = settings_label(item.action, &settings, &rebinding, locale.s()) else {
             continue;
         };
         for child in children.iter() {
@@ -451,6 +806,7 @@ fn item_count(items: &Query<(Entity, &MenuItem, &Interaction)>) -> usize {
 
 fn menu_keyboard_nav(
     keys: Res<ButtonInput<KeyCode>>,
+    pad: Res<PadInput>,
     items: Query<(Entity, &MenuItem, &Interaction)>,
     mut cursor: ResMut<MenuCursor>,
     mut sfx: MessageWriter<PlaySfx>,
@@ -463,26 +819,38 @@ fn menu_keyboard_nav(
     if count == 0 {
         return;
     }
-    // The stage picker is a grid: vertical steps jump a whole row and
+    // The stage pickers are grids: vertical steps jump a whole row and
     // left/right move the cursor instead of adjusting values.
-    let grid = *activate.app_state.get() == AppState::StageSelect;
+    let grid = matches!(
+        *activate.app_state.get(),
+        AppState::StageSelect | AppState::ZoneSelect
+    );
     let step = if grid { STAGE_COLUMNS } else { 1 };
 
+    let down = keys.just_pressed(KeyCode::ArrowDown)
+        || keys.just_pressed(KeyCode::KeyS)
+        || pad.just_pressed(PadAction::Down);
+    let up = keys.just_pressed(KeyCode::ArrowUp)
+        || keys.just_pressed(KeyCode::KeyW)
+        || pad.just_pressed(PadAction::Up);
+    let right = keys.just_pressed(KeyCode::ArrowRight) || pad.just_pressed(PadAction::Right);
+    let left = keys.just_pressed(KeyCode::ArrowLeft) || pad.just_pressed(PadAction::Left);
+
     let mut moved = false;
-    if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS) {
+    if down {
         cursor.0 = (cursor.0 + step) % count;
         moved = true;
     }
-    if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
+    if up {
         cursor.0 = (cursor.0 + count - step) % count;
         moved = true;
     }
     if grid {
-        if keys.just_pressed(KeyCode::ArrowRight) {
+        if right {
             cursor.0 = (cursor.0 + 1) % count;
             moved = true;
         }
-        if keys.just_pressed(KeyCode::ArrowLeft) {
+        if left {
             cursor.0 = (cursor.0 + count - 1) % count;
             moved = true;
         }
@@ -493,15 +861,17 @@ fn menu_keyboard_nav(
 
     let adjust = if grid {
         0
-    } else if keys.just_pressed(KeyCode::ArrowRight) {
+    } else if right {
         1
-    } else if keys.just_pressed(KeyCode::ArrowLeft) {
+    } else if left {
         -1
     } else {
         0
     };
-    let confirm = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space);
-    let back = keys.just_pressed(KeyCode::Escape);
+    let confirm = keys.just_pressed(KeyCode::Enter)
+        || keys.just_pressed(KeyCode::Space)
+        || pad.just_pressed(PadAction::Confirm);
+    let back = keys.just_pressed(KeyCode::Escape) || pad.just_pressed(PadAction::Back);
 
     if adjust == 0 && !confirm && !back {
         return;
@@ -561,7 +931,10 @@ fn run_menu_action(
     if back {
         if matches!(
             *p.app_state.get(),
-            AppState::Settings | AppState::StageSelect
+            AppState::Settings
+                | AppState::SoloSelect
+                | AppState::ZoneSelect
+                | AppState::StageSelect
         ) {
             sfx.write(PlaySfx::new(Sfx::MenuBack));
             p.next_app.set(AppState::Title);
@@ -597,6 +970,10 @@ fn run_menu_action(
                 s.sfx_volume = (s.sfx_volume as i32 + adjust).clamp(0, 10) as u32;
                 true
             }
+            MenuAction::AdjustLanguage => {
+                s.language = s.language.cycled(adjust);
+                true
+            }
             MenuAction::ToggleVsync => {
                 s.vsync = !s.vsync;
                 true
@@ -620,8 +997,22 @@ fn run_menu_action(
         return;
     }
     match action {
+        MenuAction::SoloSelect => {
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            p.next_app.set(AppState::SoloSelect);
+        }
         MenuAction::Marathon => {
             *p.mode = GameMode::Single;
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            p.next_app.set(AppState::Playing);
+        }
+        MenuAction::Sprint => {
+            *p.mode = GameMode::Sprint;
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            p.next_app.set(AppState::Playing);
+        }
+        MenuAction::Dig => {
+            *p.mode = GameMode::Dig;
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
             p.next_app.set(AppState::Playing);
         }
@@ -632,6 +1023,19 @@ fn run_menu_action(
         MenuAction::Stage(stage) => {
             if p.progress.is_unlocked(stage) {
                 *p.mode = GameMode::VsCpu { stage };
+                sfx.write(PlaySfx::new(Sfx::MenuSelect));
+                p.next_app.set(AppState::Playing);
+            } else {
+                sfx.write(PlaySfx::new(Sfx::RotateFail));
+            }
+        }
+        MenuAction::ZoneSelect => {
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            p.next_app.set(AppState::ZoneSelect);
+        }
+        MenuAction::ZoneStage(stage) => {
+            if p.progress.is_zone_unlocked(stage) {
+                *p.mode = GameMode::ZoneBattle { stage };
                 sfx.write(PlaySfx::new(Sfx::MenuSelect));
                 p.next_app.set(AppState::Playing);
             } else {
@@ -653,6 +1057,12 @@ fn run_menu_action(
         MenuAction::ToggleVsync => {
             // Enter toggles too (same as left/right).
             p.settings.vsync = !p.settings.vsync;
+            save_settings(&p.settings);
+            sfx.write(PlaySfx::quiet(Sfx::MenuMove));
+        }
+        MenuAction::AdjustLanguage => {
+            // Enter cycles forward, same as pressing right.
+            p.settings.language = p.settings.language.cycled(1);
             save_settings(&p.settings);
             sfx.write(PlaySfx::quiet(Sfx::MenuMove));
         }
@@ -686,6 +1096,7 @@ fn highlight_items(
 
 fn rebind_capture(
     mut keyboard: MessageReader<KeyboardInput>,
+    pad: Res<PadInput>,
     mut rebinding: ResMut<Rebinding>,
     mut settings: ResMut<GameSettings>,
     mut sfx: MessageWriter<PlaySfx>,
@@ -700,6 +1111,14 @@ fn rebind_capture(
         keyboard.clear();
         return;
     };
+    // Rebinding targets the keyboard only; pad B backs out of the prompt
+    // so a pad-only player is never stuck in it.
+    if pad.just_pressed(PadAction::Back) {
+        rebinding.action = None;
+        sfx.write(PlaySfx::new(Sfx::MenuBack));
+        keyboard.clear();
+        return;
+    }
     for input in keyboard.read() {
         if input.state != ButtonState::Pressed || input.repeat {
             continue;
@@ -755,18 +1174,34 @@ fn overlay_text(text: &str, size: f32, color: Color) -> impl Bundle {
     )
 }
 
-fn setup_pause_overlay(mut commands: Commands, settings: Res<GameSettings>) {
+fn setup_pause_overlay(
+    mut commands: Commands,
+    settings: Res<GameSettings>,
+    locale: Res<Locale>,
+) {
+    let s = locale.s();
     let pause_key = key_label(settings.key_for(Action::Pause));
     commands
         .spawn((overlay_root(), DespawnOnExit(PlayState::Paused)))
         .with_children(|parent| {
-            parent.spawn(overlay_text("PAUSED", 64.0, Color::srgb(0.9, 0.95, 1.0)));
+            parent.spawn(overlay_text(s.paused, 64.0, Color::srgb(0.9, 0.95, 1.0)));
             parent.spawn(overlay_text(
-                &format!("{pause_key}: resume    R: restart    Q: quit to title"),
+                &s.pause_hint.replace("{key}", &pause_key),
                 20.0,
                 Color::srgb(0.6, 0.7, 0.8),
             ));
         });
+}
+
+/// "YOU {p} - {c} CPU    (FIRST TO {n})" in the current language.
+fn vs_score_line(s: &Strings, player: u32, cpu: u32, wins_needed: u32) -> String {
+    format!(
+        "{}    ({})",
+        s.vs_score
+            .replace("{p}", &player.to_string())
+            .replace("{c}", &cpu.to_string()),
+        s.first_to.replace("{n}", &wins_needed.to_string())
+    )
 }
 
 /// Intermission between rounds of a first-to-n match.
@@ -774,19 +1209,16 @@ fn setup_round_overlay(
     mut commands: Commands,
     last: Option<Res<LastRound>>,
     match_state: Option<Res<MatchState>>,
+    locale: Res<Locale>,
 ) {
+    let s = locale.s();
     let won = matches!(last.as_deref(), Some(LastRound { winner: 0 }));
     let (headline, color) = if won {
-        ("ROUND WIN!", Color::srgb(1.0, 0.9, 0.3))
+        (s.round_win, Color::srgb(1.0, 0.9, 0.3))
     } else {
-        ("ROUND LOST", Color::srgb(0.9, 0.35, 0.35))
+        (s.round_lost, Color::srgb(0.9, 0.35, 0.35))
     };
-    let score = match_state.map(|ms| {
-        format!(
-            "YOU {} - {} CPU    (FIRST TO {})",
-            ms.player_wins, ms.cpu_wins, ms.wins_needed
-        )
-    });
+    let score = match_state.map(|ms| vs_score_line(s, ms.player_wins, ms.cpu_wins, ms.wins_needed));
     commands
         .spawn((overlay_root(), DespawnOnExit(PlayState::RoundOver)))
         .with_children(|parent| {
@@ -794,11 +1226,7 @@ fn setup_round_overlay(
             if let Some(score) = score {
                 parent.spawn(overlay_text(&score, 26.0, Color::srgb(0.9, 0.93, 1.0)));
             }
-            parent.spawn(overlay_text(
-                "next round...",
-                18.0,
-                Color::srgb(0.6, 0.7, 0.8),
-            ));
+            parent.spawn(overlay_text(s.next_round, 18.0, Color::srgb(0.6, 0.7, 0.8)));
         });
 }
 
@@ -806,42 +1234,68 @@ fn setup_result_overlay(
     mut commands: Commands,
     result: Option<Res<SessionResult>>,
     stage_clear: Option<Res<StageClear>>,
+    race_result: Option<Res<RaceResult>>,
     match_state: Option<Res<MatchState>>,
     mode: Res<GameMode>,
+    locale: Res<Locale>,
     players: Query<&GameSession, With<HumanControlled>>,
 ) {
-    let stage = match *mode {
-        GameMode::VsCpu { stage } => Some(stage),
-        GameMode::Single => None,
+    let t = locale.s();
+    // Both VS campaigns share the stage flow; only the label differs.
+    let stage_label = match *mode {
+        GameMode::VsCpu { stage } => Some((t.stage_prefix, stage)),
+        GameMode::ZoneBattle { stage } => Some((t.zone_prefix, stage)),
+        _ => None,
     };
-    let (headline, color) = match (result.as_deref(), stage) {
-        (Some(SessionResult::VsWin { winner: 0 }), Some(s)) => {
-            (format!("STAGE {s:02} CLEAR!"), Color::srgb(1.0, 0.9, 0.3))
-        }
-        (Some(SessionResult::VsWin { .. }), Some(s)) => {
-            (format!("STAGE {s:02} FAILED..."), Color::srgb(0.9, 0.3, 0.3))
-        }
-        _ => ("GAME OVER".to_string(), Color::srgb(0.9, 0.4, 0.4)),
+    let stage = stage_label.map(|(_, s)| s);
+    let vs_match = stage_label.is_some();
+    let (headline, color) = match (result.as_deref(), stage_label) {
+        (Some(SessionResult::RaceDone), _) => (t.finish.to_string(), Color::srgb(1.0, 0.9, 0.3)),
+        (Some(SessionResult::VsWin { winner: 0 }), Some((prefix, s))) => (
+            t.stage_clear.replace("{stage}", &format!("{prefix} {s:02}")),
+            Color::srgb(1.0, 0.9, 0.3),
+        ),
+        (Some(SessionResult::VsWin { .. }), Some((prefix, s))) => (
+            t.stage_failed.replace("{stage}", &format!("{prefix} {s:02}")),
+            Color::srgb(0.9, 0.3, 0.3),
+        ),
+        _ => (t.game_over.to_string(), Color::srgb(0.9, 0.4, 0.4)),
     };
 
-    // VS matches report the whole-match aggregate; marathon reports the run.
-    let stats = if let Some(ms) = match_state.as_ref().filter(|_| stage.is_some()) {
+    // VS matches report the whole-match aggregate; races report pace;
+    // marathon reports the run.
+    let stats = if let Some(ms) = match_state.as_ref().filter(|_| vs_match) {
         Some(format!(
-            "ROUNDS {}-{}    ATTACK {}    TETRIS {}    T-SPIN {}    COMBO {}    PC {}",
+            "{} {}-{}    {} {}    {} {}    {} {}    {} {}    {} {}",
+            t.rounds,
             ms.player_wins,
             ms.cpu_wins,
+            t.attack,
             ms.agg.attack,
+            t.tetris,
             ms.agg.tetrises,
+            t.tspin,
             ms.agg.tspins,
+            t.combo,
             ms.agg.max_combo,
+            t.pc,
             ms.agg.perfect_clears,
         ))
+    } else if matches!(*mode, GameMode::Sprint | GameMode::Dig) {
+        players.single().ok().map(|s| {
+            let g = &s.game;
+            let pps = g.stats.pieces as f64 / g.stats.time.max(0.001);
+            format!(
+                "{} {}    {} {}    {} {:.2}",
+                t.lines, g.lines, t.pieces, g.stats.pieces, t.pps, pps
+            )
+        })
     } else {
         players.single().ok().map(|s| {
             let g = &s.game;
             format!(
-                "SCORE {}    LEVEL {}    LINES {}    MAX COMBO {}",
-                g.score, g.level, g.lines, g.stats.max_combo
+                "{} {}    {} {}    {} {}    {} {}",
+                t.score, g.score, t.level, g.level, t.lines, g.lines, t.max_combo, g.stats.max_combo
             )
         })
     };
@@ -851,7 +1305,7 @@ fn setup_result_overlay(
         .with_children(|parent| {
             parent.spawn(overlay_text(&headline, 64.0, color));
             if let Some(clear) = stage_clear.as_deref() {
-                parent.spawn(overlay_text("RANK", 20.0, Color::srgb(0.6, 0.7, 0.8)));
+                parent.spawn(overlay_text(t.rank, 20.0, Color::srgb(0.6, 0.7, 0.8)));
                 parent.spawn((
                     Text::new(clear.grade.letter()),
                     TextFont {
@@ -862,10 +1316,31 @@ fn setup_result_overlay(
                     TextShadow::default(),
                 ));
                 if clear.new_best {
+                    parent.spawn(overlay_text(t.new_best, 24.0, Color::srgb(0.5, 1.0, 0.6)));
+                }
+            }
+            if let Some(race) = race_result.as_deref() {
+                parent.spawn(overlay_text(t.time_label, 20.0, Color::srgb(0.6, 0.7, 0.8)));
+                parent.spawn((
+                    Text::new(format_race_time(race.time)),
+                    TextFont {
+                        font_size: FontSize::Px(84.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.95, 0.97, 1.0)),
+                    TextShadow::default(),
+                ));
+                if race.new_best {
+                    parent.spawn(overlay_text(t.new_best, 24.0, Color::srgb(0.5, 1.0, 0.6)));
+                } else {
                     parent.spawn(overlay_text(
-                        "NEW BEST!",
-                        24.0,
-                        Color::srgb(0.5, 1.0, 0.6),
+                        &format!(
+                            "{} {}",
+                            t.best_label,
+                            format_race_time(race.best_ms as f64 / 1000.0)
+                        ),
+                        20.0,
+                        Color::srgb(0.6, 0.7, 0.8),
                     ));
                 }
             }
@@ -875,9 +1350,9 @@ fn setup_result_overlay(
             let won_stage = matches!(result.as_deref(), Some(SessionResult::VsWin { winner: 0 }))
                 && stage.is_some();
             let hint = if won_stage && stage.is_some_and(|s| s < MAX_STAGE) {
-                "ENTER: next stage    R: replay    Q: title"
+                t.hint_next_stage
             } else {
-                "R / ENTER: play again    Q: title"
+                t.hint_play_again
             };
             parent.spawn(overlay_text(hint, 20.0, Color::srgb(0.6, 0.7, 0.8)));
         });
@@ -885,6 +1360,7 @@ fn setup_result_overlay(
 
 fn overlay_input(
     keys: Res<ButtonInput<KeyCode>>,
+    pad: Res<PadInput>,
     state: Res<State<PlayState>>,
     settings: Res<GameSettings>,
     result: Option<Res<SessionResult>>,
@@ -899,18 +1375,27 @@ fn overlay_input(
     let shadowed = |key: KeyCode| !finished && pause_key == key;
 
     // After beating a stage, ENTER advances to the next one (R replays).
-    let next_stage = match (*mode, result.as_deref()) {
+    // Both VS campaigns advance within their own ladder.
+    let next_mode = match (*mode, result.as_deref()) {
         (GameMode::VsCpu { stage }, Some(SessionResult::VsWin { winner: 0 }))
             if finished && stage < MAX_STAGE =>
         {
-            Some(stage + 1)
+            Some(GameMode::VsCpu { stage: stage + 1 })
+        }
+        (GameMode::ZoneBattle { stage }, Some(SessionResult::VsWin { winner: 0 }))
+            if finished && stage < MAX_STAGE =>
+        {
+            Some(GameMode::ZoneBattle { stage: stage + 1 })
         }
         _ => None,
     };
 
-    if finished && keys.just_pressed(KeyCode::Enter) {
-        if let Some(stage) = next_stage {
-            *mode = GameMode::VsCpu { stage };
+    // Pad: A advances/replays and B quits to title, but only on the result
+    // screen — while paused only Start (pause_toggle) reacts, so a stray
+    // button press cannot throw away a running match.
+    if finished && (keys.just_pressed(KeyCode::Enter) || pad.just_pressed(PadAction::Confirm)) {
+        if let Some(next) = next_mode {
+            *mode = next;
         }
         sfx.write(PlaySfx::new(Sfx::MenuSelect));
         next_app.set(AppState::Restarting);
@@ -920,7 +1405,9 @@ fn overlay_input(
         // the PlayState sub-state resets to Countdown (a Playing→Playing
         // identity transition would leave it stuck at Finished/Paused).
         next_app.set(AppState::Restarting);
-    } else if keys.just_pressed(KeyCode::KeyQ) && !shadowed(KeyCode::KeyQ) {
+    } else if (keys.just_pressed(KeyCode::KeyQ) && !shadowed(KeyCode::KeyQ))
+        || (finished && pad.just_pressed(PadAction::Back))
+    {
         sfx.write(PlaySfx::new(Sfx::MenuBack));
         next_app.set(AppState::Title);
     }
