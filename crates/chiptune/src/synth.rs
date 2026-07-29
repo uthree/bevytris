@@ -41,6 +41,7 @@ const VOICE_PAN: [f32; VOICE_COUNT] = [
     0.0,   // Bass
     -0.08, // Perc
     0.38,  // Hat
+    -0.05, // Sample — drum bodies and impacts, so near enough centred
 ];
 
 /// NTSC 2A03 clock. Every period table below derives from it.
@@ -101,6 +102,139 @@ fn build_wavetables() -> [[f32; 32]; 4] {
                     + 0.10 * (4.0 * th).sin()));
     }
     t
+}
+
+/// The synthesized sample bank — the one place the engine stops obeying
+/// the chip. These are built at startup from plain maths, so they cost no
+/// asset files, and they do the things four-bit oscillators cannot: a
+/// drum with an actual body, a sweep, a sub-bass impact.
+fn build_samples() -> Vec<Vec<f32>> {
+    let sr = SAMPLE_RATE as f32;
+    let tau = std::f32::consts::TAU;
+    // A local LCG so the bank is byte-identical on every run.
+    let mut seed = 0x1234_5678u32;
+    let noise = move || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 8) as f32 / (1 << 23) as f32 - 1.0
+    };
+
+    let render = |secs: f32, mut f: Box<dyn FnMut(f32, usize) -> f32>| -> Vec<f32> {
+        let n = (sr * secs) as usize;
+        let mut buf: Vec<f32> = (0..n).map(|i| f(i as f32 / sr, i)).collect();
+        let peak = buf.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        if peak > 1e-6 {
+            for s in &mut buf {
+                *s /= peak;
+            }
+        }
+        buf
+    };
+
+    let mut out = Vec::new();
+
+    // 0 — kick: a sine whose pitch collapses, plus a click for the beater.
+    let mut phase = 0.0f32;
+    out.push(render(
+        0.38,
+        Box::new(move |t, i| {
+            let f = 42.0 + 96.0 * (-t * 34.0).exp();
+            phase += tau * f / 48_000.0;
+            let click = if i < 90 {
+                (1.0 - i as f32 / 90.0).powi(2) * 0.55
+            } else {
+                0.0
+            };
+            phase.sin() * (-t * 8.5).exp() + click
+        }),
+    ));
+
+    // 1 — snare: noise over two tuned tones, the way a real shell rings.
+    let (mut p1, mut p2) = (0.0f32, 0.0f32);
+    let mut n1 = noise;
+    out.push(render(
+        0.24,
+        Box::new(move |t, _| {
+            p1 += tau * 188.0 / 48_000.0;
+            p2 += tau * 331.0 / 48_000.0;
+            n1() * (-t * 21.0).exp() + p1.sin() * (-t * 16.0).exp() * 0.5
+                + p2.sin() * (-t * 19.0).exp() * 0.3
+        }),
+    ));
+
+    // 2 — clap: four bursts a few milliseconds apart, then a short room.
+    let mut n2 = noise;
+    let mut hp = 0.0f32;
+    out.push(render(
+        0.30,
+        Box::new(move |t, _| {
+            let burst = [0.000f32, 0.009, 0.018, 0.027]
+                .iter()
+                .map(|&s| {
+                    if t >= s {
+                        (-(t - s) * 320.0).exp()
+                    } else {
+                        0.0
+                    }
+                })
+                .sum::<f32>();
+            let tail = if t > 0.03 { (-(t - 0.03) * 26.0).exp() } else { 0.0 };
+            let raw = n2() * (burst + tail * 0.5);
+            // One-pole high-pass, so it snaps instead of thudding.
+            hp += (raw - hp) * 0.12;
+            raw - hp
+        }),
+    ));
+
+    // 3 — tom.
+    let mut p3 = 0.0f32;
+    out.push(render(
+        0.34,
+        Box::new(move |t, _| {
+            let f = 92.0 + 110.0 * (-t * 16.0).exp();
+            p3 += tau * f / 48_000.0;
+            p3.sin() * (-t * 10.0).exp()
+        }),
+    ));
+
+    // 4 — riser: the sweep that announces a chorus. A sine climbing three
+    // and a half octaves under brightening noise, swelling the whole way
+    // and cut off dead at the top so the downbeat lands in the gap.
+    let mut p4 = 0.0f32;
+    let mut n4 = noise;
+    let mut lp = 0.0f32;
+    out.push(render(
+        1.5,
+        Box::new(move |t, _| {
+            let k = (t / 1.5).min(1.0);
+            let f = 260.0 * (11.0f32).powf(k);
+            p4 += tau * f / 48_000.0;
+            let raw = n4();
+            lp += (raw - lp) * (0.02 + 0.75 * k);
+            let swell = k.powf(1.6);
+            // Hard stop at the very end: the silence is the point.
+            let cut = if k > 0.97 { (1.0 - k) / 0.03 } else { 1.0 };
+            (p4.sin() * 0.55 + lp * 0.85) * swell * cut
+        }),
+    ));
+
+    // 5 — impact: the sub-bass drop the riser was pointing at.
+    let mut p5 = 0.0f32;
+    let mut n5 = noise;
+    out.push(render(
+        1.1,
+        Box::new(move |t, i| {
+            let f = 29.0 + 52.0 * (-t * 12.0).exp();
+            p5 += tau * f / 48_000.0;
+            let crack = if i < 1400 {
+                n5() * (1.0 - i as f32 / 1400.0).powi(3) * 0.5
+            } else {
+                0.0
+            };
+            p5.sin() * (-t * 3.4).exp() + crack
+        }),
+    ));
+
+    out
 }
 
 /// PolyBLEP: a two-sample polynomial correction around a step
@@ -215,6 +349,10 @@ struct VoiceState {
     base_midi: f32,
     /// The note's full length, so the tail fall knows where the tail is.
     total_frames: u16,
+    /// Glissando: where the slide starts, and how much of it is left.
+    glide_from: f32,
+    glide_left: u16,
+    glide_total: u16,
     /// Volume is ramped per sample between macro steps: the raw 60 Hz
     /// staircase leaves an error signal only ~14 dB below the tone, which
     /// is an audible buzz on short decays.
@@ -235,12 +373,24 @@ impl VoiceState {
             arp: None,
             base_midi: 60.0,
             total_frames: 0,
+            glide_from: 60.0,
+            glide_left: 0,
+            glide_total: 0,
             gain: 0.0,
             gain_step: 0.0,
         }
     }
 
     fn start(&mut self, ev: &NoteEvent) {
+        // A glissando only means anything if there was a note to slide
+        // from — an opening note just attacks.
+        if ev.glide > 0 && self.active {
+            self.glide_from = self.base_midi;
+            self.glide_left = ev.glide as u16;
+            self.glide_total = ev.glide as u16;
+        } else {
+            self.glide_left = 0;
+        }
         self.inst = inst_def(ev.inst);
         self.which = ev.inst;
         self.active = true;
@@ -269,6 +419,7 @@ impl VoiceState {
         };
         self.cursor += 1;
         self.frames_played += 1;
+        self.glide_left = self.glide_left.saturating_sub(1);
         v as f32 * self.vel
     }
 
@@ -280,6 +431,10 @@ impl VoiceState {
             None => 0.0,
         };
         let mut m = self.base_midi + arp;
+        if self.glide_left > 0 && self.glide_total > 0 {
+            let k = self.glide_left as f32 / self.glide_total as f32;
+            m += (self.glide_from - self.base_midi) * k;
+        }
         let d = self.inst;
         if d.vib_depth > 0.0 && self.frames_played > d.vib_delay {
             let t = (self.frames_played - d.vib_delay) as f32 / FRAME_RATE as f32;
@@ -506,6 +661,76 @@ impl WaveCh {
     }
 }
 
+/// Sample playback, after the NES's DPCM channel. Two slots rather than
+/// one: a riser lasts a second and a half, and a kick landing under it
+/// must not cut it off.
+struct SampleCh {
+    slots: [SampleSlot; 2],
+    next: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SampleSlot {
+    bank: usize,
+    pos: f32,
+    rate: f32,
+    gain: f32,
+    active: bool,
+}
+
+impl SampleCh {
+    fn new() -> Self {
+        SampleCh {
+            slots: [SampleSlot::default(); 2],
+            next: 0,
+        }
+    }
+
+    fn start(&mut self, ev: &NoteEvent) {
+        let slot = &mut self.slots[self.next];
+        self.next = (self.next + 1) % 2;
+        slot.bank = ev.inst.sample();
+        slot.pos = 0.0;
+        slot.rate = 1.0;
+        slot.gain = vel_scale(ev.vel);
+        slot.active = true;
+    }
+
+    fn stop(&mut self) {
+        for s in &mut self.slots {
+            s.active = false;
+        }
+    }
+
+    fn sample(&mut self, bank: &[Vec<f32>]) -> f32 {
+        let mut out = 0.0;
+        for s in &mut self.slots {
+            if !s.active {
+                continue;
+            }
+            let buf = &bank[s.bank.min(bank.len() - 1)];
+            let i = s.pos as usize;
+            if i + 1 >= buf.len() {
+                s.active = false;
+                continue;
+            }
+            // Linear interpolation, so a re-pitched sample does not grind.
+            let frac = s.pos - i as f32;
+            out += (buf[i] + (buf[i + 1] - buf[i]) * frac) * s.gain;
+            s.pos += s.rate;
+        }
+        out
+    }
+
+    fn level(&self) -> f32 {
+        self.slots
+            .iter()
+            .filter(|s| s.active)
+            .map(|s| s.gain)
+            .fold(0.0f32, f32::max)
+    }
+}
+
 struct NoiseCh {
     st: VoiceState,
     lfsr: u16,
@@ -581,7 +806,9 @@ pub struct Synth {
     tri: TriCh,
     /// Kick/snare and hats/shakers, so percussion stops masking itself.
     noise: [NoiseCh; 2],
+    pcm: SampleCh,
     wavetables: [[f32; 32]; 4],
+    samples: Vec<Vec<f32>>,
     frame_acc: u32,
     /// Absolute sample position — the one authoritative musical clock.
     pos: u64,
@@ -611,7 +838,9 @@ impl Synth {
             wave: WaveCh::new(),
             tri: TriCh::new(),
             noise: [NoiseCh::new(), NoiseCh::new()],
+            pcm: SampleCh::new(),
             wavetables: build_wavetables(),
+            samples: build_samples(),
             frame_acc: 0,
             pos: 0,
             // Removes the mixer's DC offset (its output swings 0..1, not
@@ -673,6 +902,7 @@ impl Synth {
         self.tri.st.frames_left = 0;
         self.tri.gate_target = 0.0;
         self.tri.kick_frames = 0;
+        self.pcm.stop();
     }
 
     pub fn note_on(&mut self, ev: &NoteEvent) {
@@ -690,6 +920,7 @@ impl Synth {
                 }
             }
             Voice::Hat => self.noise[1].st.start(ev),
+            Voice::Sample => self.pcm.start(ev),
         }
     }
 
@@ -733,6 +964,7 @@ impl Synth {
         let t = self.tri.sample();
         let n0 = self.noise[0].sample();
         let n1 = self.noise[1].sample();
+        let pcm = self.pcm.sample(&self.samples);
 
         // The console's nonlinear mixer, on the four channels the console
         // actually had. This self-compression is why NES music never clips
@@ -782,6 +1014,9 @@ impl Synth {
         place(Voice::Saw, saw / 31.0 * 0.125);
         place(Voice::Wave, wav / 15.0 * 0.100);
         place(Voice::Hat, n1 / 15.0 * 0.070);
+        // The samples are already bipolar and normalized, so they take a
+        // level rather than a scale factor.
+        place(Voice::Sample, pcm * 0.16);
 
         let mut out = [left, right];
         for (i, s) in out.iter_mut().enumerate() {
@@ -812,7 +1047,7 @@ impl Synth {
         let e = (self.saw.st.gain + self.wave.st.gain) / 30.0 * 0.6;
         let t = self.tri.gate * 0.35;
         let n = (self.noise[0].st.gain + self.noise[1].st.gain) / 30.0 * 0.5;
-        (p + e + t + n).min(1.0)
+        (p + e + t + n + self.pcm.level() * 0.4).min(1.0)
     }
 }
 
@@ -828,6 +1063,7 @@ mod tests {
             vel: 100,
             frames,
             arp: None,
+            glide: 0,
         }
     }
 
@@ -1032,6 +1268,7 @@ mod tests {
             vel: 127,
             frames: 600,
             arp: None,
+            glide: 0,
         });
         let n = 16384;
         let buf = mono(&mut s, n);

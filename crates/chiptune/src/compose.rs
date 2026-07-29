@@ -279,6 +279,38 @@ struct Material {
     rhythms_used: Vec<usize>,
 }
 
+/// Which drum kit a piece uses. The chip kit is the console's noise
+/// channel doing its best; the sampled kit swaps the kick and snare for
+/// synthesized one-shots with real bodies and keeps the chip hats on top,
+/// which is what tracker musicians did the moment they had the memory.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kit {
+    Chip,
+    Sampled,
+}
+
+impl Kit {
+    fn kick(self) -> Inst {
+        match self {
+            Kit::Chip => Inst::Kick,
+            Kit::Sampled => Inst::PcmKick,
+        }
+    }
+    fn snare(self, clap: bool) -> Inst {
+        match (self, clap) {
+            (Kit::Chip, _) => Inst::Snare,
+            (Kit::Sampled, false) => Inst::PcmSnare,
+            (Kit::Sampled, true) => Inst::Clap,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Kit::Chip => "chip",
+            Kit::Sampled => "pcm",
+        }
+    }
+}
+
 /// Weighted meter roll. 4/4 stays the house style — the odd meters are a
 /// change of scenery, and versus in particular needs a floor to stand on
 /// more than it needs novelty.
@@ -474,6 +506,19 @@ fn tempo_range(profile: Profile) -> (f32, f32) {
         Profile::SoloCalm => (122.0, 144.0),
         Profile::VsIntense => (178.0, 206.0),
     }
+}
+
+/// Rolled per piece. Sampled drums are the exception rather than the
+/// house style: they are a change of texture, and the chip kit is what
+/// makes the rest of the arrangement sound like a chip.
+fn roll_kit(profile: Profile, rng: &mut Rng) -> Kit {
+    let sampled = match profile {
+        Profile::Ambient => 0.25,
+        Profile::SoloCalm => 0.35,
+        Profile::VsIntense => 0.45,
+        Profile::Victory => 0.5,
+    };
+    if rng.chance(sampled) { Kit::Sampled } else { Kit::Chip }
 }
 
 fn roll_tempo(profile: Profile, meter: Meter, rng: &mut Rng) -> f32 {
@@ -686,6 +731,7 @@ pub struct Info {
     pub tonic: i32,
     pub mode: Mode,
     pub meter: Meter,
+    pub kit: Kit,
     pub bpm: f32,
     pub bar: u32,
 }
@@ -714,6 +760,7 @@ pub struct Composer {
     /// Fixed for the whole piece — see [`tempo_range`].
     bpm: f32,
     meter: Meter,
+    kit: Kit,
     /// Counts profile activations, so each match rolls its own meter,
     /// tempo and material instead of replaying the last one.
     piece: u64,
@@ -739,6 +786,7 @@ impl Composer {
             root,
             bpm: roll_tempo(profile, Meter::Four, &mut Rng::new(seed)),
             meter: Meter::Four,
+            kit: Kit::Chip,
             piece: 0,
             bar: 0,
             next_bar_at: 0,
@@ -759,6 +807,7 @@ impl Composer {
             tonic: self.root + self.transpose + self.lift,
             mode: self.mode,
             meter: self.meter,
+            kit: self.kit,
             bpm: self.bpm,
             bar: self.bar,
         }
@@ -785,6 +834,7 @@ impl Composer {
         self.profile = profile;
         self.meter = roll_meter(profile, &mut rng);
         self.bpm = roll_tempo(profile, self.meter, &mut rng);
+        self.kit = roll_kit(profile, &mut rng);
         self.material = build_material(
             self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
             profile,
@@ -794,6 +844,12 @@ impl Composer {
         self.bar = 0;
         // A new song starts back in its own key.
         self.lift = 0;
+    }
+
+    /// Override the drum kit [`Composer::set_profile`] rolled. Used by
+    /// the offline renderer to audition a kit on demand.
+    pub fn force_kit(&mut self, kit: Kit) {
+        self.kit = kit;
     }
 
     /// Override the meter that [`Composer::set_profile`] rolled, and
@@ -934,7 +990,15 @@ impl Composer {
 
         // --- lead -----------------------------------------------------
         if arr.lead {
+            let mut prev: Option<i32> = None;
             for n in melody.iter().filter(|n| n.prio <= arr.max_prio) {
+                // Scoop into big leaps only. A glide on every note is a
+                // slide whistle; on a leap it is expression.
+                let glide = match prev {
+                    Some(p) if (n.deg - p).abs() >= 3 => 2,
+                    _ => 0,
+                };
+                prev = Some(n.deg);
                 out.push(NoteEvent {
                     at: at(n.step as f32),
                     inst: arr.lead_inst,
@@ -942,6 +1006,7 @@ impl Composer {
                     vel: if n.prio == 0 { 112 } else { 88 },
                     frames: frames(n.len),
                     arp: None,
+                    glide,
                 });
             }
         }
@@ -962,6 +1027,7 @@ impl Composer {
                         vel: 96,
                         frames: frames(2),
                         arp: Some(arp),
+                        glide: 0,
                     });
                 }
             } else {
@@ -974,6 +1040,7 @@ impl Composer {
                         vel: 84,
                         frames: frames(half),
                         arp: Some(arp),
+                        glide: 0,
                     });
                 }
             }
@@ -996,6 +1063,7 @@ impl Composer {
                         vel: 62,
                         frames: frames(n.len.min(3)),
                         arp: None,
+                        glide: 0,
                     });
                 }
             }
@@ -1010,6 +1078,7 @@ impl Composer {
                         vel: 72,
                         frames: frames(1),
                         arp: None,
+                        glide: 0,
                     });
                 }
             }
@@ -1025,12 +1094,13 @@ impl Composer {
                 vel: 76,
                 frames: frames(steps as u8),
                 arp: Some(chord.arp(mode)),
+                glide: 0,
             });
         }
 
         // --- bass -----------------------------------------------------
         let bass = bass_pattern(arr.bass_pat, chord.degree, meter);
-        for &(step, len, deg) in &bass {
+        for (i, &(step, len, deg)) in bass.iter().enumerate() {
             out.push(NoteEvent {
                 at: at(step as f32),
                 inst: Inst::Bass,
@@ -1038,6 +1108,10 @@ impl Composer {
                 vel: 110,
                 frames: frames(len),
                 arp: None,
+                // Octave-jumping figures slur into each note. On the
+                // triangle a two-frame portamento is the difference
+                // between a bass line and a row of separate notes.
+                glide: if arr.bass_pat == 2 && i > 0 { 2 } else { 0 },
             });
         }
 
@@ -1052,6 +1126,7 @@ impl Composer {
                         vel: 88,
                         frames: frames(len),
                         arp: None,
+                        glide: 0,
                     });
                 }
             }
@@ -1064,6 +1139,10 @@ impl Composer {
                         vel: 80,
                         frames: frames(n.len),
                         arp: None,
+                        // The saw slides between the melody's strong
+                        // beats, so it reads as a line under the lead
+                        // rather than as a second lead.
+                        glide: 3,
                     });
                 }
             }
@@ -1091,6 +1170,7 @@ impl Composer {
                         vel: if i % spbeat == 0 { 96 } else { 70 },
                         frames: 4,
                         arp: None,
+                        glide: 0,
                     });
                 }
             }
@@ -1116,13 +1196,14 @@ impl Composer {
                 if *on {
                     out.push(NoteEvent {
                         at: at(i as f32),
-                        inst: Inst::Kick,
+                        inst: self.kit.kick(),
                         // Pickups sit under the four-on-the-floor pulse
                         // rather than competing with it.
                         vel: if i % spbeat == 0 { 120 } else { 92 },
                         midi: 0,
                         frames: 6,
                         arp: None,
+                        glide: 0,
                     });
                 }
             }
@@ -1137,20 +1218,24 @@ impl Composer {
                         vel: 58,
                         frames: 3,
                         arp: None,
+                        glide: 0,
                     });
                 }
             }
             // The run-up bar's roll replaces the backbeat rather than
             // fighting through it.
             if arr.snare && !run_up {
-                for &step in meter.snare_steps() {
+                for (n, &step) in meter.snare_steps().iter().enumerate() {
                     out.push(NoteEvent {
                         at: at(step as f32),
-                        inst: Inst::Snare,
+                        // A clap on the second backbeat is the oldest
+                        // trick there is for making a loop breathe.
+                        inst: self.kit.snare(n % 2 == 1),
                         midi: 0,
                         vel: 104,
                         frames: 8,
                         arp: None,
+                        glide: 0,
                     });
                 }
             }
@@ -1158,17 +1243,33 @@ impl Composer {
                 for k in 0..3u8 {
                     out.push(NoteEvent {
                         at: at((steps as u8 - 3 + k) as f32),
-                        inst: Inst::Snare,
+                        inst: self.kit.snare(false),
                         midi: 0,
                         vel: 90 + 12 * k,
                         frames: 3,
                         arp: None,
+                        glide: 0,
                     });
                 }
             }
         }
 
         // --- into the final chorus -------------------------------------
+        if run_up && !ctx.zone {
+            // The sweep. It is a second and a half long and ends in
+            // silence, so it starts well before the bar it belongs to and
+            // the gap at the top is what the downbeat lands in.
+            let sweep_start = (steps as f32 - 1.5 * self.bpm / 60.0 * 4.0).max(0.0);
+            out.push(NoteEvent {
+                at: at(sweep_start),
+                inst: Inst::Riser,
+                midi: 0,
+                vel: 96,
+                frames: 120,
+                arp: None,
+                glide: 0,
+            });
+        }
         if run_up && !ctx.zone {
             // A full-bar snare roll and an ascending run, both crescendo,
             // both still in the old key. Landing the new key cold on the
@@ -1179,11 +1280,12 @@ impl Composer {
                 let grow = k as f32 / n as f32;
                 out.push(NoteEvent {
                     at: at(step as f32),
-                    inst: Inst::Snare,
+                    inst: self.kit.snare(false),
                     midi: 0,
                     vel: (72.0 + 50.0 * grow) as u8,
                     frames: 3,
                     arp: None,
+                    glide: 0,
                 });
                 out.push(NoteEvent {
                     at: at(step as f32),
@@ -1194,11 +1296,15 @@ impl Composer {
                     vel: (70.0 + 48.0 * grow) as u8,
                     frames: frames(1),
                     arp: None,
+                    // Slurred, so the run reads as one gesture rather
+                    // than as eight separate notes.
+                    glide: 1,
                 });
             }
         }
         if final_block && bar_in == 0 && !ctx.zone {
-            // The arrival.
+            // The arrival: a crash on the chip side and a sub-bass drop
+            // under it, which is the half the console could never do.
             out.push(NoteEvent {
                 at: at(0.0),
                 inst: Inst::Crash,
@@ -1206,6 +1312,16 @@ impl Composer {
                 vel: 127,
                 frames: 26,
                 arp: None,
+                glide: 0,
+            });
+            out.push(NoteEvent {
+                at: at(0.0),
+                inst: Inst::Impact,
+                midi: 0,
+                vel: 120,
+                frames: 90,
+                arp: None,
+                glide: 0,
             });
         }
 
@@ -1254,6 +1370,7 @@ impl Composer {
                 vel: if last { 92 } else { 80 },
                 frames: frames(steps as u8),
                 arp: Some(arp),
+                glide: 0,
             });
             out.push(NoteEvent {
                 at: at(0.0),
@@ -1262,6 +1379,7 @@ impl Composer {
                 vel: 78,
                 frames: frames(steps as u8),
                 arp: Some(arp),
+                glide: 0,
             });
         }
         out.push(NoteEvent {
@@ -1271,6 +1389,7 @@ impl Composer {
             vel: 108,
             frames: frames(steps as u8),
             arp: None,
+            glide: 0,
         });
 
         if ctx.zone {
@@ -1287,11 +1406,12 @@ impl Composer {
                 for step in (0..steps as usize).step_by(spbeat) {
                     out.push(NoteEvent {
                         at: at(step as f32),
-                        inst: Inst::Kick,
+                        inst: self.kit.kick(),
                         midi: 0,
                         vel: if step == 0 { 116 } else { 90 },
                         frames: 6,
                         arp: None,
+                        glide: 0,
                     });
                 }
             }
@@ -1299,20 +1419,22 @@ impl Composer {
             2 => {
                 out.push(NoteEvent {
                     at: at(0.0),
-                    inst: Inst::Kick,
+                    inst: self.kit.kick(),
                     midi: 0,
                     vel: 112,
                     frames: 6,
                     arp: None,
+                    glide: 0,
                 });
                 for k in 0..4u8 {
                     out.push(NoteEvent {
                         at: at((steps as u8 - 4 + k) as f32),
-                        inst: Inst::Snare,
+                        inst: self.kit.snare(false),
                         midi: 0,
                         vel: 84 + 12 * k,
                         frames: 3,
                         arp: None,
+                        glide: 0,
                     });
                 }
             }
@@ -1325,6 +1447,7 @@ impl Composer {
                     vel: 104,
                     frames: 30,
                     arp: None,
+                    glide: 0,
                 });
             }
         }
@@ -1629,7 +1752,7 @@ mod tests {
             let bar_len = (spb * c.meter.steps() as f64) as u64;
             let kicks: Vec<u64> = out
                 .iter()
-                .filter(|e| e.inst == Inst::Kick)
+                .filter(|e| e.inst.is_kick())
                 .map(|e| e.at)
                 .collect();
             let beats = c.meter.beats();
@@ -1769,7 +1892,7 @@ mod tests {
         assert_eq!(c.info().tonic, before, "the run-up must stay in the old key");
         let mut snares: Vec<u8> = bar
             .iter()
-            .filter(|e| e.inst == Inst::Snare)
+            .filter(|e| e.inst.is_snare())
             .map(|e| e.vel)
             .collect();
         assert!(snares.len() >= 6, "the roll is only {} hits", snares.len());
@@ -1896,7 +2019,7 @@ mod tests {
         // The last bar just rings.
         assert!(bars[3].iter().any(|e| e.inst == Inst::Crash));
         assert!(bars[3].iter().any(|e| e.inst == Inst::Bell));
-        assert!(!bars[3].iter().any(|e| e.inst == Inst::Kick));
+        assert!(!bars[3].iter().any(|e| e.inst.is_kick()));
         // And the loop point is back in the home key.
         assert_eq!(c.lift, 0);
     }
@@ -1922,16 +2045,123 @@ mod tests {
 
     #[test]
     fn a_full_arrangement_reaches_every_voice() {
+        use crate::Voice;
         use std::collections::HashSet;
-        let out = run(Profile::Victory, 0.9, 8);
-        let voices: HashSet<u8> = out.iter().map(|e| e.voice() as u8).collect();
-        assert_eq!(
-            voices.len(),
-            crate::VOICE_COUNT,
-            "only {} of {} voices used: {voices:?}",
-            voices.len(),
-            crate::VOICE_COUNT
+        let voices = |kit: Kit| -> HashSet<u8> {
+            let mut c = Composer::new(0xBEEF);
+            c.set_profile(Profile::Victory, 0.9);
+            c.force_kit(kit);
+            let ctx = Context {
+                profile: Profile::Victory,
+                intensity: 0.9,
+                elapsed: 600.0,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            for _ in 0..8 {
+                c.plan_bar(&ctx, &mut out);
+            }
+            out.iter().map(|e| e.voice() as u8).collect()
+        };
+
+        // The chip kit uses every console and expansion voice; the sample
+        // channel only speaks for sweeps and impacts, which belong to the
+        // final chorus rather than to an ordinary bar.
+        let chip = voices(Kit::Chip);
+        for v in 0..Voice::Sample as u8 {
+            assert!(chip.contains(&v), "chip kit never used voice {v}: {chip:?}");
+        }
+        // The sampled kit moves the kick and snare off the noise channel
+        // and onto the sample channel; the hats stay where they are.
+        let pcm = voices(Kit::Sampled);
+        assert!(pcm.contains(&(Voice::Sample as u8)));
+        assert!(pcm.contains(&(Voice::Hat as u8)));
+        assert!(
+            !pcm.contains(&(Voice::Perc as u8)),
+            "the sampled kit still used the noise drums"
         );
+    }
+
+    #[test]
+    fn both_kits_play_the_same_pattern() {
+        // Swapping the kit must change the timbre and nothing else: the
+        // groove is the composer's, not the drum machine's.
+        let hits = |kit: Kit| -> Vec<(u64, bool)> {
+            let mut c = Composer::new(4242);
+            c.set_profile(Profile::VsIntense, 0.8);
+            c.force_kit(kit);
+            let ctx = Context {
+                profile: Profile::VsIntense,
+                intensity: 0.8,
+                elapsed: 600.0,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            for _ in 0..16 {
+                c.plan_bar(&ctx, &mut out);
+            }
+            out.iter()
+                .filter(|e| e.inst.is_kick() || e.inst.is_snare())
+                .map(|e| (e.at, e.inst.is_kick()))
+                .collect()
+        };
+        assert_eq!(hits(Kit::Chip), hits(Kit::Sampled));
+        assert!(!hits(Kit::Chip).is_empty());
+    }
+
+    #[test]
+    fn the_riser_arrives_before_the_chorus_and_the_impact_with_it() {
+        let mut c = Composer::new(0x1111);
+        c.set_profile(Profile::VsIntense, 0.6);
+        let ctx = Context {
+            profile: Profile::VsIntense,
+            intensity: 0.6,
+            elapsed: 600.0,
+            ..Default::default()
+        };
+        let blocks = c.material.form.len() as u32;
+        let mut out = Vec::new();
+        // Up to the run-up bar.
+        for _ in 0..(blocks - 1) * BARS_PER_SECTION - 1 {
+            c.plan_bar(&ctx, &mut out);
+        }
+        let mark = out.len();
+        c.plan_bar(&ctx, &mut out); // run-up
+        let downbeat = c.next_bar_at();
+        c.plan_bar(&ctx, &mut out); // final chorus, bar one
+        let tail = &out[mark..];
+
+        let riser = tail
+            .iter()
+            .find(|e| e.inst == Inst::Riser)
+            .expect("no riser into the final chorus");
+        let impact = tail
+            .iter()
+            .find(|e| e.inst == Inst::Impact)
+            .expect("no impact on the downbeat");
+        assert!(riser.at < downbeat, "the riser starts too late to sweep");
+        assert_eq!(impact.at, downbeat, "the impact missed the downbeat");
+        // The sweep is a second and a half long, so it has to start about
+        // that far ahead or it gets cut off mid-climb.
+        let lead_in = (downbeat - riser.at) as f32 / SAMPLE_RATE as f32;
+        assert!(
+            (0.9..=1.6).contains(&lead_in),
+            "the riser leads in by {lead_in:.2} s"
+        );
+    }
+
+    #[test]
+    fn glissando_is_used_sparingly_and_only_where_it_means_something() {
+        let out = run(Profile::VsIntense, 0.9, 32);
+        let glides = out.iter().filter(|e| e.glide > 0).count();
+        assert!(glides > 0, "nothing ever slides");
+        assert!(
+            glides * 3 < out.len(),
+            "{glides} of {} notes slide — that is a slide whistle",
+            out.len()
+        );
+        // Percussion has no pitch to slide.
+        assert!(!out.iter().any(|e| e.inst.is_drum() && e.glide > 0));
     }
 
     #[test]

@@ -57,9 +57,14 @@ pub enum Voice {
     /// Second noise channel — hats and shakers, so they stop being
     /// swallowed every time the kick lands.
     Hat = 7,
+    /// Sample playback, after the NES's DPCM channel — except the samples
+    /// are synthesized at startup rather than shipped, so it costs no
+    /// assets. This is where the engine stops obeying the chip: real
+    /// drum bodies, and the sweeps and impacts that a chip cannot make.
+    Sample = 8,
 }
 
-pub const VOICE_COUNT: usize = 8;
+pub const VOICE_COUNT: usize = 9;
 
 /// Instrument presets. Each one is a set of macro tables (below); the
 /// composer picks by role, never by number.
@@ -102,6 +107,18 @@ pub enum Inst {
     Shaker,
     /// Long ringing noise hit, for the downbeat of the final chorus.
     Crash,
+    /// Sampled kick with a real pitch-dropping body.
+    PcmKick,
+    /// Sampled snare — noise over two tuned tones.
+    PcmSnare,
+    /// Sampled handclap.
+    Clap,
+    /// Sampled tom.
+    Tom,
+    /// The rising sweep that announces a chorus.
+    Riser,
+    /// Sub-bass boom for the downbeat the riser was pointing at.
+    Impact,
 }
 
 impl Inst {
@@ -116,12 +133,43 @@ impl Inst {
             Inst::Bass => Voice::Bass,
             Inst::Kick | Inst::Snare => Voice::Perc,
             Inst::Hat | Inst::Shaker | Inst::Crash => Voice::Hat,
+            Inst::PcmKick
+            | Inst::PcmSnare
+            | Inst::Clap
+            | Inst::Tom
+            | Inst::Riser
+            | Inst::Impact => Voice::Sample,
         }
     }
 
-    /// True for the unpitched drum instruments.
+    /// True for the instruments that carry no pitch — drums, and the
+    /// sweeps and impacts, which are all played back at a fixed rate.
     pub fn is_drum(self) -> bool {
-        matches!(self.voice(), Voice::Perc | Voice::Hat)
+        matches!(self.voice(), Voice::Perc | Voice::Hat | Voice::Sample)
+    }
+
+    /// True for either kit's kick — the composer swaps them per piece, so
+    /// nothing downstream should name one directly.
+    pub fn is_kick(self) -> bool {
+        matches!(self, Inst::Kick | Inst::PcmKick)
+    }
+
+    /// True for either kit's backbeat voice, clap included.
+    pub fn is_snare(self) -> bool {
+        matches!(self, Inst::Snare | Inst::PcmSnare | Inst::Clap)
+    }
+
+    /// Which entry of the synthesized sample bank this plays.
+    pub fn sample(self) -> usize {
+        match self {
+            Inst::PcmKick => 0,
+            Inst::PcmSnare => 1,
+            Inst::Clap => 2,
+            Inst::Tom => 3,
+            Inst::Riser => 4,
+            Inst::Impact => 5,
+            _ => 0,
+        }
     }
 }
 
@@ -140,6 +188,10 @@ pub struct NoteEvent {
     /// Semitone offsets cycled once per frame — the classic chiptune
     /// "chord on a monophonic channel" trick. `None` for plain notes.
     pub arp: Option<[i8; 3]>,
+    /// Frames spent sliding up from the previous note on this channel.
+    /// 0 is a plain attack; anything else is a glissando into the note,
+    /// which only means something when the channel was already playing.
+    pub glide: u8,
 }
 
 impl NoteEvent {
@@ -421,6 +473,21 @@ const SHAKER: InstDef = InstDef {
     wave: 0,
 };
 
+/// The sample instruments carry a one-shot gate: the buffer's own
+/// envelope does the shaping, so the macro just holds full volume until
+/// playback runs out.
+const SAMPLED: InstDef = InstDef {
+    vol: m(&[15], Some(0)),
+    duty: 0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+
 const CRASH: InstDef = InstDef {
     vol: m(
         &[15, 15, 14, 13, 12, 11, 10, 9, 9, 8, 7, 7, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1],
@@ -458,11 +525,17 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
         Inst::Hat => &HAT,
         Inst::Shaker => &SHAKER,
         Inst::Crash => &CRASH,
+        Inst::PcmKick
+        | Inst::PcmSnare
+        | Inst::Clap
+        | Inst::Tom
+        | Inst::Riser
+        | Inst::Impact => &SAMPLED,
     }
 }
 
 /// Every instrument, for tests and for the offline renderer.
-pub const ALL_INSTRUMENTS: [Inst; 20] = [
+pub const ALL_INSTRUMENTS: [Inst; 26] = [
     Inst::Pluck,
     Inst::Sustain,
     Inst::Soft,
@@ -483,6 +556,12 @@ pub const ALL_INSTRUMENTS: [Inst; 20] = [
     Inst::Hat,
     Inst::Shaker,
     Inst::Crash,
+    Inst::PcmKick,
+    Inst::PcmSnare,
+    Inst::Clap,
+    Inst::Tom,
+    Inst::Riser,
+    Inst::Impact,
 ];
 
 #[cfg(test)]
@@ -524,21 +603,32 @@ mod tests {
 
     #[test]
     fn every_instrument_is_defined_and_listed() {
-        assert_eq!(ALL_INSTRUMENTS.len(), 20);
+        assert_eq!(ALL_INSTRUMENTS.len(), 26);
         for i in ALL_INSTRUMENTS {
             let d = inst_def(i);
             assert!(!d.vol.v.is_empty(), "{i:?} has no volume macro");
             assert!(d.duty <= 2, "{i:?} has an out-of-range duty");
             assert!(d.wave < 4, "{i:?} points at a missing wavetable");
             assert!(d.noise_idx < 16);
+            assert!(i.sample() < 6, "{i:?} points at a missing sample");
             assert_eq!(
                 i.is_drum(),
                 matches!(
-                    i,
-                    Inst::Kick | Inst::Snare | Inst::Hat | Inst::Shaker | Inst::Crash
+                    i.voice(),
+                    Voice::Perc | Voice::Hat | Voice::Sample
                 )
             );
         }
+        // Every sample instrument must claim a distinct slot.
+        let mut slots: Vec<usize> = ALL_INSTRUMENTS
+            .iter()
+            .filter(|i| i.voice() == Voice::Sample)
+            .map(|i| i.sample())
+            .collect();
+        let taken = slots.len();
+        slots.sort_unstable();
+        slots.dedup();
+        assert_eq!(slots.len(), taken, "two sample instruments share a slot");
         // Every voice must have at least one instrument that can reach it.
         for v in 0..VOICE_COUNT {
             assert!(

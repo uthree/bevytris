@@ -9,7 +9,7 @@
 //! how the tempo ladder and the layer schedule get auditioned without
 //! playing the game badly on purpose.
 
-use bevytris_chiptune::compose::{Composer, Context, Meter, Profile};
+use bevytris_chiptune::compose::{Composer, Context, Kit, Meter, Profile};
 use bevytris_chiptune::synth::Synth;
 use bevytris_chiptune::{NoteEvent, SAMPLE_RATE, wav};
 
@@ -22,6 +22,7 @@ fn main() {
     let mut zone_at: Option<f32> = None;
     let mut intensity = 0.35f32;
     let mut meter: Option<Meter> = None;
+    let mut kit: Option<Kit> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -67,6 +68,14 @@ fn main() {
                 });
                 i += 2;
             }
+            "--kit" => {
+                kit = Some(match next(i).as_str() {
+                    "chip" | "nes" => Kit::Chip,
+                    "pcm" | "sampled" => Kit::Sampled,
+                    other => panic!("unknown kit {other} (try chip or pcm)"),
+                });
+                i += 2;
+            }
             "--out" => {
                 out_path = next(i);
                 i += 2;
@@ -86,6 +95,9 @@ fn main() {
     composer.set_profile(profile, if ramp { 0.0 } else { intensity });
     if let Some(m) = meter {
         composer.force_meter(m);
+    }
+    if let Some(k) = kit {
+        composer.force_kit(k);
     }
 
     let mut pending: Vec<NoteEvent> = Vec::new();
@@ -138,8 +150,9 @@ fn main() {
         r += f[1].abs();
     }
     println!(
-        "{} | {} notes | peak {:.3} ({:.1} dBFS) | rms {:.3} ({:.1} dBFS) | balance {:+.1}%",
+        "{} · {} kit | {} notes | peak {:.3} ({:.1} dBFS) | rms {:.3} ({:.1} dBFS) | balance {:+.1}%",
         info.label(),
+        info.kit.name(),
         pending.len(),
         peak,
         20.0 * peak.max(1e-9).log10(),

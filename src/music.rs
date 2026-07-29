@@ -512,6 +512,7 @@ mod tests {
                 vel: 120,
                 frames: 40,
                 arp: None,
+                glide: 0,
             },
         }
     }
@@ -554,6 +555,7 @@ mod tests {
                 vel: 127,
                 frames: 200,
                 arp: None,
+                glide: 0,
             },
         })
         .unwrap();
@@ -698,6 +700,7 @@ mod tests {
                 vel: 127,
                 frames: 600,
                 arp: None,
+                glide: 0,
             },
         })
         .unwrap();
