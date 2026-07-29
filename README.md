@@ -41,10 +41,12 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
   support with a fixed layout. Settings persist to disk.
 - **English / Japanese UI** — auto-detected from the OS language, switchable
   in the settings.
-- **Flashy presentation** — HDR bloom on everything that matters, glow
-  particles, hard-drop light trails, line-clear light bars, shockwave rings,
-  screen shake, banners, confetti, starfield over a hand-painted space
-  backdrop
+- **Flashy presentation** — HDR bloom on everything that matters, square
+  glow particles, hard-drop light trails, line-clear light bars, shockwave
+  frames, screen shake, banners, confetti, and rotating procedural
+  background scenes (morphing 3D particle figures, matrix-style code rain,
+  a spiral galaxy, an audio-reactive visualizer) that all pulse with the
+  game's own sound effects
 - **Audio** — CC0 chiptune BGM and 8-bit sound effects by Juhani Junkala
   (random BGM track per match, victory jingle included); combo chimes climb
   a pentatonic scale as the combo counter grows

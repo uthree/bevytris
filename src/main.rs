@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use bevy::window::{MonitorSelection, PresentMode, WindowMode, WindowResizeConstraints};
 
 mod audio;
+mod background;
 mod config;
 mod effects;
 mod i18n;
@@ -61,8 +62,10 @@ fn main() -> AppExit {
         // Dev helpers: BEVYTRIS_SCREEN=settings|solo|stages|zones|custom|
         // playing skips the title menu, BEVYTRIS_MODE=sprint|dig|zone|
         // custom|vs-stage-N|vs-easy|vs-normal|vs-hard preselects the game
-        // mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages, and
-        // BEVYTRIS_ZONE_CHARGE=1 starts zone gauges full.
+        // mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages,
+        // BEVYTRIS_ZONE_CHARGE=1 starts zone gauges full, and
+        // BEVYTRIS_SCENE=formation|cyber|galaxy|visualizer pins the
+        // background scene.
         .insert_state(match std::env::var("BEVYTRIS_SCREEN").as_deref() {
             Ok("settings") => AppState::Settings,
             Ok("solo") => AppState::SoloSelect,
@@ -94,6 +97,7 @@ fn main() -> AppExit {
             audio::GameAudioPlugin,
             session::SessionPlugin,
             render::RenderPlugin,
+            background::BackgroundPlugin,
             effects::EffectsPlugin,
             menu::MenuPlugin,
         ))

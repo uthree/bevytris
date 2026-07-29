@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use bevy::audio::Volume;
 
 use crate::audio::{PlaySfx, Sfx, SfxBank};
+use crate::background::StarSurge;
 use crate::config::GameSettings;
 use crate::core::board::{BOARD_WIDTH, VISIBLE_HEIGHT};
 use crate::core::game::{ClearKind, GameEvent, GARBAGE_CAP_PER_PIECE};
@@ -23,9 +24,8 @@ pub struct EffectsPlugin;
 impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraShake>()
-            .init_resource::<StarSurge>()
             .init_resource::<DangerLevel>()
-            .add_systems(Startup, (setup_effect_assets, spawn_starfield))
+            .add_systems(Startup, setup_effect_assets)
             .add_systems(
                 Update,
                 (
@@ -46,8 +46,6 @@ impl Plugin for EffectsPlugin {
                     update_flashes,
                     update_shockwaves,
                     update_streaks,
-                    update_starfield,
-                    drift_background,
                 ),
             )
             .add_systems(OnEnter(PlayState::Finished), finish_fanfare)
@@ -78,9 +76,6 @@ pub struct EffectAssets {
     /// Screen-edge vignette (transparent center) for the danger overlay.
     pub vignette: Handle<Image>,
 }
-
-#[derive(Component)]
-struct BackgroundArt;
 
 fn image_from_alpha(size: u32, alpha: impl Fn(f32, f32) -> f32) -> Image {
     let mut data = Vec::with_capacity((size * size * 4) as usize);
@@ -137,37 +132,12 @@ fn vignette_image() -> Image {
     })
 }
 
-fn setup_effect_assets(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    asset_server: Res<AssetServer>,
-) {
+fn setup_effect_assets(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(EffectAssets {
         glow: images.add(square_glow_image()),
         bar: images.add(soft_rect_image()),
         vignette: images.add(vignette_image()),
     });
-    // CC0 space painting (Westbeam, see assets/CREDITS.md), dimmed so the
-    // boards stay the brightest thing on screen.
-    commands.spawn((
-        Sprite {
-            image: asset_server.load("images/space_bg.png"),
-            custom_size: Some(Vec2::new(1560.0, 1170.0)),
-            color: Color::srgb(0.5, 0.5, 0.62),
-            ..default()
-        },
-        Transform::from_xyz(0.0, 0.0, -30.0),
-        BackgroundArt,
-    ));
-}
-
-/// Slow parallax drift so the backdrop feels alive.
-fn drift_background(time: Res<Time>, mut query: Query<&mut Transform, With<BackgroundArt>>) {
-    let t = time.elapsed_secs();
-    for mut tf in &mut query {
-        tf.translation.x = 14.0 * (t * 0.031).sin();
-        tf.translation.y = 10.0 * (t * 0.023).cos();
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -620,60 +590,6 @@ fn update_shockwaves(
                 Vec2::splat(r * 2.0),
                 emissive(wave.color, 3.2).with_alpha(alpha),
             );
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Starfield background
-// ---------------------------------------------------------------------------
-
-/// Temporary starfield speed multiplier; spikes on spectacular clears so the
-/// whole background lunges without ever covering the boards.
-#[derive(Resource)]
-struct StarSurge(f32);
-
-impl Default for StarSurge {
-    fn default() -> Self {
-        StarSurge(1.0)
-    }
-}
-
-#[derive(Component)]
-struct Star {
-    speed: f32,
-}
-
-fn spawn_starfield(mut commands: Commands) {
-    let mut rng = rand::rng();
-    for _ in 0..110 {
-        let b = rng.random_range(0.15..0.7);
-        let size = rng.random_range(1.0..3.5);
-        commands.spawn((
-            Sprite::from_color(Color::srgba(b, b, b * 1.2, 0.8), Vec2::splat(size)),
-            Transform::from_xyz(
-                rng.random_range(-660.0..660.0),
-                rng.random_range(-380.0..380.0),
-                -10.0,
-            ),
-            Star {
-                speed: rng.random_range(12.0..55.0),
-            },
-        ));
-    }
-}
-
-fn update_starfield(
-    time: Res<Time>,
-    mut surge: ResMut<StarSurge>,
-    mut query: Query<(&Star, &mut Transform)>,
-) {
-    let dt = time.delta_secs();
-    surge.0 += (1.0 - surge.0) * (3.0 * dt).min(1.0);
-    for (star, mut tf) in &mut query {
-        tf.translation.y -= star.speed * surge.0 * dt;
-        if tf.translation.y < -380.0 {
-            tf.translation.y = 380.0;
         }
     }
 }
