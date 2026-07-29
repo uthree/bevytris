@@ -1,0 +1,537 @@
+#!/usr/bin/env bash
+#
+# make_dummy_characters.sh — generate throwaway placeholder character packs.
+#
+# WHAT THIS IS FOR
+#   The game loads optional "character" packs from assets/characters/<id>/.
+#   A pack is a metadata.json plus standing portraits, an optional cut-in
+#   image and up to 12 optional voice clips.  Real characters are drawn and
+#   voiced by humans; this script fabricates two obviously-fake stand-ins
+#   ("alice", English/Samantha, and "bob", Japanese/Kyoko) so the loading,
+#   layout, font and audio code can be developed and eyeballed without any
+#   real art existing yet.
+#
+#   The art is deliberately ugly and self-describing: every portrait states
+#   its own id, its intended facing and its own pixel size, and carries a
+#   large block arrow pointing the way the character faces.  If the game ever
+#   puts the left-facing art on the left-hand board, or scales a portrait
+#   wrongly, the picture itself says so.
+#
+# THE OUTPUT IS INTENTIONALLY GITIGNORED THROWAWAY DATA.
+#   assets/characters/alice/ and assets/characters/bob/ are listed in
+#   .gitignore on purpose.  Nothing under them is a source file: re-run this
+#   script to recreate them byte-for-byte-equivalently at any time.  Do not
+#   commit them, and do not hand-edit them — edit this script instead.
+#   assets/characters/README.md *is* committed; it documents the format.
+#
+# USAGE
+#   scripts/make_dummy_characters.sh
+#       Wipe and regenerate assets/characters/alice and assets/characters/bob
+#       relative to the repository root (found from this script's own path,
+#       never from $PWD).
+#
+#   scripts/make_dummy_characters.sh --broken <outdir>
+#       Write HOSTILE fixtures for negative-path testing into <outdir>.
+#       <outdir> must be outside the repository; this mode refuses to write
+#       inside it.  See the fixture descriptions printed at run time.
+#
+# REQUIREMENTS
+#   macOS `sips` (SVG -> PNG at exact pixel size) and `say` (text -> WAV).
+#   On a machine without them (e.g. Linux CI) the script prints a notice and
+#   exits 0 rather than failing the build.
+#
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Locate ourselves.  Everything is resolved from the script path so that the
+# script behaves identically no matter what $PWD is.
+# ---------------------------------------------------------------------------
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  link_target="$(readlink "$self")"
+  case "$link_target" in
+    /*) self="$link_target" ;;
+    *) self="$(dirname "$self")/$link_target" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$self")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+CHARACTERS_DIR="$REPO_ROOT/assets/characters"
+
+# Sanity: refuse to run from a tree that does not look like this repository,
+# so a stray copy of the script cannot scribble into an unrelated directory.
+if [ ! -f "$REPO_ROOT/Cargo.toml" ] || [ ! -d "$REPO_ROOT/assets" ]; then
+  echo "make_dummy_characters.sh: $REPO_ROOT does not look like the bevytris repo" >&2
+  echo "  (expected Cargo.toml and assets/ next to scripts/)" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Tool detection.  Missing tools are a soft skip, not a failure.
+# ---------------------------------------------------------------------------
+HAVE_SIPS=1
+HAVE_SAY=1
+command -v sips >/dev/null 2>&1 || HAVE_SIPS=0
+command -v say >/dev/null 2>&1 || HAVE_SAY=0
+
+# ---------------------------------------------------------------------------
+# Palette / typography
+# ---------------------------------------------------------------------------
+# Concrete bold faces.  sips ignores a font-weight attribute entirely, and it
+# also ignores PostScript-style face names such as "Helvetica-Bold" or
+# "Arial-BoldMT" (those silently fall back to the regular weight).  Only
+# families whose *family* name carries the weight actually come out bold, so
+# these two names are load-bearing — do not "tidy" them.
+FONT_ASCII="Arial Black"
+FONT_JA="Hiragino Sans W7"      # the Japanese bold face sips will actually use
+
+STANDING_W=512
+STANDING_H=1024
+CUTIN_W=1024
+CUTIN_H=512
+
+# The twelve voice kinds, with the English and Japanese line for each.
+# "kind|english|japanese" — bash 3.2 has no associative arrays.
+VOICE_LINES='
+ready|Here we go|いくよー
+clear|Nice|いいね
+tetris|Tetris!|テトリス！
+tspin|T spin!|ティースピン！
+perfect_clear|Perfect clear!|パーフェクトクリア！
+combo|Combo!|コンボ！
+attack|Take this|くらえー
+damage|Ouch|いたっ
+zone_start|Zone, activate|ゾーン、発動
+zone_finish|How was that|どうだった
+win|I win!|わたしの勝ち！
+lose|No way|そんなー
+'
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# render_svg <svg-file> <png-file> <expected-w> <expected-h>
+# Rasterise an SVG and assert that the result really is that many pixels.
+render_svg() {
+  local svg="$1" png="$2" want_w="$3" want_h="$4"
+  sips -s format png "$svg" --out "$png" >/dev/null 2>&1
+  local got_w got_h
+  got_w="$(sips -g pixelWidth "$png" 2>/dev/null | awk '/pixelWidth/ {print $2}')"
+  got_h="$(sips -g pixelHeight "$png" 2>/dev/null | awk '/pixelHeight/ {print $2}')"
+  if [ "$got_w" != "$want_w" ] || [ "$got_h" != "$want_h" ]; then
+    echo "make_dummy_characters.sh: $png is ${got_w}x${got_h}, expected ${want_w}x${want_h}" >&2
+    exit 1
+  fi
+}
+
+# standing_svg <facing:right|left> <id> <name1> <name2> <name-font>
+#              <body> <accent> <head> <text> <muted>
+# Emits an SVG for a 512x1024 standing portrait on stdout.  The canvas is
+# transparent outside the body so the alpha path gets exercised too.
+standing_svg() {
+  local facing="$1" id="$2" name1="$3" name2="$4" name_font="$5"
+  local body="$6" accent="$7" head="$8" text="$9" muted="${10}"
+
+  local facing_word arrow stripe_x eye1 eye2 nose
+  if [ "$facing" = "right" ]; then
+    facing_word="RIGHT"
+    # Block arrow pointing right, centred on x=256.
+    arrow="126,580 286,580 286,530 386,620 286,710 286,660 126,660"
+    stripe_x=440           # accent stripe marks the FRONT of the character
+    eye1=286; eye2=324; nose=350
+  else
+    facing_word="LEFT"
+    arrow="386,580 226,580 226,530 126,620 226,710 226,660 386,660"
+    stripe_x=32
+    eye1=226; eye2=188; nose=162
+  fi
+
+  cat <<SVG
+<svg xmlns="http://www.w3.org/2000/svg" width="$STANDING_W" height="$STANDING_H" viewBox="0 0 $STANDING_W $STANDING_H">
+  <rect x="16" y="16" width="480" height="992" rx="28" fill="$body" stroke="$accent" stroke-width="8"/>
+  <rect x="$stripe_x" y="24" width="40" height="976" rx="16" fill="$accent" opacity="0.55"/>
+  <circle cx="256" cy="200" r="110" fill="$head" stroke="$accent" stroke-width="6"/>
+  <circle cx="$eye1" cy="178" r="16" fill="$text"/>
+  <circle cx="$eye2" cy="178" r="16" fill="$text"/>
+  <circle cx="$nose" cy="228" r="9" fill="$accent"/>
+  <text x="256" y="420" font-family="$FONT_ASCII" font-size="44" fill="$muted" text-anchor="middle">id: $id</text>
+  <polygon points="$arrow" fill="$accent"/>
+  <text x="256" y="800" font-family="$name_font" font-size="68" fill="$text" text-anchor="middle">$name1</text>
+  <text x="256" y="872" font-family="$name_font" font-size="68" fill="$text" text-anchor="middle">$name2</text>
+  <text x="256" y="940" font-family="$FONT_ASCII" font-size="54" fill="$accent" text-anchor="middle">$facing_word</text>
+  <text x="256" y="985" font-family="$FONT_ASCII" font-size="28" fill="$muted" text-anchor="middle">${STANDING_W}x${STANDING_H}</text>
+</svg>
+SVG
+}
+
+# cutin_svg <display-name> <name-font> <body> <accent> <text> <muted>
+cutin_svg() {
+  local name="$1" name_font="$2" body="$3" accent="$4" text="$5" muted="$6"
+  cat <<SVG
+<svg xmlns="http://www.w3.org/2000/svg" width="$CUTIN_W" height="$CUTIN_H" viewBox="0 0 $CUTIN_W $CUTIN_H">
+  <rect x="8" y="8" width="1008" height="496" rx="20" fill="$body" stroke="$accent" stroke-width="6"/>
+  <polygon points="60,504 180,8 300,8 180,504" fill="$accent" opacity="0.35"/>
+  <polygon points="740,504 860,8 980,8 860,504" fill="$accent" opacity="0.35"/>
+  <text x="512" y="230" font-family="$name_font" font-size="96" fill="$text" text-anchor="middle">$name</text>
+  <text x="512" y="345" font-family="$FONT_ASCII" font-size="80" fill="$accent" text-anchor="middle">CUT-IN</text>
+  <text x="512" y="425" font-family="$FONT_ASCII" font-size="36" fill="$muted" text-anchor="middle">${CUTIN_W}x${CUTIN_H}</text>
+</svg>
+SVG
+}
+
+# speak <voice> <text> <outfile>
+# mono 16-bit little-endian PCM in a RIFF/WAVE container.  --data-format is
+# mandatory: without it `say` writes a format Bevy's wav decoder rejects,
+# and an .aiff container does not work at all.
+speak() {
+  local voice="$1" line="$2" out="$3"
+  say -v "$voice" -o "$out" --data-format=LEI16@22050 "$line"
+}
+
+# write_metadata <dir> <display_name> <ascii_name> <flavor> <alpha> <gain>
+# The folder name is the id; there is deliberately no id field.
+write_metadata() {
+  local dir="$1" display_name="$2" ascii_name="$3" flavor="$4" alpha="$5" gain="$6"
+  cat > "$dir/metadata.json" <<JSON
+{
+  "schema": 1,
+  "display_name": "$display_name",
+  "ascii_name": "$ascii_name",
+  "flavor": "$flavor",
+  "author": "scripts/make_dummy_characters.sh",
+  "portrait_alpha": $alpha,
+  "voice_gain": $gain
+}
+JSON
+}
+
+# summarise <label> <dir...> — count regular files and total bytes.
+summarise() {
+  local label="$1"; shift
+  local n bytes
+  set +e
+  read -r n bytes < <(find "$@" -type f -exec wc -c {} \; 2>/dev/null \
+    | awk '{s += $1; n += 1} END {printf "%d %d\n", n + 0, s + 0}')
+  set -e
+  echo "$label: $n files, $bytes bytes"
+}
+
+# ===========================================================================
+# --broken: hostile fixtures for negative-path testing
+# ===========================================================================
+make_broken() {
+  local outdir_arg="${1:-}"
+  if [ -z "$outdir_arg" ]; then
+    echo "--broken requires an output directory" >&2
+    exit 2
+  fi
+
+  # Refuse to write anywhere inside the repository: these fixtures are
+  # designed to break loaders and must never be mistaken for real assets.
+  # Checked once textually *before* creating anything, so a rejected path does
+  # not leave a stray directory behind, and once more after canonicalisation
+  # so that symlinks and ".." segments cannot sneak past the first check.
+  refuse_if_in_repo() {
+    local path="$1"
+    case "$path/" in
+      "$REPO_ROOT"/*)
+        echo "--broken refuses to write inside the repository ($REPO_ROOT)." >&2
+        echo "  requested: $path" >&2
+        echo "  pick a scratch directory outside the repo instead." >&2
+        return 1
+        ;;
+    esac
+    if [ "$path" = "/" ] || [ "$path" = "$HOME" ]; then
+      echo "--broken refuses to write directly into $path" >&2
+      return 1
+    fi
+    return 0
+  }
+
+  local outdir
+  case "$outdir_arg" in
+    /*) outdir="$outdir_arg" ;;
+    *) outdir="$(pwd -P)/$outdir_arg" ;;
+  esac
+  refuse_if_in_repo "$outdir" || exit 2
+
+  local pre_existing=1
+  [ -d "$outdir" ] || pre_existing=0
+  mkdir -p "$outdir"
+  outdir="$(cd "$outdir" && pwd -P)"
+  if ! refuse_if_in_repo "$outdir"; then
+    # Undo our own mkdir so a rejected run is a complete no-op.
+    [ "$pre_existing" -eq 0 ] && rmdir "$outdir" 2>/dev/null
+    exit 2
+  fi
+
+  echo "Writing hostile character fixtures into:"
+  echo "  $outdir"
+  echo
+
+  # Idempotency: remove only the fixtures this script owns.
+  local owned='bad_json no_images nasty_display_name jpeg_as_png text_as_wav
+    misspelled_voice .hidden_leading_dot out_of_range traversal'
+  local f
+  for f in $owned; do
+    /bin/rm -rf "$outdir/$f"
+  done
+  /bin/rm -rf "$outdir/has space" "$outdir/OUTSIDE_TARGET.txt"
+
+  local good_meta_display='DUMMY FIXTURE'
+
+  # ---- 1. malformed JSON -------------------------------------------------
+  mkdir -p "$outdir/bad_json/images"
+  cat > "$outdir/bad_json/metadata.json" <<'JSON'
+{
+  "schema": 1,
+  "display_name": "TRAILING COMMA AND NO CLOSING BRACE",
+  "ascii_name": "BAD JSON",
+  "portrait_alpha": 0.2,
+JSON
+  echo "  bad_json/                  metadata.json is truncated with a trailing comma."
+  echo "                             HOSTILE: parser must report a readable error and skip"
+  echo "                             the character, not panic or abort startup."
+
+  # ---- 2. valid JSON, no images -----------------------------------------
+  mkdir -p "$outdir/no_images"
+  write_metadata "$outdir/no_images" "$good_meta_display" "NO IMAGES" \
+    "valid metadata, zero art" "0.2" "1.0"
+  echo "  no_images/                 valid metadata.json, no images/ directory at all."
+  echo "                             HOSTILE: every image is optional per the contract, so"
+  echo "                             this must load and render with no portrait, not crash"
+  echo "                             on a missing asset handle."
+
+  # ---- 3. nasty display_name --------------------------------------------
+  mkdir -p "$outdir/nasty_display_name"
+  # 200 decoded characters containing a right-to-left override (U+202E), a
+  # zero-width space (U+200B) and a newline.  Written as JSON \u escapes so
+  # the fixture file itself stays pure ASCII and unambiguous in a diff.
+  local pad RLO ZWSP
+  pad="$(printf 'A%.0s' $(seq 1 190))"
+  RLO='\u202e'    # right-to-left override, as a JSON escape
+  ZWSP='\u200b'   # zero-width space, as a JSON escape
+  cat > "$outdir/nasty_display_name/metadata.json" <<JSON
+{
+  "schema": 1,
+  "display_name": "${RLO}EVIL${ZWSP}\nBOB$pad",
+  "ascii_name": "NASTY NAME",
+  "flavor": "display_name is 200 chars with RLO, ZWSP and a newline",
+  "author": "scripts/make_dummy_characters.sh --broken",
+  "portrait_alpha": 0.2,
+  "voice_gain": 1.0
+}
+JSON
+  mkdir -p "$outdir/nasty_display_name/images"
+  echo "  nasty_display_name/        display_name decodes to 200 chars including U+202E"
+  echo "                             (right-to-left override), U+200B (zero-width space)"
+  echo "                             and a literal newline."
+  echo "                             HOSTILE: must be length-clamped and stripped of control"
+  echo "                             and bidi characters before it reaches a single-line UI"
+  echo "                             label; a raw newline must not break the layout and the"
+  echo "                             RLO must not reverse surrounding menu text."
+
+  # ---- 4. JPEG renamed to .png -----------------------------------------
+  mkdir -p "$outdir/jpeg_as_png/images"
+  write_metadata "$outdir/jpeg_as_png" "$good_meta_display" "JPEG AS PNG" \
+    "standing_right.png is really a JPEG" "0.2" "1.0"
+  if [ "$HAVE_SIPS" -eq 1 ]; then
+    local tmp_svg="$outdir/jpeg_as_png/.tmp.svg"
+    cat > "$tmp_svg" <<'SVG'
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <rect width="64" height="64" fill="#ff00ff"/>
+</svg>
+SVG
+    sips -s format jpeg "$tmp_svg" --out "$outdir/jpeg_as_png/images/standing_right.png" >/dev/null 2>&1
+    /bin/rm -f "$tmp_svg"
+    echo "  jpeg_as_png/               images/standing_right.png contains real JPEG bytes."
+  else
+    printf '\377\330\377\340NOT-A-PNG' > "$outdir/jpeg_as_png/images/standing_right.png"
+    echo "  jpeg_as_png/               images/standing_right.png contains JPEG magic bytes"
+    echo "                             (sips unavailable, so it is a stub, not a full JPEG)."
+  fi
+  echo "                             HOSTILE: the loader must not trust the extension. Either"
+  echo "                             sniff the content or handle the decode error per-asset."
+
+  # ---- 5. text file renamed to .wav ------------------------------------
+  mkdir -p "$outdir/text_as_wav/voices"
+  write_metadata "$outdir/text_as_wav" "$good_meta_display" "TEXT AS WAV" \
+    "voices/tetris.wav is plain text" "0.2" "1.0"
+  printf 'this is not audio, it is a text file pretending to be one\n' \
+    > "$outdir/text_as_wav/voices/tetris.wav"
+  echo "  text_as_wav/               voices/tetris.wav is UTF-8 text, no RIFF header."
+  echo "                             HOSTILE: a failed audio decode must disable that one clip,"
+  echo "                             not kill the audio system or the whole character."
+
+  # ---- 6. misspelled voice file ----------------------------------------
+  mkdir -p "$outdir/misspelled_voice/voices"
+  write_metadata "$outdir/misspelled_voice" "$good_meta_display" "MISSPELLED" \
+    "has tetriss.wav, not tetris.wav" "0.2" "1.0"
+  if [ "$HAVE_SAY" -eq 1 ]; then
+    speak Samantha "Tetris!" "$outdir/misspelled_voice/voices/tetriss.wav"
+  else
+    printf 'RIFF----WAVE (stub: say unavailable)' \
+      > "$outdir/misspelled_voice/voices/tetriss.wav"
+  fi
+  echo "  misspelled_voice/          a valid clip at voices/tetriss.wav; tetris.wav is absent."
+  echo "                             HOSTILE: unknown filenames must be ignored silently-ish"
+  echo "                             (ideally warned about once), and the missing tetris.wav"
+  echo "                             must simply mean 'no line for that event'."
+
+  # ---- 7. illegal folder names ----------------------------------------
+  mkdir -p "$outdir/.hidden_leading_dot/images"
+  write_metadata "$outdir/.hidden_leading_dot" "$good_meta_display" "DOTFILE DIR" \
+    "folder name starts with a dot" "0.2" "1.0"
+  mkdir -p "$outdir/has space/images"
+  write_metadata "$outdir/has space" "$good_meta_display" "SPACE IN DIR" \
+    "folder name contains a space" "0.2" "1.0"
+  echo "  .hidden_leading_dot/       folder name begins with '.'."
+  echo "  'has space'/               folder name contains a space."
+  echo "                             HOSTILE: the folder name IS the character id, so it also"
+  echo "                             ends up in save files, config and log lines. Dot-prefixed"
+  echo "                             directories should be skipped as hidden, and ids should"
+  echo "                             be restricted to a documented charset rather than"
+  echo "                             accepting whatever the filesystem allows."
+
+  # ---- 8. out-of-range numbers ----------------------------------------
+  mkdir -p "$outdir/out_of_range/images"
+  write_metadata "$outdir/out_of_range" "$good_meta_display" "OUT OF RANGE" \
+    "portrait_alpha 99, voice_gain -5" "99" "-5"
+  echo "  out_of_range/              portrait_alpha = 99, voice_gain = -5."
+  echo "                             HOSTILE: must clamp to 0.05..0.45 and 0.2..2.0. An"
+  echo "                             unclamped alpha hides the board; a negative gain"
+  echo "                             inverts or blows up the mixer."
+
+  # ---- 9. parent-directory traversal ----------------------------------
+  printf 'A file OUTSIDE any character directory. Reading this means traversal succeeded.\n' \
+    > "$outdir/OUTSIDE_TARGET.txt"
+  mkdir -p "$outdir/traversal/images" "$outdir/traversal/voices"
+  cat > "$outdir/traversal/metadata.json" <<'JSON'
+{
+  "schema": 1,
+  "display_name": "../../../../etc/hosts",
+  "ascii_name": "TRAVERSAL",
+  "flavor": "images/standing_right.png is a symlink pointing out of the pack",
+  "author": "scripts/make_dummy_characters.sh --broken",
+  "portrait_alpha": 0.2,
+  "voice_gain": 1.0
+}
+JSON
+  # A filename that escapes the pack via a relative symlink.
+  ln -s "../../OUTSIDE_TARGET.txt" "$outdir/traversal/images/standing_left.png"
+  # A literal filename carrying an encoded traversal, in case anything
+  # url-decodes or unescapes a path component before joining it.
+  printf 'encoded traversal in the filename\n' \
+    > "$outdir/traversal/images/..%2F..%2FOUTSIDE_TARGET.png"
+  # A directory entry made only of dots, which some path normalisers mishandle.
+  mkdir -p "$outdir/traversal/images/...."
+  echo "  traversal/                 images/standing_left.png is a relative symlink to"
+  echo "                             ../../OUTSIDE_TARGET.txt; images/..%2F..%2F...png is a"
+  echo "                             literal filename holding an encoded '../../'; there is"
+  echo "                             also a '....' directory. display_name is a path too."
+  echo "                             HOSTILE: asset paths must be confined to the pack. Do not"
+  echo "                             follow symlinks out of assets/, do not unescape path"
+  echo "                             components, and never treat metadata strings as paths."
+
+  echo
+  summarise "Hostile fixtures" "$outdir"
+  echo "Note: 'find -type f' does not count the symlink; the pack contains one."
+  echo "None of these fixtures live inside the repository."
+}
+
+# ===========================================================================
+# Normal mode: the two dummy characters
+# ===========================================================================
+make_character() {
+  local id="$1" display_name="$2" ascii_name="$3" flavor="$4" \
+        voice="$5" lang="$6" name1="$7" name2="$8" name_font="$9" \
+        body="${10}" accent="${11}" head="${12}" text="${13}" muted="${14}" \
+        alpha="${15}" gain="${16}"
+
+  local dir="$CHARACTERS_DIR/$id"
+  /bin/rm -rf "$dir"
+  mkdir -p "$dir/images" "$dir/voices"
+
+  write_metadata "$dir" "$display_name" "$ascii_name" "$flavor" "$alpha" "$gain"
+
+  local tmp_svg="$dir/.render.svg"
+  local facing
+  for facing in right left; do
+    standing_svg "$facing" "$id" "$name1" "$name2" "$name_font" \
+      "$body" "$accent" "$head" "$text" "$muted" > "$tmp_svg"
+    render_svg "$tmp_svg" "$dir/images/standing_$facing.png" "$STANDING_W" "$STANDING_H"
+  done
+  cutin_svg "$display_name" "$name_font" "$body" "$accent" "$text" "$muted" > "$tmp_svg"
+  render_svg "$tmp_svg" "$dir/images/cutin.png" "$CUTIN_W" "$CUTIN_H"
+  /bin/rm -f "$tmp_svg"
+
+  local entry kind en ja line
+  echo "$VOICE_LINES" | while IFS='|' read -r kind en ja; do
+    [ -n "$kind" ] || continue
+    if [ "$lang" = "ja" ]; then line="$ja"; else line="$en"; fi
+    speak "$voice" "$line" "$dir/voices/$kind.wav"
+  done
+
+  echo "  $id: metadata.json, 3 images, $(echo "$VOICE_LINES" | grep -c '|') voices ($voice)"
+}
+
+make_all() {
+  if [ "$HAVE_SIPS" -eq 0 ] || [ "$HAVE_SAY" -eq 0 ]; then
+    echo "make_dummy_characters.sh: skipping — this needs macOS tools that are not here."
+    [ "$HAVE_SIPS" -eq 0 ] && echo "  missing: sips (SVG -> PNG)"
+    [ "$HAVE_SAY" -eq 0 ] && echo "  missing: say  (text -> WAV)"
+    echo "  The dummy pack is throwaway test data; skipping it is not an error."
+    exit 0
+  fi
+
+  mkdir -p "$CHARACTERS_DIR"
+  echo "Generating dummy character packs under:"
+  echo "  $CHARACTERS_DIR"
+  echo
+
+  # alice — English, teal.  ASCII display name.
+  make_character alice \
+    "DUMMY ALICE" "DUMMY ALICE" \
+    "Placeholder pilot. Speaks English, points right." \
+    Samantha en \
+    "DUMMY" "ALICE" "$FONT_ASCII" \
+    "#123f3a" "#39e6b8" "#1c5d55" "#f2fffb" "#9fe8d6" \
+    "0.20" "1.0"
+
+  # bob — Japanese, magenta.  Non-ASCII display name on purpose: this is what
+  # exercises the game's Japanese pixel-font path and the ascii_name fallback.
+  make_character bob \
+    "ダミー・ボブ" "DUMMY BOB" \
+    "テスト用のダミーキャラ。日本語をしゃべる。" \
+    Kyoko ja \
+    "ダミー" "ボブ" "$FONT_JA" \
+    "#3a1240" "#ff5cc8" "#571a5e" "#fff2fb" "#f0a8dd" \
+    "0.20" "1.0"
+
+  echo
+  echo "Files written:"
+  find "$CHARACTERS_DIR/alice" "$CHARACTERS_DIR/bob" -type f \
+    | sed "s|^$REPO_ROOT/||" | sort
+  echo
+  summarise "Total" "$CHARACTERS_DIR/alice" "$CHARACTERS_DIR/bob"
+  echo "This output is gitignored throwaway data — re-run this script to recreate it."
+}
+
+# ===========================================================================
+main() {
+  case "${1:-}" in
+    --broken) shift; make_broken "${1:-}" ;;
+    "") make_all ;;
+    -h|--help)
+      sed -n '2,40p' "$self" | sed 's|^# \{0,1\}||'
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      echo "usage: make_dummy_characters.sh [--broken <outdir>]" >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
