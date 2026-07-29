@@ -222,7 +222,25 @@ pub struct MusicEngine {
     resync: bool,
     /// Set when the label should be re-announced in the corner.
     announce: bool,
+    /// Notes handed to the audio thread since the process started —
+    /// only the debug readout reads it.
+    sent: u64,
 }
+
+/// `BEVYTRIS_MUSIC_DEBUG=1` puts a live readout of the music engine on
+/// screen and logs every piece change.
+///
+/// This exists because the engine is otherwise completely opaque: the
+/// composer runs a few seconds ahead of what you can hear, the audio
+/// thread owns the clock, and a "the music did not change" report could
+/// equally mean the profile never switched, the switch happened but the
+/// backlog drowned it, or the arrangement is simply on its opening bars
+/// with nothing but a bass line. Those need telling apart by looking.
+#[derive(Resource, Clone, Copy)]
+pub struct MusicDebug(pub bool);
+
+#[derive(Component)]
+struct MusicDebugText;
 
 /// A window of the score around the playhead, for the piano-roll scene.
 /// The scene and the sequencer therefore share one clock; deriving beats
@@ -279,7 +297,13 @@ impl Plugin for MusicPlugin {
             generation: 0,
             resync: false,
             announce: false,
+            sent: 0,
         });
+        let debug = matches!(
+            std::env::var("BEVYTRIS_MUSIC_DEBUG").as_deref(),
+            Ok("1") | Ok("true")
+        );
+        app.insert_resource(MusicDebug(debug));
         app.insert_resource(PendingStream(Some(ChiptuneStream {
             rx: Mutex::new(Some(rx)),
             shared,
@@ -287,7 +311,10 @@ impl Plugin for MusicPlugin {
         app.init_resource::<ScoreFeed>()
             .add_audio_source::<ChiptuneStream>()
             .add_systems(Startup, start_stream)
-            .add_systems(Update, (choose_profile, plan_music, announce_track).chain());
+            .add_systems(
+                Update,
+                (choose_profile, plan_music, announce_track, music_debug).chain(),
+            );
     }
 }
 
@@ -354,6 +381,7 @@ fn choose_profile(
 ) {
     let profile = profile_for(*app_state.get(), play_state.map(|s| *s.get()), *mode);
     if profile != engine.profile {
+        let was = engine.profile;
         engine.profile = profile;
         engine.profile_age = 0.0;
         engine.transpose = 0;
@@ -371,6 +399,14 @@ fn choose_profile(
         engine.resync = true;
         // Only the real music is worth naming; menus change too often.
         engine.announce = matches!(profile, Profile::SoloCalm | Profile::VsIntense);
+        let info = engine.composer.info();
+        info!(
+            "music: {was:?} -> {profile:?} (gen {generation}) | {} · {} kit | {:?} / {:?}",
+            info.label(),
+            info.kit.name(),
+            app_state.get(),
+            mode.into_inner(),
+        );
     } else {
         engine.profile_age += time.delta_secs();
     }
@@ -452,12 +488,14 @@ fn plan_music(
     // The final chorus lifted the key: say so, since the toast names it.
     let modulated = composer.take_modulated();
 
+    let mut sent = 0u64;
     for ev in scratch.iter() {
         // A closed channel only happens while the app is shutting down.
         let _ = tx.send(Cmd {
             generation,
             ev: *ev,
         });
+        sent += 1;
         feed.notes.push(RollNote {
             at: ev.at,
             end: ev.at + ev.frames as u64 * SAMPLES_PER_FRAME as u64,
@@ -470,9 +508,69 @@ fn plan_music(
     let cutoff = pos.saturating_sub(SAMPLE_RATE as u64 * 4);
     feed.notes.retain(|n| n.end >= cutoff);
 
+    engine.sent += sent;
     if modulated {
         engine.announce = true;
     }
+}
+
+/// Live readout of everything the ear cannot check for itself.
+fn music_debug(
+    mut commands: Commands,
+    debug: Res<MusicDebug>,
+    engine: Res<MusicEngine>,
+    feed: Res<ScoreFeed>,
+    mut text: Query<&mut Text, With<MusicDebugText>>,
+) {
+    if !debug.0 {
+        return;
+    }
+    let info = engine.composer.info();
+    let pos = engine.shared.pos();
+    // How far ahead of the playhead the score is filled: if this ever
+    // sits at zero the composer is starving and the music will stutter.
+    let ahead = (info.bar as f32, feed.notes.len());
+    let body = format!(
+        "{:?} gen{} piece-bar {} | {} · {} kit\n\
+         layers: {}\n\
+         playhead {:.1}s  intensity {:.2}  age {:.1}s\n\
+         notes sent {}  live {}  energy {:.2}",
+        engine.profile,
+        engine.generation,
+        ahead.0,
+        info.label(),
+        info.kit.name(),
+        // The line that would have made the bare-opening bug obvious in a
+        // glance instead of by counting notes.
+        info.layer_list(),
+        pos as f32 / SAMPLE_RATE as f32,
+        engine.intensity,
+        engine.profile_age,
+        engine.sent,
+        ahead.1,
+        engine.shared.energy(),
+    );
+    if let Ok(mut t) = text.single_mut() {
+        t.0 = body;
+        return;
+    }
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(10.0),
+            top: Val::Px(10.0),
+            ..default()
+        },
+        Text::new(body),
+        TextFont {
+            font_size: FontSize::Px(15.0),
+            ..default()
+        },
+        TextColor(Color::srgba(0.7, 1.0, 0.8, 0.9)),
+        GlobalZIndex(40),
+        Pickable::IGNORE,
+        MusicDebugText,
+    ));
 }
 
 /// Name the generated track in the corner, exactly where the old

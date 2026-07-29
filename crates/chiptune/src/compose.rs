@@ -601,16 +601,58 @@ struct Arrangement {
     max_prio: u8,
 }
 
+impl Arrangement {
+    /// Which layers are audible, as a bitmask. Purely for the debug
+    /// readout — "the profile switched but you cannot hear it" and "the
+    /// profile did not switch" look identical from outside, and this is
+    /// what tells them apart.
+    fn layers(&self) -> u8 {
+        // The bass is unconditional, so it is always bit 0.
+        let mut m = 1u8;
+        for (bit, on) in [
+            self.harmony,
+            self.pad.is_some(),
+            self.perc,
+            self.lead,
+            self.counter.is_some(),
+            self.saw.is_some(),
+            self.shaker,
+        ]
+        .iter()
+        .enumerate()
+        {
+            if *on {
+                m |= 1 << (bit + 1);
+            }
+        }
+        m
+    }
+}
+
+/// Names matching the bits of [`Arrangement::layers`].
+pub const LAYER_NAMES: [&str; 8] = [
+    "bass", "harm", "pad", "perc", "lead", "cntr", "saw", "shkr",
+];
+
 fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
     let i = ctx.intensity.clamp(0.0, 1.0);
     let b = band(i);
     // High intensity pulls the layer schedule forward: a desperate board
     // should not have to wait a minute for the drums.
     let t = ctx.elapsed * (1.0 + 2.0 * i);
+    // Every piece starts from a complete-sounding base — bass, harmony
+    // and pad from bar one — and builds percussion and melody on top.
+    //
+    // These used to be much longer, on the reasoning that a session-long
+    // build is what Tetris Effect does. It is, but that music is
+    // continuous; ours starts a *new song* at every screen change, and a
+    // new song that opens on sixteen seconds of unaccompanied bass does
+    // not sound like it began, it sounds like the old one stopped. The
+    // build is still there, it just starts from a song.
     let (h_at, p_at, l_at) = match profile {
-        Profile::Ambient => (6.0, f32::INFINITY, 22.0),
-        Profile::SoloCalm => (16.0, 40.0, 62.0),
-        Profile::VsIntense => (4.0, 10.0, 20.0),
+        Profile::Ambient => (0.0, f32::INFINITY, 12.0),
+        Profile::SoloCalm => (0.0, 6.0, 16.0),
+        Profile::VsIntense => (0.0, 2.0, 7.0),
         Profile::Victory => (0.0, 0.0, 0.0),
     };
 
@@ -640,11 +682,7 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             lead: t >= l_at,
             harmony: t >= h_at,
             perc: t >= p_at,
-            pad: (t >= h_at).then_some(if i < 0.55 {
-                Inst::WaveOrgan
-            } else {
-                Inst::Glass
-            }),
+            pad: Some(if i < 0.55 { Inst::WaveOrgan } else { Inst::Glass }),
             counter: (t >= l_at + 14.0).then_some(Counter::Echo),
             saw: (i >= 0.66).then_some(SawRole::LeadDouble),
             shaker: i >= 0.82,
@@ -663,7 +701,7 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             lead: t >= l_at,
             harmony: t >= h_at,
             perc: t >= p_at,
-            pad: (t >= h_at + 6.0).then_some(Inst::WaveBass),
+            pad: Some(Inst::WaveBass),
             counter: (t >= l_at + 10.0).then_some(if i < 0.5 {
                 Counter::Echo
             } else {
@@ -734,6 +772,22 @@ pub struct Info {
     pub kit: Kit,
     pub bpm: f32,
     pub bar: u32,
+    /// Bitmask of the layers the last planned bar actually used; see
+    /// [`LAYER_NAMES`].
+    pub layers: u8,
+}
+
+impl Info {
+    /// e.g. `bass harm pad perc` — what is currently audible.
+    pub fn layer_list(&self) -> String {
+        LAYER_NAMES
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.layers & (1 << i) != 0)
+            .map(|(_, n)| *n)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 impl Info {
@@ -769,6 +823,8 @@ pub struct Composer {
     transpose: i32,
     /// Semitones the final chorus has lifted the key by so far.
     lift: i32,
+    /// Layer bitmask of the last bar planned, for the debug readout.
+    layers: u8,
     /// Set on the bar where the lift lands, so the caller can re-announce
     /// the key.
     modulated: bool,
@@ -792,6 +848,7 @@ impl Composer {
             next_bar_at: 0,
             transpose: 0,
             lift: 0,
+            layers: 1,
             modulated: false,
         }
     }
@@ -810,6 +867,7 @@ impl Composer {
             kit: self.kit,
             bpm: self.bpm,
             bar: self.bar,
+            layers: self.layers,
         }
     }
 
@@ -966,6 +1024,7 @@ impl Composer {
             arr.shaker = true;
             arr.max_prio = arr.max_prio.max(1);
         }
+        self.layers = arr.layers();
         let (chord, hat_rot, kick_rot, melody) = {
             let sec = &self.material.sections[sec_idx];
             (
@@ -1799,6 +1858,67 @@ mod tests {
             assert_eq!(inst_def(i).fall, 0.0, "{i:?} must not fall");
             assert_eq!(inst_def(i).vib_depth, 0.0, "{i:?} must not wobble");
         }
+    }
+
+    /// The bug this test exists for: the profile switched correctly, the
+    /// key and tempo changed, and the player heard nothing recognizable
+    /// because the layer schedule opened on sixteen seconds of solo bass.
+    /// A screen change has to sound like a *different song*, immediately.
+    #[test]
+    fn a_piece_is_never_bare_at_bar_one() {
+        use std::collections::HashSet;
+        for profile in [Profile::Ambient, Profile::SoloCalm, Profile::VsIntense] {
+            let mut c = Composer::new(0xD00D);
+            c.set_profile(profile, 0.0);
+            // Bar one of a brand new piece: no elapsed time, no danger.
+            let ctx = Context {
+                profile,
+                intensity: 0.0,
+                elapsed: 0.0,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            c.plan_bar(&ctx, &mut out);
+
+            let voices: HashSet<u8> = out.iter().map(|e| e.voice() as u8).collect();
+            assert!(
+                voices.len() >= 3,
+                "{profile:?} opens on {} voice(s) — that reads as the old \
+                 music having stopped, not as new music starting",
+                voices.len()
+            );
+            assert!(
+                out.len() >= 4,
+                "{profile:?} opens with only {} notes",
+                out.len()
+            );
+            // Bass, harmony and pad specifically: the base has to be a
+            // song, not a bass line.
+            let layers = c.info().layer_list();
+            for want in ["bass", "harm", "pad"] {
+                assert!(layers.contains(want), "{profile:?} opens without {want}: {layers}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_arrangement_still_builds() {
+        // Immediate does not mean everything at once — percussion and
+        // melody still have to arrive later, or there is no build left.
+        let at = |elapsed: f32| {
+            let ctx = Context {
+                profile: Profile::SoloCalm,
+                intensity: 0.0,
+                elapsed,
+                ..Default::default()
+            };
+            arrange(Profile::SoloCalm, &ctx)
+        };
+        let opening = at(0.0);
+        assert!(!opening.perc && !opening.lead);
+        assert!(at(8.0).perc, "the drums never came in");
+        assert!(at(20.0).lead, "the melody never came in");
+        assert!(at(0.0).layers() < at(60.0).layers());
     }
 
     #[test]
