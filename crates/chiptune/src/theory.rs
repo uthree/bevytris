@@ -83,30 +83,70 @@ pub const NOTE_NAMES: [&str; 12] = [
 ];
 
 /// A chord as a scale degree of the current mode (0 = I, 4 = V, ...).
+/// How far up the stack of thirds a chord is built.
+///
+/// Degrees, not semitones — the mode decides whether the seventh is
+/// major or minor, so a ii7 in Dorian comes out minor and a V7 comes out
+/// dominant without any of this having to know which.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Ext {
+    #[default]
+    Triad,
+    Seventh,
+    Ninth,
+}
+
 /// We never spell chords absolutely: `degree` plus the mode is enough.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Chord {
     pub degree: i32,
-    pub seventh: bool,
+    pub ext: Ext,
 }
 
 impl Chord {
     pub const fn new(degree: i32) -> Self {
         Chord {
             degree,
-            seventh: false,
+            ext: Ext::Triad,
         }
     }
 
-    /// Scale degrees of the chord tones, relative to the tonic.
+    pub const fn with(degree: i32, ext: Ext) -> Self {
+        Chord { degree, ext }
+    }
+
+    /// Scale degrees of the triad, relative to the tonic.
     pub fn tones(&self) -> [i32; 3] {
         [self.degree, self.degree + 2, self.degree + 4]
     }
 
-    /// True if `degree` (any octave) is a chord tone.
+    /// The degrees an arpeggio should walk, and how many of them are
+    /// real. Extended chords drop the root: the bass is already playing
+    /// it, and four notes crammed into three slots would cost the third
+    /// or the seventh — the two that actually say what the chord is.
+    pub fn ladder(&self) -> ([i32; 4], usize) {
+        let d = self.degree;
+        match self.ext {
+            Ext::Triad => ([d, d + 2, d + 4, 0], 3),
+            Ext::Seventh => ([d, d + 2, d + 4, d + 6], 4),
+            // 3rd, 5th, 7th, 9th — a rootless voicing.
+            Ext::Ninth => ([d + 2, d + 4, d + 6, d + 8], 4),
+        }
+    }
+
+    /// True if `degree` (any octave) is a chord tone. The melody snaps
+    /// to these on strong beats, so widening the chord widens what the
+    /// tune is allowed to land on — which is most of where the extra
+    /// colour comes from.
     pub fn contains(&self, degree: i32) -> bool {
         let d = (degree - self.degree).rem_euclid(7);
-        d == 0 || d == 2 || d == 4 || (self.seventh && d == 6)
+        match self.ext {
+            Ext::Triad => d == 0 || d == 2 || d == 4,
+            Ext::Seventh => d == 0 || d == 2 || d == 4 || d == 6,
+            // The ninth is the second degree an octave up; in pitch-class
+            // terms that is simply degree 1.
+            Ext::Ninth => d == 0 || d == 2 || d == 4 || d == 6 || d == 1,
+        }
     }
 
     /// Nearest chord tone to `degree`, preferring to stay put on a tie.
@@ -126,17 +166,23 @@ impl Chord {
         best
     }
 
-    /// Semitone offsets of the triad above its own root, for the fast
-    /// arpeggio macro. Read through the mode, so a i chord really is
-    /// minor and a V really is major.
+    /// Semitone offsets above the chord's own root, for the three-slot
+    /// arpeggio macro the hardware voices run. Read through the mode, so
+    /// a i chord really is minor and a V really is major.
+    ///
+    /// A four-note chord has one more tone than the macro has slots. The
+    /// root is what gets dropped — the bass has it covered, and the
+    /// third and the seventh are what make a seventh chord a seventh
+    /// chord.
     pub fn arp(&self, mode: Mode) -> [i8; 3] {
         let root = mode.pitch(self.degree);
-        let tones = self.tones();
-        [
-            0,
-            (mode.pitch(tones[1]) - root) as i8,
-            (mode.pitch(tones[2]) - root) as i8,
-        ]
+        let (ladder, n) = self.ladder();
+        let take = if n == 4 { &ladder[1..4] } else { &ladder[0..3] };
+        let mut out = [0i8; 3];
+        for (o, deg) in out.iter_mut().zip(take) {
+            *o = (mode.pitch(*deg) - root) as i8;
+        }
+        out
     }
 }
 
@@ -300,5 +346,79 @@ mod tests {
         assert_eq!(Chord::new(4).arp(Mode::HarmonicMinor), [0, 4, 7]);
         // I in Ionian is major.
         assert_eq!(Chord::new(0).arp(Mode::Ionian), [0, 4, 7]);
+    }
+}
+
+#[cfg(test)]
+mod ext_tests {
+    use super::*;
+
+    #[test]
+    fn extensions_widen_what_the_melody_may_land_on() {
+        let triad = Chord::new(0);
+        let seventh = Chord::with(0, Ext::Seventh);
+        let ninth = Chord::with(0, Ext::Ninth);
+
+        // Degree 6 is the seventh, degree 1 is the ninth.
+        assert!(!triad.contains(6));
+        assert!(seventh.contains(6));
+        assert!(ninth.contains(6));
+        assert!(!triad.contains(1));
+        assert!(!seventh.contains(1));
+        assert!(ninth.contains(1));
+
+        // Everything still contains its own triad, in any octave.
+        for c in [triad, seventh, ninth] {
+            for d in [0, 2, 4, 7, 9, 11, -7, -5, -3] {
+                assert!(c.contains(d), "{c:?} lost triad tone {d}");
+            }
+        }
+    }
+
+    #[test]
+    fn snapping_can_now_reach_the_seventh() {
+        // Degree 6 sits a step below the octave. Against a triad the
+        // melody gets pushed off it; against a seventh chord it stays.
+        assert_ne!(Chord::new(0).snap(6), 6);
+        assert_eq!(Chord::with(0, Ext::Seventh).snap(6), 6);
+        assert_eq!(Chord::with(0, Ext::Ninth).snap(8), 8);
+    }
+
+    #[test]
+    fn an_extended_arp_drops_the_root_and_keeps_three_slots() {
+        let mode = Mode::Aeolian;
+        // A triad arpeggiates from its own root.
+        assert_eq!(Chord::new(0).arp(mode)[0], 0);
+
+        // A seventh chord has four tones and three slots, so the root
+        // goes: the bass has it, and the third and seventh are what say
+        // "seventh chord".
+        let seventh = Chord::with(0, Ext::Seventh).arp(mode);
+        assert_ne!(seventh[0], 0, "the root should have been dropped");
+        // i7 in Aeolian: minor third, fifth, minor seventh.
+        assert_eq!(seventh, [3, 7, 10]);
+
+        // A ninth is voiced 3rd/5th/7th/9th, so its three slots are the
+        // top three of that.
+        let ninth = Chord::with(0, Ext::Ninth).arp(mode);
+        assert_eq!(ninth, [7, 10, 14]);
+    }
+
+    #[test]
+    fn ladders_are_the_right_length() {
+        assert_eq!(Chord::new(0).ladder().1, 3);
+        assert_eq!(Chord::with(0, Ext::Seventh).ladder().1, 4);
+        assert_eq!(Chord::with(0, Ext::Ninth).ladder().1, 4);
+        // Every entry the count claims must be a chord tone.
+        for c in [
+            Chord::new(2),
+            Chord::with(2, Ext::Seventh),
+            Chord::with(2, Ext::Ninth),
+        ] {
+            let (tones, n) = c.ladder();
+            for t in &tones[..n] {
+                assert!(c.contains(*t), "{c:?} ladder tone {t} is not in the chord");
+            }
+        }
     }
 }

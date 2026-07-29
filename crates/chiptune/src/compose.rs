@@ -22,7 +22,7 @@
 //! note being regenerated.
 
 use crate::rng::Rng;
-use crate::theory::{Chord, Mode, NOTE_NAMES, euclid_rot};
+use crate::theory::{Chord, Ext, Mode, NOTE_NAMES, euclid_rot};
 use crate::{FRAME_RATE, Inst, NoteEvent, SAMPLE_RATE};
 
 pub const BARS_PER_SECTION: u32 = 8;
@@ -189,7 +189,7 @@ impl Default for Context {
 /// Every cell is deliberately short of filling its bar: the player is
 /// generating their own rhythmic sound effects and needs the acoustic
 /// space, and a melody with no rests reads as nagging within a minute.
-const RHYTHMS_4_4: [&[(u8, u8)]; 8] = [
+const RHYTHMS_4_4: [&[(u8, u8)]; 10] = [
     &[(0, 3), (4, 3), (8, 3), (12, 3)],
     &[(0, 2), (2, 2), (4, 3), (8, 2), (10, 2), (12, 3)],
     &[(0, 3), (3, 3), (6, 2), (8, 3), (12, 3)],
@@ -198,6 +198,31 @@ const RHYTHMS_4_4: [&[(u8, u8)]; 8] = [
     &[(0, 6), (6, 2), (8, 5), (14, 2)],
     &[(0, 7), (8, 4), (12, 3)],
     &[(0, 2), (3, 1), (4, 2), (7, 1), (8, 2), (11, 1), (12, 3)],
+    // The two busy ones. Only the dense profiles draw from a pool that
+    // reaches this far, and the calm ones filter most of it out anyway:
+    // their `max_prio` drops everything off the beat.
+    &[
+        (0, 2),
+        (2, 2),
+        (4, 2),
+        (6, 2),
+        (8, 2),
+        (10, 2),
+        (12, 2),
+        (14, 1),
+    ],
+    &[
+        (0, 2),
+        (2, 1),
+        (3, 1),
+        (4, 2),
+        (6, 2),
+        (8, 2),
+        (10, 1),
+        (11, 1),
+        (12, 2),
+        (14, 1),
+    ],
 ];
 
 /// 3/4 — three groups of four.
@@ -397,11 +422,21 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
     let dark = !matches!(profile, Profile::Victory);
     let bank = rhythm_bank(meter);
 
-    // Four motifs, each on its own rhythm cell.
+    // Four motifs, each on its own rhythm cell. Which cells are in play
+    // is where a profile's note density actually comes from, and it has
+    // to be done by restricting the pool rather than by weighting it:
+    // four draws out of ten cells average out to the bank's own mean
+    // almost whatever the weights say. Ordering the bank by onset count
+    // and handing each profile a window of it does move the average,
+    // because the sparse cells are simply not in the bag.
+    let mut order: Vec<usize> = (0..bank.len()).collect();
+    order.sort_by_key(|r| std::cmp::Reverse(bank[*r].len()));
+    let pool = &order[..melody_pool(profile, bank.len())];
+
     let mut rhythms_used: Vec<usize> = Vec::new();
     let mut motifs: Vec<Motif> = Vec::new();
     while motifs.len() < 4 {
-        let r = rng.below(bank.len());
+        let r = pool[rng.below(pool.len())];
         if rhythms_used.contains(&r) {
             continue;
         }
@@ -425,8 +460,10 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         // authentic at the end of the consequent.
         chords[3] = Chord::new(4);
         chords[7] = Chord::new(0);
-        // A seventh on the dominant sharpens the pull home.
-        chords[3].seventh = true;
+        // A seventh on the dominant sharpens the pull home. This one is
+        // structural rather than colour, so every profile gets it.
+        chords[3].ext = Ext::Seventh;
+        extend(&mut chords, profile, &mut rng);
 
         let melody = (0..8)
             .map(|bar| {
@@ -450,6 +487,55 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         // real songs sit.
         form: vec![0, 0, 1, 0, 2, 0, 1, 0, 2, 0],
         rhythms_used,
+    }
+}
+
+/// How many of the rhythm cells, busiest first, a profile may draw its
+/// four motifs from. Never below four, or there would be nothing to pick
+/// four distinct cells out of.
+fn melody_pool(profile: Profile, bank: usize) -> usize {
+    let want = match profile {
+        Profile::VsIntense => 5,
+        Profile::Victory => 6,
+        Profile::SoloCalm => 8,
+        // The calm profiles get the whole bank, sparse cells included.
+        Profile::Ambient | Profile::Zen => bank,
+    };
+    want.clamp(4, bank)
+}
+
+/// Stack thirds onto the progression, by profile.
+///
+/// Extensions are the cheapest richness available: nothing plays more
+/// notes at once (the hardware could not), but the arpeggio macro walks
+/// a wider chord and the melody is allowed to land on the seventh and
+/// the ninth, so the same arrangement stops sounding like three notes
+/// repeated. Versus gets the most of it because that is where a thin
+/// progression reads as cheap rather than as restraint; the calm
+/// profiles get a light touch, because a Dorian pad wants air more than
+/// it wants a ninth.
+fn extend(chords: &mut [Chord; 8], profile: Profile, rng: &mut Rng) {
+    let (seventh, ninth) = match profile {
+        Profile::VsIntense => (0.75, 0.40),
+        Profile::Victory => (0.60, 0.35),
+        Profile::SoloCalm => (0.30, 0.10),
+        Profile::Zen => (0.25, 0.12),
+        Profile::Ambient => (0.20, 0.08),
+    };
+    for (i, c) in chords.iter_mut().enumerate() {
+        // The two cadence bars are load-bearing: bar 3 keeps its dominant
+        // seventh, and bar 7 is home, which wants to sound like an
+        // arrival rather than like one more colour chord.
+        if i == 3 || i == 7 {
+            continue;
+        }
+        if rng.chance(seventh) {
+            c.ext = if rng.chance(ninth) {
+                Ext::Ninth
+            } else {
+                Ext::Seventh
+            };
+        }
     }
 }
 
@@ -677,6 +763,10 @@ struct Arrangement {
     saw: Option<SawRole>,
     /// Sixteenth-note shakers on top of the hats.
     shaker: bool,
+    /// How often the chord voice restrikes. Expressed against the beat
+    /// rather than as a count per bar so 3/4 and 6/8 come out right
+    /// without a divisor table.
+    harm_rate: HarmRate,
     lead_inst: Inst,
     harm_inst: Inst,
     bass_pat: usize,
@@ -718,6 +808,31 @@ impl Arrangement {
             }
         }
         m
+    }
+}
+
+/// How often the chord voice restrikes within a bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HarmRate {
+    /// Twice a bar — a chord bed that sits still.
+    HalfBar,
+    /// Once per beat.
+    Beat,
+    /// Twice per beat. Dense enough to be part of the rhythm section
+    /// rather than the background.
+    Eighth,
+}
+
+impl HarmRate {
+    /// Steps between hits, and how many fit in the bar.
+    fn grid(self, meter: Meter) -> (u32, u32) {
+        let spb = meter.steps_per_beat();
+        let span = match self {
+            HarmRate::HalfBar => meter.steps() / 2,
+            HarmRate::Beat => spb,
+            HarmRate::Eighth => (spb / 2).max(1),
+        };
+        (span, meter.steps() / span)
     }
 }
 
@@ -806,6 +921,7 @@ fn arrange(profile: Profile, ctx: &Context, lead: Inst) -> Arrangement {
             counter: (t >= l_at + 18.0).then_some(Counter::Echo),
             saw: None,
             shaker: false,
+            harm_rate: HarmRate::HalfBar,
             lead_inst: lead,
             harm_inst: Inst::Pad,
             bass_pat: 0,
@@ -829,6 +945,7 @@ fn arrange(profile: Profile, ctx: &Context, lead: Inst) -> Arrangement {
             counter: (t >= l_at + 12.0).then_some(Counter::Echo),
             saw: None,
             shaker: false,
+            harm_rate: HarmRate::HalfBar,
             lead_inst: lead,
             harm_inst: Inst::Pad,
             // The drums stay a texture rather than a beat: a sparse
@@ -854,6 +971,11 @@ fn arrange(profile: Profile, ctx: &Context, lead: Inst) -> Arrangement {
             counter: (t >= l_at + 14.0).then_some(Counter::Echo),
             saw: (i >= 0.66).then_some(SawRole::LeadDouble),
             shaker: i >= 0.82,
+            harm_rate: if i < 0.55 {
+                HarmRate::HalfBar
+            } else {
+                HarmRate::Beat
+            },
             lead_inst: lead,
             harm_inst: if i < 0.62 { Inst::Pad } else { Inst::Organ },
             bass_pat: [0, 1, 2, 3][b],
@@ -877,6 +999,12 @@ fn arrange(profile: Profile, ctx: &Context, lead: Inst) -> Arrangement {
             }),
             saw: (i >= 0.30).then_some(SawRole::BassDouble),
             shaker: i >= 0.62,
+            harm_rate: [
+                HarmRate::Beat,
+                HarmRate::Beat,
+                HarmRate::Eighth,
+                HarmRate::Eighth,
+            ][b],
             lead_inst: lead,
             harm_inst: if i < 0.55 { Inst::Organ } else { Inst::Stab },
             bass_pat: [1, 2, 2, 4][b],
@@ -897,6 +1025,7 @@ fn arrange(profile: Profile, ctx: &Context, lead: Inst) -> Arrangement {
             counter: Some(Counter::Arp),
             saw: Some(SawRole::BassDouble),
             shaker: false,
+            harm_rate: HarmRate::Beat,
             lead_inst: lead,
             harm_inst: Inst::Organ,
             bass_pat: 1,
@@ -1335,13 +1464,13 @@ impl Composer {
         if arr.harmony {
             let arp = chord.arp(mode);
             let base = clamp_midi(tonic + 12 + mode.pitch(chord.degree));
-            let spbeat = meter.steps_per_beat() as u8;
+            let (span, hits) = arr.harm_rate.grid(meter);
             if arr.harm_inst == Inst::Stab {
                 // Offbeat stabs drive; a held pad would just sit there.
-                // One per beat, halfway through it, whatever the meter.
-                for beat in 0..meter.beats() as u8 {
+                // Half a span late, so they land between the kicks.
+                for k in 0..hits {
                     out.push(NoteEvent {
-                        at: at((beat * spbeat + spbeat / 2) as f32),
+                        at: at((k * span + span / 2) as f32),
                         inst: Inst::Stab,
                         midi: base,
                         vel: 96,
@@ -1351,14 +1480,13 @@ impl Composer {
                     });
                 }
             } else {
-                let half = (steps / 2) as u8;
-                for step in [0, half] {
+                for k in 0..hits {
                     out.push(NoteEvent {
-                        at: at(step as f32),
+                        at: at((k * span) as f32),
                         inst: arr.harm_inst,
                         midi: base,
                         vel: 84,
-                        frames: frames(half),
+                        frames: frames(span as u8),
                         arp: Some(arp),
                         glide: 0,
                     });
@@ -1388,9 +1516,13 @@ impl Composer {
                 }
             }
             Some(Counter::Arp) => {
-                let tones = chord.tones();
+                // The full ladder, not just the triad: on a seventh or a
+                // ninth this is where the extra tone is most audible,
+                // because it goes past once every bar instead of being
+                // one third of a three-note macro.
+                let (tones, n) = chord.ladder();
                 for i in (0..steps).step_by(1) {
-                    let deg = tones[i as usize % 3] + 7;
+                    let deg = tones[i as usize % n] + 7;
                     out.push(NoteEvent {
                         at: at(i as f32),
                         inst: Inst::Arp,
@@ -1669,7 +1801,7 @@ impl Composer {
         let steps = meter.steps();
         let (degree, lifted, seventh) = OUTRO[outro_bar.min(OUTRO.len() - 1)];
         self.lift = if lifted { LIFT_STEP } else { 0 };
-        let chord = Chord { degree, seventh };
+        let chord = Chord::with(degree, if seventh { Ext::Seventh } else { Ext::Triad });
         let tonic = self.root + ctx.transpose + self.lift;
         // The pivot needs a flat seventh; harmonic minor's leading tone
         // would land a semitone off home. Softening the mode also suits a
@@ -1883,7 +2015,7 @@ mod tests {
             );
             for s in &m.sections {
                 assert_eq!(s.chords[3].degree, 4, "antecedent must close on V");
-                assert!(s.chords[3].seventh);
+                assert_eq!(s.chords[3].ext, Ext::Seventh);
                 assert_eq!(s.chords[7].degree, 0, "consequent must close on I");
             }
         }
@@ -2019,6 +2151,120 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Mean melody onsets per bar for a profile, over many seeds.
+    fn mean_onsets(profile: Profile) -> f32 {
+        let mut total = 0.0;
+        let mut bars = 0.0;
+        for seed in 0..60u64 {
+            let m = build_material(seed, profile, Meter::Four, default_smoothness(profile));
+            for s in &m.sections {
+                for notes in &s.melody {
+                    total += notes.len() as f32;
+                    bars += 1.0;
+                }
+            }
+        }
+        total / bars
+    }
+
+    #[test]
+    fn versus_writes_a_busier_tune_than_zen() {
+        let vs = mean_onsets(Profile::VsIntense);
+        let zen = mean_onsets(Profile::Zen);
+        let solo = mean_onsets(Profile::SoloCalm);
+        assert!(
+            vs > zen * 1.25,
+            "versus should be markedly busier: vs {vs:.2} vs zen {zen:.2}"
+        );
+        assert!(vs > solo, "versus {vs:.2} should out-pace solo {solo:.2}");
+    }
+
+    #[test]
+    fn every_profile_can_still_find_four_distinct_cells() {
+        // The pool is a window on the bank; too narrow a window and the
+        // motif loop spins forever looking for a fourth distinct cell.
+        for meter in METERS {
+            let bank = rhythm_bank(meter).len();
+            for profile in Profile::ALL {
+                let pool = melody_pool(profile, bank);
+                assert!(
+                    (4..=bank).contains(&pool),
+                    "{profile:?} in {} has a pool of {pool} out of {bank}",
+                    meter.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn versus_progressions_are_mostly_extended() {
+        // The point of the exercise: versus should be stacking thirds,
+        // and the calm profiles should mostly not be.
+        let count = |profile: Profile| {
+            let mut extended = 0;
+            let mut total = 0;
+            for seed in 0..40u64 {
+                let m = build_material(seed, profile, Meter::Four, default_smoothness(profile));
+                for s in &m.sections {
+                    for c in &s.chords {
+                        total += 1;
+                        if c.ext != Ext::Triad {
+                            extended += 1;
+                        }
+                    }
+                }
+            }
+            extended as f32 / total as f32
+        };
+        let vs = count(Profile::VsIntense);
+        let zen = count(Profile::Zen);
+        assert!(
+            vs > 0.6,
+            "versus only extended {:.0}% of chords",
+            vs * 100.0
+        );
+        assert!(zen < 0.4, "zen extended {:.0}% of chords", zen * 100.0);
+    }
+
+    #[test]
+    fn the_cadence_bars_keep_their_own_chords() {
+        // Bar 3 is the dominant seventh that pulls home and bar 7 is the
+        // arrival; colour must not be sprinkled onto either.
+        for profile in Profile::ALL {
+            for seed in 0..30u64 {
+                let m = build_material(seed, profile, Meter::Four, default_smoothness(profile));
+                for s in &m.sections {
+                    assert_eq!(s.chords[3].degree, 4);
+                    assert_eq!(s.chords[3].ext, Ext::Seventh);
+                    assert_eq!(s.chords[7].degree, 0);
+                    assert_eq!(s.chords[7].ext, Ext::Triad);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_harmony_grid_tiles_every_meter_exactly() {
+        for meter in METERS {
+            for rate in [HarmRate::HalfBar, HarmRate::Beat, HarmRate::Eighth] {
+                let (span, hits) = rate.grid(meter);
+                assert!(span >= 1, "{rate:?} in {} has no span", meter.name());
+                assert!(hits >= 1);
+                // The last hit must start inside the bar.
+                assert!(
+                    (hits - 1) * span < meter.steps(),
+                    "{rate:?} in {} runs past the bar line",
+                    meter.name()
+                );
+            }
+            // And it really is a ladder of increasing density.
+            let (_, half) = HarmRate::HalfBar.grid(meter);
+            let (_, beat) = HarmRate::Beat.grid(meter);
+            let (_, eighth) = HarmRate::Eighth.grid(meter);
+            assert!(half <= beat && beat <= eighth, "{}", meter.name());
         }
     }
 
