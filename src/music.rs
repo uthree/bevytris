@@ -474,8 +474,11 @@ fn announce_track(mut commands: Commands, mut engine: ResMut<MusicEngine>) {
     if !engine.announce {
         return;
     }
-    // Nothing to name until the engine has reported a piece.
-    let Some(info) = engine.info else {
+    // Nothing to name until the engine has reported a piece — and not
+    // until it has reported the *new* one. The snapshot lags the context
+    // by up to a 60 Hz tick, so naming whatever is in it right after a
+    // switch names the piece that just ended.
+    let Some(info) = engine.info.filter(|i| i.profile == engine.profile) else {
         return;
     };
     engine.announce = false;
@@ -497,7 +500,7 @@ fn music_debug(
         return;
     };
     let body = format!(
-        "{:?} bar {} | {} · {} kit | seed 0x{:x}\n\
+        "{:?} bar {} | {} | {} kit | seed 0x{:x}\n\
          layers: {}\n\
          playhead {:.1}s  intensity {:.2}  age {:.1}s\n\
          notes {}  live {}  energy {:.2}",
@@ -668,6 +671,36 @@ mod tests {
         // broken interleave would make these identical.
         assert_ne!(left, right);
         assert!((left - right).abs() / (left + right) < 0.25, "lopsided mix");
+    }
+
+    /// The toast used to name the piece that had just *ended*: the
+    /// snapshot lags the context by up to one 60 Hz tick, so reading it
+    /// on the frame of the switch describes the outgoing music.
+    #[test]
+    fn a_snapshot_says_which_piece_it_describes() {
+        let s = stream();
+        let link = s.link.clone();
+        let mut d = s.decoder();
+        link.ctx.lock().unwrap().profile = Profile::Ambient;
+        energy(&mut d, 96_000);
+        assert_eq!(
+            link.out.lock().unwrap().info.unwrap().profile,
+            Profile::Ambient
+        );
+
+        link.ctx.lock().unwrap().profile = Profile::VsIntense;
+        // Not a single frame yet: the snapshot must still say Ambient, so
+        // a caller can tell it has not caught up.
+        assert_eq!(
+            link.out.lock().unwrap().info.unwrap().profile,
+            Profile::Ambient
+        );
+        energy(&mut d, 9_600);
+        assert_eq!(
+            link.out.lock().unwrap().info.unwrap().profile,
+            Profile::VsIntense,
+            "the snapshot never caught up with the new piece"
+        );
     }
 
     /// The bug this architecture exists to make impossible.

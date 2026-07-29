@@ -766,6 +766,10 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
 #[derive(Clone, Copy, Debug)]
 pub struct Info {
     pub seed: u64,
+    /// Which piece this describes. A caller that has just asked for a new
+    /// profile can use it to tell whether the engine has caught up yet —
+    /// the snapshot it reads may still be about the outgoing piece.
+    pub profile: Profile,
     pub tonic: i32,
     pub mode: Mode,
     pub meter: Meter,
@@ -791,10 +795,15 @@ impl Info {
 }
 
 impl Info {
-    /// e.g. `A minor · 6/8 · 148 BPM · #3f7a2c`
+    /// e.g. `A minor・6/8・148 BPM・#3f7a2c`
+    ///
+    /// The separator is the katakana middle dot rather than the Latin-1
+    /// one, which is not a typographic quibble: the game draws this in an
+    /// 8x8 JIS X 0208 pixel font, and U+00B7 is not in that set — it came
+    /// out as a tofu box. See the test below.
     pub fn label(&self) -> String {
         format!(
-            "{} {} · {} · {:.0} BPM · #{:06x}",
+            "{} {}・{}・{:.0} BPM・#{:06x}",
             NOTE_NAMES[(self.tonic.rem_euclid(12)) as usize],
             self.mode.name(),
             self.meter.name(),
@@ -861,6 +870,7 @@ impl Composer {
     pub fn info(&self) -> Info {
         Info {
             seed: self.seed,
+            profile: self.profile,
             tonic: self.root + self.transpose + self.lift,
             mode: self.mode,
             meter: self.meter,
@@ -1684,6 +1694,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The game draws the label in Misaki, an 8x8 JIS X 0208 pixel font.
+    /// A character outside that set does not fall back to anything — it
+    /// renders as an empty box. A Latin-1 middle dot (U+00B7) used as the
+    /// separator did exactly that; the katakana one (U+30FB) is in the
+    /// set, as is the musical note the toast prefixes.
+    #[test]
+    fn the_label_only_uses_characters_the_game_can_draw() {
+        const ALLOWED_NON_ASCII: [char; 2] = ['・', '♪'];
+        let mut checked = 0;
+        for p in [
+            Profile::Ambient,
+            Profile::SoloCalm,
+            Profile::VsIntense,
+            Profile::Victory,
+        ] {
+            for seed in [0u64, 1, 0xC0FFEE, u64::MAX] {
+                let mut c = Composer::new(seed);
+                c.set_profile(p, 0.5);
+                for meter in METERS {
+                    c.force_meter(meter);
+                    for mode in [
+                        Mode::Lydian,
+                        Mode::Ionian,
+                        Mode::Mixolydian,
+                        Mode::Dorian,
+                        Mode::Aeolian,
+                        Mode::Phrygian,
+                        Mode::HarmonicMinor,
+                        Mode::PhrygianDominant,
+                    ] {
+                        c.mode = mode;
+                        let label = c.info().label();
+                        for ch in label.chars() {
+                            assert!(
+                                ch.is_ascii() || ALLOWED_NON_ASCII.contains(&ch),
+                                "label {label:?} contains U+{:04X} {ch:?}, which the \
+                                 8x8 pixel font will draw as an empty box",
+                                ch as u32
+                            );
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 100);
     }
 
     #[test]
