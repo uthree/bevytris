@@ -5,6 +5,9 @@
 //!     --profile vs --seed 42 --secs 90 --ramp --out vs.wav
 //! ```
 //!
+//! `--smooth 0..1` (or `auto`) overrides how stepwise the melodies are:
+//! 0 is the widest intervals this writes, 1 is very nearly stepwise.
+//!
 //! `--ramp` sweeps the intensity from 0 to 1 across the render, which is
 //! how the tempo ladder and the layer schedule get auditioned without
 //! playing the game badly on purpose.
@@ -23,6 +26,7 @@ fn main() {
     let mut intensity = 0.35f32;
     let mut meter: Option<Meter> = None;
     let mut kit: Option<Kit> = None;
+    let mut smooth: Option<f32> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -83,6 +87,15 @@ fn main() {
                 out_path = next(i);
                 i += 2;
             }
+            "--smooth" => {
+                let raw = next(i);
+                smooth = if raw == "auto" {
+                    None
+                } else {
+                    Some(raw.parse().expect("smooth must be a number 0..1 or auto"))
+                };
+                i += 2;
+            }
             "--ramp" => {
                 ramp = true;
                 i += 1;
@@ -102,6 +115,7 @@ fn main() {
     });
     director.pin_meter(meter);
     director.pin_kit(kit);
+    director.pin_smoothness(smooth);
 
     let mut samples = vec![0.0f32; total * 2];
     let mut notes = Vec::new();

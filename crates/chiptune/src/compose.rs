@@ -373,7 +373,23 @@ enum Transform {
     Cadence,
 }
 
-fn build_material(seed: u64, profile: Profile, meter: Meter) -> Material {
+/// How stepwise each profile's melodies are by default (see [`contour`]).
+/// Everything here leans smooth: a puzzle game is background listening,
+/// and a line that keeps jumping registers is the part of background
+/// listening people notice for the wrong reason.
+pub fn default_smoothness(profile: Profile) -> f32 {
+    match profile {
+        Profile::Zen => 0.90,
+        Profile::Ambient => 0.75,
+        Profile::SoloCalm => 0.70,
+        // The two that are allowed some angularity: a fanfare wants
+        // fanfare intervals, and versus wants energy.
+        Profile::Victory => 0.50,
+        Profile::VsIntense => 0.50,
+    }
+}
+
+fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) -> Material {
     let mut rng = Rng::new(seed ^ ((profile as u64 + 1) * 0x9E37_79B9));
     // Everything but the fanfare lives in minor. Major progressions read
     // as cheerful, and cheerful is the wrong register for a stack that is
@@ -393,7 +409,7 @@ fn build_material(seed: u64, profile: Profile, meter: Meter) -> Material {
         let n = bank[r].len();
         motifs.push(Motif {
             rhythm: r,
-            contour: contour(&mut rng, n),
+            contour: contour(&mut rng, n, smoothness),
         });
     }
 
@@ -437,16 +453,37 @@ fn build_material(seed: u64, profile: Profile, meter: Meter) -> Material {
     }
 }
 
-/// A one-bar pitch contour: a short weighted walk with a bias back toward
-/// the middle of the register, so motifs neither drift away nor sit still.
-fn contour(rng: &mut Rng, n: usize) -> Vec<i32> {
+/// Bounds of the melodic register, in scale degrees, and the degree the
+/// walk is drawn back toward.
+const CONTOUR_LOW: i32 = -2;
+const CONTOUR_HIGH: i32 = 8;
+const CONTOUR_CENTER: i32 = 3;
+
+/// A one-bar pitch contour: a short weighted walk, shaped by `smoothness`
+/// (0 = the widest intervals this writes, 1 = very nearly stepwise).
+///
+/// Two things here decide whether a motif sounds *shaped* or merely
+/// restless. The interval weights are the obvious one. The other is what
+/// happens at the edge of the register: this used to wrap (`d -= 7`),
+/// which dropped a leap of a seventh between two consecutive notes and
+/// was by far the biggest source of a melody that would not sit still.
+/// It now turns around instead, and drifts back toward the middle on its
+/// own — so a motif arches rather than wanders.
+fn contour(rng: &mut Rng, n: usize, smoothness: f32) -> Vec<i32> {
+    let s = smoothness.clamp(0.0, 1.0);
+    // Smoothness moves weight out of the wide intervals and into seconds.
+    // The three pairs always sum to 1: seconds 0.60 -> 0.88, thirds
+    // 0.32 -> 0.12, fifths 0.08 -> 0.
+    let second = 0.30 + 0.14 * s;
+    let third = 0.16 - 0.10 * s;
+    let fifth = 0.04 - 0.04 * s;
+    let weights = [second, second, third, third, fifth, fifth];
+
     let mut out = Vec::with_capacity(n);
     let mut d = *rng.pick(&[0, 2, 4]);
     for _ in 0..n {
         out.push(d);
-        // Steps are far more common than leaps; leaps larger than a fifth
-        // never happen.
-        let step = match rng.weighted(&[0.30, 0.30, 0.16, 0.16, 0.04, 0.04]) {
+        let mut step: i32 = match rng.weighted(&weights) {
             0 => -1,
             1 => 1,
             2 => -2,
@@ -454,14 +491,21 @@ fn contour(rng: &mut Rng, n: usize) -> Vec<i32> {
             4 => -4,
             _ => 4,
         };
-        d += step;
-        // Pull back into a comfortable octave and a bit.
-        if d > 8 {
-            d -= 7;
+        // The further the walk has drifted from the middle, the likelier
+        // the next move is inward. A walk that only ever turns at the
+        // edges reads as wandering; one that leans home reads as a line.
+        let offset = d - CONTOUR_CENTER;
+        if offset != 0 && offset.signum() == step.signum() {
+            let pull = offset.abs() as f32 / (CONTOUR_HIGH - CONTOUR_CENTER) as f32;
+            if rng.chance(pull * (0.35 + 0.35 * s)) {
+                step = -step;
+            }
         }
-        if d < -2 {
-            d += 7;
+        // Turn around at the register edge rather than jumping an octave.
+        if d + step > CONTOUR_HIGH || d + step < CONTOUR_LOW {
+            step = -step;
         }
+        d = (d + step).clamp(CONTOUR_LOW, CONTOUR_HIGH);
     }
     out
 }
@@ -492,10 +536,18 @@ fn realize(motif: &Motif, tf: Transform, chord: Chord, meter: Meter) -> Vec<MelN
     if tf == Transform::Cadence {
         // Land the phrase on the tonic, in whatever octave it was already
         // heading for.
+        let covered: u32 = out.iter().map(|n| n.len as u32).sum();
         if let Some(last) = out.last_mut() {
             last.deg = (last.deg as f32 / 7.0).round() as i32 * 7;
-            // Hold it a little longer, but never past the bar line.
-            last.len = (last.len + 2).min(meter.steps() as u8 - last.step);
+            // Hold it a little longer, but never past the bar line, and
+            // never so long that the bar ends up with no rest at all.
+            // The player is generating their own rhythm on top of this
+            // and needs the acoustic space; a cadence that swallows the
+            // last step takes it away exactly where the phrase breathes.
+            let room_to_bar = (meter.steps() - last.step as u32).max(1);
+            let others = covered - last.len as u32;
+            let room_for_rest = (meter.steps() - 1).saturating_sub(others).max(1);
+            last.len = (last.len as u32 + 2).min(room_to_bar).min(room_for_rest) as u8;
         }
     }
     out
@@ -894,6 +946,11 @@ pub struct Composer {
     bpm: f32,
     meter: Meter,
     kit: Kit,
+    /// How stepwise this piece's melodies are, 0..=1 (see [`contour`]).
+    smoothness: f32,
+    /// Set by [`Composer::force_smoothness`]; survives re-rolls, where
+    /// `smoothness` goes back to the profile default.
+    smooth_override: Option<f32>,
     /// Counts profile activations, so each match rolls its own meter,
     /// tempo and material instead of replaying the last one.
     piece: u64,
@@ -916,12 +973,14 @@ impl Composer {
         Composer {
             seed,
             profile,
-            material: build_material(seed, profile, Meter::Four),
+            material: build_material(seed, profile, Meter::Four, default_smoothness(profile)),
             mode: mode_target(profile, 0.0),
             root,
             bpm: roll_tempo(profile, Meter::Four, &mut Rng::new(seed)),
             meter: Meter::Four,
             kit: Kit::Chip,
+            smoothness: default_smoothness(profile),
+            smooth_override: None,
             piece: 0,
             bar: 0,
             next_bar_at: 0,
@@ -973,10 +1032,14 @@ impl Composer {
         self.meter = roll_meter(profile, &mut rng);
         self.bpm = roll_tempo(profile, self.meter, &mut rng);
         self.kit = roll_kit(profile, &mut rng);
+        self.smoothness = self
+            .smooth_override
+            .unwrap_or_else(|| default_smoothness(profile));
         self.material = build_material(
             self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
             profile,
             self.meter,
+            self.smoothness,
         );
         self.mode = mode_target(profile, intensity);
         self.bar = 0;
@@ -1007,8 +1070,34 @@ impl Composer {
             self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
             self.profile,
             meter,
+            self.smoothness,
         );
         self.bar = 0;
+    }
+
+    /// Override how stepwise the melodies are (0 = widest intervals,
+    /// 1 = very nearly stepwise). `None` hands the choice back to the
+    /// profile. Rebuilds the material, since the contours are baked in.
+    pub fn force_smoothness(&mut self, smoothness: Option<f32>) {
+        let want = smoothness
+            .map(|s| s.clamp(0.0, 1.0))
+            .unwrap_or_else(|| default_smoothness(self.profile));
+        self.smooth_override = smoothness.map(|s| s.clamp(0.0, 1.0));
+        if (want - self.smoothness).abs() < f32::EPSILON {
+            return;
+        }
+        self.smoothness = want;
+        self.material = build_material(
+            self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
+            self.profile,
+            self.meter,
+            want,
+        );
+        self.bar = 0;
+    }
+
+    pub fn smoothness(&self) -> f32 {
+        self.smoothness
     }
 
     /// Drop the playhead at `at` — used once, when the audio stream starts.
@@ -1681,7 +1770,7 @@ mod tests {
     fn a_piece_uses_at_most_eight_rhythm_cells() {
         for p in [Profile::Ambient, Profile::SoloCalm, Profile::VsIntense] {
             for m in METERS {
-                let mat = build_material(12345, p, m);
+                let mat = build_material(12345, p, m, default_smoothness(p));
                 assert!(
                     mat.rhythms_used.len() <= 8,
                     "{p:?} {} used {} rhythm cells",
@@ -1696,7 +1785,12 @@ mod tests {
     #[test]
     fn every_phrase_ends_on_a_cadence() {
         for meter in METERS {
-            let m = build_material(999, Profile::SoloCalm, meter);
+            let m = build_material(
+                999,
+                Profile::SoloCalm,
+                meter,
+                default_smoothness(Profile::SoloCalm),
+            );
             for s in &m.sections {
                 assert_eq!(s.chords[3].degree, 4, "antecedent must close on V");
                 assert!(s.chords[3].seventh);
@@ -1709,7 +1803,12 @@ mod tests {
     fn strong_beats_are_chord_tones() {
         let mut checked = 0;
         for meter in METERS {
-            let m = build_material(555, Profile::SoloCalm, meter);
+            let m = build_material(
+                555,
+                Profile::SoloCalm,
+                meter,
+                default_smoothness(Profile::SoloCalm),
+            );
             for s in &m.sections {
                 for (bar, notes) in s.melody.iter().enumerate() {
                     for n in notes.iter().filter(|n| n.prio == 0) {
@@ -1732,7 +1831,12 @@ mod tests {
         // The form must revisit sections: eighty bars of music from
         // twenty-four bars of material keeps new material inside the
         // ~35% budget real songs sit in.
-        let m = build_material(7, Profile::VsIntense, Meter::Four);
+        let m = build_material(
+            7,
+            Profile::VsIntense,
+            Meter::Four,
+            default_smoothness(Profile::VsIntense),
+        );
         let unique = m.form.iter().collect::<HashSet<_>>().len();
         assert_eq!(unique, 3);
         let heard = m.form.len() * BARS_PER_SECTION as usize;
@@ -1746,24 +1850,101 @@ mod tests {
     #[test]
     fn the_melody_always_leaves_room_to_breathe() {
         // Every bar must have rests: the player is generating their own
-        // rhythmic SFX and needs the acoustic space.
+        // rhythmic SFX and needs the acoustic space. Swept across seeds,
+        // profiles and smoothness because this used to hold only by luck
+        // of the draw — a cadence could extend its last note over the
+        // final step and leave the bar with nowhere to breathe.
         for meter in METERS {
-            let m = build_material(31337, Profile::VsIntense, meter);
-            for s in &m.sections {
-                for notes in &s.melody {
-                    let covered: u32 = notes.iter().map(|n| n.len as u32).sum();
-                    assert!(
-                        covered < meter.steps(),
-                        "a {} bar is completely full",
-                        meter.name()
-                    );
-                    // Nothing may hang over the bar line either.
-                    for n in notes {
-                        assert!(n.step as u32 + n.len as u32 <= meter.steps());
+            for profile in Profile::ALL {
+                for seed in [1u64, 7, 99, 808, 12345, 31337, 0xDEAD_BEEF] {
+                    for smooth in [0.0, 0.5, 1.0] {
+                        let m = build_material(seed, profile, meter, smooth);
+                        for s in &m.sections {
+                            for notes in &s.melody {
+                                let covered: u32 = notes.iter().map(|n| n.len as u32).sum();
+                                assert!(
+                                    covered < meter.steps(),
+                                    "a {} bar is completely full (seed {seed}, {profile:?})",
+                                    meter.name()
+                                );
+                                // Nothing may hang over the bar line either.
+                                for n in notes {
+                                    assert!(n.step as u32 + n.len as u32 <= meter.steps());
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// Average absolute interval between consecutive notes of a contour.
+    fn mean_leap(smoothness: f32, seed: u64) -> f32 {
+        let mut rng = Rng::new(seed);
+        let mut total = 0.0;
+        let mut count = 0.0;
+        for _ in 0..400 {
+            let c = contour(&mut rng, 8, smoothness);
+            for w in c.windows(2) {
+                total += (w[1] - w[0]).abs() as f32;
+                count += 1.0;
+            }
+        }
+        total / count
+    }
+
+    #[test]
+    fn smoothness_actually_narrows_the_intervals() {
+        let angular = mean_leap(0.0, 42);
+        let smooth = mean_leap(1.0, 42);
+        assert!(
+            smooth < angular * 0.8,
+            "smoothness should visibly narrow the line: {angular:.2} -> {smooth:.2}"
+        );
+        // Fully smooth is stepwise in all but name.
+        assert!(smooth < 1.25, "fully smooth mean leap was {smooth:.2}");
+    }
+
+    #[test]
+    fn a_contour_never_jumps_an_octave() {
+        // The old register wrap subtracted a seventh in one move, which
+        // put an octave between two consecutive notes. Nothing may leap
+        // wider than the fifth the weights actually offer.
+        let mut rng = Rng::new(0xC0FFEE);
+        for smooth in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            for _ in 0..500 {
+                let c = contour(&mut rng, 12, smooth);
+                for w in c.windows(2) {
+                    assert!(
+                        (w[1] - w[0]).abs() <= 4,
+                        "leap of {} at smoothness {smooth}",
+                        (w[1] - w[0]).abs()
+                    );
+                }
+                for d in &c {
+                    assert!(
+                        (CONTOUR_LOW..=CONTOUR_HIGH).contains(d),
+                        "degree {d} left the register"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unpinning_smoothness_restores_the_profile_default() {
+        let mut c = Composer::new(7);
+        c.set_profile(Profile::VsIntense, 0.5);
+        let rolled = c.smoothness();
+        assert_eq!(rolled, default_smoothness(Profile::VsIntense));
+        c.force_smoothness(Some(1.0));
+        assert_eq!(c.smoothness(), 1.0);
+        // A pin survives the next piece; dropping it does not.
+        c.set_profile(Profile::SoloCalm, 0.5);
+        assert_eq!(c.smoothness(), 1.0, "a pin must survive a re-roll");
+        c.force_smoothness(None);
+        assert_eq!(c.smoothness(), default_smoothness(Profile::SoloCalm));
     }
 
     /// The game draws the label in Misaki, an 8x8 JIS X 0208 pixel font.
@@ -2515,8 +2696,18 @@ mod tests {
     #[test]
     fn material_generation_is_reproducible() {
         for meter in METERS {
-            let a = build_material(0xABCD, Profile::SoloCalm, meter);
-            let b = build_material(0xABCD, Profile::SoloCalm, meter);
+            let a = build_material(
+                0xABCD,
+                Profile::SoloCalm,
+                meter,
+                default_smoothness(Profile::SoloCalm),
+            );
+            let b = build_material(
+                0xABCD,
+                Profile::SoloCalm,
+                meter,
+                default_smoothness(Profile::SoloCalm),
+            );
             assert_eq!(a.rhythms_used, b.rhythms_used);
             assert_eq!(a.form, b.form);
         }

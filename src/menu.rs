@@ -841,7 +841,7 @@ fn setup_custom(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 struct JukeboxRow(usize);
 
-const JUKEBOX_ROWS: usize = 6;
+const JUKEBOX_ROWS: usize = 7;
 
 #[derive(Resource, Default)]
 struct JukeboxCursor(usize);
@@ -1003,7 +1003,23 @@ fn jukebox_input(
         }
         2 => jukebox.meter = cycle_option(jukebox.meter, &Meter::ALL, step),
         3 => jukebox.kit = cycle_option(jukebox.kit, &Kit::ALL, step),
-        4 => jukebox.intensity = (jukebox.intensity + 0.1 * step as f32).clamp(0.0, 1.0),
+        // AUTO sits below 0%, so stepping left off the bottom hands the
+        // choice back to the preset rather than clamping at "0".
+        4 => {
+            jukebox.smooth = match (jukebox.smooth, step) {
+                (None, 1) => Some(0.0),
+                (None, _) => None,
+                (Some(v), _) => {
+                    let next = v + 0.1 * step as f32;
+                    if next < -0.01 {
+                        None
+                    } else {
+                        Some(next.min(1.0))
+                    }
+                }
+            }
+        }
+        5 => jukebox.intensity = (jukebox.intensity + 0.1 * step as f32).clamp(0.0, 1.0),
         _ => jukebox.zone = !jukebox.zone,
     }
 }
@@ -1058,7 +1074,13 @@ fn refresh_jukebox(
                     .kit
                     .map_or(auto.to_string(), |k| k.name().to_string()),
             ),
-            4 => (s.jb_intensity, format!("{:.0}%", jukebox.intensity * 100.0)),
+            4 => (
+                s.jb_smooth,
+                jukebox
+                    .smooth
+                    .map_or(auto.to_string(), |v| format!("{:.0}%", v * 100.0)),
+            ),
+            5 => (s.jb_intensity, format!("{:.0}%", jukebox.intensity * 100.0)),
             _ => (
                 s.jb_zone,
                 if jukebox.zone { "ON" } else { "OFF" }.to_string(),
@@ -1112,18 +1134,48 @@ mod jukebox_tests {
         // The cursor wraps over exactly the rows the screen spawns, and
         // the extra row index is the now-playing line rather than a
         // seventh setting.
-        assert_eq!(JUKEBOX_ROWS, 6);
+        assert_eq!(JUKEBOX_ROWS, 7);
         let s = crate::i18n::EN;
         for label in [
             s.jb_seed,
             s.jb_preset,
             s.jb_meter,
             s.jb_kit,
+            s.jb_smooth,
             s.jb_intensity,
             s.jb_zone,
         ] {
             assert!(!label.is_empty());
         }
+    }
+
+    /// The MELODY row steps 0..100% and drops off the bottom into AUTO,
+    /// which is the only way back to "let the preset decide".
+    #[test]
+    fn the_melody_row_walks_auto_through_full() {
+        let step = |v: Option<f32>, step: i32| -> Option<f32> {
+            match (v, step) {
+                (None, 1) => Some(0.0),
+                (None, _) => None,
+                (Some(v), _) => {
+                    let next = v + 0.1 * step as f32;
+                    if next < -0.01 {
+                        None
+                    } else {
+                        Some(next.min(1.0))
+                    }
+                }
+            }
+        };
+        assert_eq!(step(None, 1), Some(0.0));
+        assert_eq!(step(Some(0.0), -1), None, "left off 0% returns to AUTO");
+        assert_eq!(step(None, -1), None, "AUTO is the bottom of the range");
+        // Climbs to 100% and stops there.
+        let mut v = Some(0.0);
+        for _ in 0..20 {
+            v = step(v, 1);
+        }
+        assert_eq!(v, Some(1.0));
     }
 }
 

@@ -59,6 +59,7 @@ pub struct Director {
     /// pinned across the next piece too.
     pin_meter: Option<crate::compose::Meter>,
     pin_kit: Option<crate::compose::Kit>,
+    pin_smooth: Option<f32>,
     ctx: Context,
     /// The bar currently being played out, in time order.
     bar: Vec<NoteEvent>,
@@ -78,6 +79,7 @@ impl Director {
             seed,
             pin_meter: None,
             pin_kit: None,
+            pin_smooth: None,
             ctx: Context::default(),
             bar: Vec::with_capacity(256),
             cursor: 0,
@@ -157,6 +159,17 @@ impl Director {
         }
     }
 
+    /// Hold how stepwise the melodies are across re-rolls: 0 leaps the
+    /// most this writes, 1 is very nearly stepwise. `None` hands each
+    /// profile back its own default.
+    pub fn pin_smoothness(&mut self, smoothness: Option<f32>) {
+        if smoothness != self.pin_smooth {
+            self.pin_smooth = smoothness;
+            self.apply_pins();
+            self.repiece();
+        }
+    }
+
     fn apply_pins(&mut self) {
         if let Some(m) = self.pin_meter {
             self.composer.force_meter(m);
@@ -164,6 +177,10 @@ impl Director {
         if let Some(k) = self.pin_kit {
             self.composer.force_kit(k);
         }
+        // Always applied, not just when pinned: `None` is a real choice
+        // here (go back to the profile default), unlike the others where
+        // it just means "leave what the roll picked".
+        self.composer.force_smoothness(self.pin_smooth);
     }
 
     /// Restart the piece in place, after something that changed its

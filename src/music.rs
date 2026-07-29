@@ -56,6 +56,9 @@ pub struct Wanted {
     /// its own. Only the listening room sets these.
     pub meter: Option<Meter>,
     pub kit: Option<Kit>,
+    /// How stepwise the melodies are, 0..=1; `None` uses the profile's
+    /// own default.
+    pub smooth: Option<f32>,
 }
 
 pub struct Link {
@@ -142,6 +145,7 @@ impl Iterator for ChiptuneDecoder {
                 director.reseed(want.seed);
                 director.pin_meter(want.meter);
                 director.pin_kit(want.kit);
+                director.pin_smoothness(want.smooth);
                 director.set_context(want.ctx);
             }
             if let Ok(mut out) = self.link.out.try_lock() {
@@ -267,6 +271,8 @@ pub struct Jukebox {
     /// `None` means "whatever this piece rolled".
     pub meter: Option<Meter>,
     pub kit: Option<Kit>,
+    /// How stepwise the melodies are, 0..=1; `None` = the profile default.
+    pub smooth: Option<f32>,
     /// Stands in for the danger level, which there is no board to supply.
     pub intensity: f32,
     pub zone: bool,
@@ -279,6 +285,7 @@ impl Jukebox {
             profile: Profile::VsIntense,
             meter: None,
             kit: None,
+            smooth: None,
             intensity: 0.45,
             zone: false,
         }
@@ -310,6 +317,7 @@ impl Plugin for MusicPlugin {
             seed,
             meter: None,
             kit: None,
+            smooth: None,
         }));
         app.insert_resource(Jukebox::new(seed));
         // Built here rather than in a Startup system: bevy_state runs the
@@ -498,10 +506,12 @@ fn drive_music(
             want.seed = jukebox.seed;
             want.meter = jukebox.meter;
             want.kit = jukebox.kit;
+            want.smooth = jukebox.smooth;
         } else {
             want.seed = engine.seed;
             want.meter = None;
             want.kit = None;
+            want.smooth = None;
         }
     }
 
@@ -643,6 +653,7 @@ mod tests {
                 seed: 1234,
                 meter: None,
                 kit: None,
+                smooth: None,
             })),
         }
     }
@@ -853,6 +864,7 @@ mod tests {
                     seed: 0x1234_5678,
                     meter: None,
                     kit: None,
+                    smooth: None,
                 })),
             };
             let mut d = s.decoder();
