@@ -102,12 +102,18 @@ pub struct ChiptuneDecoder {
     shared: Arc<Shared>,
     generation: u32,
     frame_acc: u32,
+    /// The right half of the frame we already generated. rodio wants
+    /// interleaved samples, so each frame is handed over in two calls.
+    pending_right: Option<f32>,
 }
 
 impl Iterator for ChiptuneDecoder {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
+        if let Some(r) = self.pending_right.take() {
+            return Some(r);
+        }
         let now = self.synth.pos();
         // Read the generation every call rather than once per frame: the
         // composer bumps it and starts sending new notes in the same
@@ -155,7 +161,9 @@ impl Iterator for ChiptuneDecoder {
                 .store(self.synth.envelope().to_bits(), Ordering::Relaxed);
         }
         self.shared.pos.store(now, Ordering::Relaxed);
-        Some(self.synth.next_sample())
+        let (l, r) = self.synth.next_frame();
+        self.pending_right = Some(r);
+        Some(l)
     }
 }
 
@@ -164,7 +172,7 @@ impl Source for ChiptuneDecoder {
         None
     }
     fn channels(&self) -> ChannelCount {
-        ChannelCount::new(1).expect("mono")
+        ChannelCount::new(2).expect("stereo")
     }
     fn sample_rate(&self) -> SampleRate {
         SampleRate::new(SAMPLE_RATE).expect("nonzero sample rate")
@@ -188,6 +196,7 @@ impl Decodable for ChiptuneStream {
             generation: self.shared.generation.load(Ordering::Relaxed),
             shared: self.shared.clone(),
             frame_acc: 0,
+            pending_right: None,
         }
     }
 }
@@ -518,14 +527,46 @@ mod tests {
         assert!(loud > 1.0, "the scheduled note never sounded, got {loud}");
 
         // The clock only advances inside next(), which is what makes it
-        // the one authority the piano roll can trust.
-        assert!(shared.pos() >= 13_000, "clock stalled at {}", shared.pos());
+        // the one authority the piano roll can trust. It counts stereo
+        // frames, so 14 000 calls is 7 000 of them.
+        assert!(shared.pos() >= 6_500, "clock stalled at {}", shared.pos());
+    }
+
+    #[test]
+    fn the_stream_is_interleaved_stereo() {
+        let (s, tx) = stream();
+        let mut d = s.decoder();
+        // A hard-panned voice: the two channels must differ, which they
+        // cannot if the interleaving is wrong.
+        tx.send(Cmd {
+            generation: 0,
+            ev: NoteEvent {
+                at: 100,
+                inst: Inst::Echo,
+                midi: 72,
+                vel: 127,
+                frames: 200,
+                arp: None,
+            },
+        })
+        .unwrap();
+        let mut left = 0.0f32;
+        let mut right = 0.0f32;
+        for i in 0..24_000 {
+            let v = d.next().unwrap().abs();
+            if i % 2 == 0 { left += v } else { right += v }
+        }
+        assert!(left > 0.0 && right > 0.0);
+        assert!(
+            right > left * 1.3,
+            "the counter voice is not panned right ({left} vs {right})"
+        );
     }
 
     #[test]
     fn the_stream_never_ends_even_when_the_composer_goes_away() {
         let (s, tx) = stream();
-        assert_eq!(s.decoder().channels().get(), 1);
+        assert_eq!(s.decoder().channels().get(), 2);
         assert_eq!(s.decoder().sample_rate().get(), SAMPLE_RATE);
         // total_duration() must stay None: a finite answer would let
         // PlaybackSettings::LOOP wrap us in rodio's buffering repeat.
@@ -655,9 +696,11 @@ mod tests {
         .unwrap();
         assert!(energy(&mut d, 8_000) > 1.0);
         shared.generation.store(7, Ordering::Relaxed);
-        // Skip the release ramp, then confirm it really stopped.
-        energy(&mut d, 2_000);
+        // Skip the release ramp and the high-pass settling, then confirm
+        // it really stopped. (These counts are interleaved samples, so a
+        // stereo frame is two of them.)
+        energy(&mut d, 6_000);
         let after = energy(&mut d, 8_000);
-        assert!(after < 0.05, "note rang on through the cut, got {after}");
+        assert!(after < 0.2, "note rang on through the cut, got {after}");
     }
 }

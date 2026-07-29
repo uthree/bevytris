@@ -1,7 +1,9 @@
-//! The synthesizer: two pulse channels, a triangle and a noise channel,
-//! mixed through the NES's own nonlinear mixer and filter chain.
+//! The synthesizer: eight voices — three pulses, a sawtooth, a 32-step
+//! wavetable, a triangle and two noise channels — mixed through the NES's
+//! own nonlinear mixer (for the four the console actually had), placed in
+//! a stereo image, and run through the master filter chain.
 //!
-//! Two deliberate choices are worth knowing about before touching this:
+//! Three deliberate choices are worth knowing about before touching this:
 //!
 //! * **Pitch is quantized to the hardware's 11-bit period register.** The
 //!   slight detuning of high notes that falls out of this is a large part
@@ -14,10 +16,32 @@
 //!   sound. Nine lines of correction removes it. The lo-fi character comes
 //!   from the 4-bit volumes, the period quantization, the 32-step triangle
 //!   staircase and the nonlinear mixer instead.
+//! * **Panning belongs to the channel, not the note.** That is the tracker
+//!   convention, and it keeps the image stable instead of swimming about
+//!   as the arrangement changes. See [`VOICE_PAN`].
 
 use crate::{
-    FRAME_RATE, Inst, InstDef, NoteEvent, SAMPLES_PER_FRAME, SAMPLE_RATE, Voice, inst_def,
+    FRAME_RATE, Inst, InstDef, NoteEvent, SAMPLES_PER_FRAME, SAMPLE_RATE, VOICE_COUNT, Voice,
+    inst_def,
 };
+
+/// Where each voice sits in the stereo image, -1 (hard left) to +1.
+///
+/// Tracker convention: panning is a property of the *channel*, not of the
+/// note, so the image stays stable instead of swimming about. The two
+/// rules that matter are that the low end stays dead centre — a panned
+/// bass falls apart on speakers — and that the echo sits opposite the
+/// lead it is echoing, which is what turns it from a doubling into space.
+const VOICE_PAN: [f32; VOICE_COUNT] = [
+    0.22,  // Lead
+    -0.42, // Harmony
+    0.55,  // Counter
+    -0.30, // Saw
+    0.14,  // Wave
+    0.0,   // Bass
+    -0.08, // Perc
+    0.38,  // Hat
+];
 
 /// NTSC 2A03 clock. Every period table below derives from it.
 const CPU_HZ: f32 = 1_789_773.0;
@@ -42,6 +66,42 @@ pub const NOISE_PERIODS: [f32; 16] = [
     4.0, 8.0, 16.0, 32.0, 64.0, 96.0, 128.0, 160.0, 202.0, 254.0, 380.0, 508.0, 762.0, 1016.0,
     2034.0, 4068.0,
 ];
+
+/// Equal-power pan gains for a position in -1..1, narrowed by `width`
+/// (1 = full stereo, 0 = mono).
+fn pan_gains(pan: f32, width: f32) -> (f32, f32) {
+    let p = (pan * width).clamp(-1.0, 1.0);
+    let a = (p + 1.0) * std::f32::consts::FRAC_PI_4;
+    (a.cos(), a.sin())
+}
+
+/// The wavetable channel's four 32-step, 4-bit tables. Built at runtime
+/// rather than written out as literals so the harmonic recipes stay
+/// readable.
+fn build_wavetables() -> [[f32; 32]; 4] {
+    let q = |x: f32| (x.clamp(0.0, 1.0) * 15.0).round();
+    let mut t = [[0.0f32; 32]; 4];
+    for i in 0..32 {
+        let th = std::f32::consts::TAU * i as f32 / 32.0;
+        // Pure sine — the softest thing the chip can say.
+        t[0][i] = q(0.5 + 0.5 * th.sin());
+        // Drawbar organ: fundamental, octave, twelfth.
+        t[1][i] =
+            q(0.5 + 0.5 * (0.62 * th.sin() + 0.26 * (2.0 * th).sin() + 0.12 * (3.0 * th).sin()));
+        // Bell: odd harmonics only, which is what makes it read as struck
+        // metal rather than as a blown pipe.
+        t[2][i] =
+            q(0.5 + 0.5 * (0.55 * th.sin() + 0.28 * (3.0 * th).sin() + 0.17 * (5.0 * th).sin()));
+        // Reed: a rounded saw, for weight without buzz.
+        t[3][i] = q(0.5
+            + 0.5
+                * (0.50 * th.sin()
+                    + 0.25 * (2.0 * th).sin()
+                    + 0.15 * (3.0 * th).sin()
+                    + 0.10 * (4.0 * th).sin()));
+    }
+    t
+}
 
 /// PolyBLEP: a two-sample polynomial correction around a step
 /// discontinuity, which cancels most of the aliasing a naive square
@@ -357,6 +417,95 @@ impl TriCh {
     }
 }
 
+/// VRC6-style sawtooth: an accumulator stepped seven times per period,
+/// with the top five bits driving the DAC. The staircase is the point —
+/// it is what makes this buzz rather than sing.
+struct SawCh {
+    st: VoiceState,
+    phase: f32,
+    inc: f32,
+}
+
+impl SawCh {
+    fn new() -> Self {
+        SawCh {
+            st: VoiceState::silent(),
+            phase: 0.0,
+            inc: 0.0,
+        }
+    }
+
+    fn tick_frame(&mut self) {
+        let target = self.st.tick();
+        self.st.set_gain_target(target);
+        if self.st.active {
+            self.inc = quantize_pulse(midi_to_hz(self.st.midi_now())) / SAMPLE_RATE as f32;
+        }
+    }
+
+    /// Amplitude in 0..31, the saw's own 5-bit range.
+    fn sample(&mut self) -> f32 {
+        self.st.gain += self.st.gain_step;
+        if self.st.gain <= 0.0001 && !self.st.active {
+            self.st.gain = 0.0;
+            return 0.0;
+        }
+        let step = (self.phase * 7.0) as u32 + 1;
+        self.phase += self.inc;
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
+        // rate 0..36 keeps the eight-bit accumulator from wrapping, which
+        // on real hardware turns into a nasty fold-over.
+        let rate = self.st.gain * 2.4;
+        ((rate * step as f32) / 8.0).clamp(0.0, 31.0).floor()
+    }
+}
+
+/// Game Boy-style 32-step, 4-bit user wavetable.
+struct WaveCh {
+    st: VoiceState,
+    phase: f32,
+    inc: f32,
+    table: usize,
+}
+
+impl WaveCh {
+    fn new() -> Self {
+        WaveCh {
+            st: VoiceState::silent(),
+            phase: 0.0,
+            inc: 0.0,
+            table: 0,
+        }
+    }
+
+    fn tick_frame(&mut self) {
+        let target = self.st.tick();
+        self.st.set_gain_target(target);
+        if self.st.active {
+            self.inc = quantize_pulse(midi_to_hz(self.st.midi_now())) / SAMPLE_RATE as f32;
+            self.table = (self.st.inst.wave as usize).min(3);
+        }
+    }
+
+    fn sample(&mut self, tables: &[[f32; 32]; 4]) -> f32 {
+        self.st.gain += self.st.gain_step;
+        if self.st.gain <= 0.0001 && !self.st.active {
+            self.st.gain = 0.0;
+            return 0.0;
+        }
+        let idx = (self.phase * 32.0) as usize & 31;
+        self.phase += self.inc;
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
+        // The table is unipolar 0..15; scaling by the envelope keeps the
+        // DC it carries proportional, and the master high-pass removes it.
+        tables[self.table][idx] * (self.st.gain / 15.0)
+    }
+}
+
 struct NoiseCh {
     st: VoiceState,
     lfsr: u16,
@@ -425,19 +574,26 @@ pub const ZONE_CUTOFF_HZ: f32 = 750.0;
 const OPEN_CUTOFF_HZ: f32 = 18_000.0;
 
 pub struct Synth {
-    p1: PulseCh,
-    p2: PulseCh,
+    /// Lead, harmony and counter-melody.
+    pulses: [PulseCh; 3],
+    saw: SawCh,
+    wave: WaveCh,
     tri: TriCh,
-    noi: NoiseCh,
+    /// Kick/snare and hats/shakers, so percussion stops masking itself.
+    noise: [NoiseCh; 2],
+    wavetables: [[f32; 32]; 4],
     frame_acc: u32,
     /// Absolute sample position — the one authoritative musical clock.
     pos: u64,
-    hp: OnePoleHp,
-    lp: OnePoleLp,
-    zone_a: OnePoleLp,
-    zone_b: OnePoleLp,
+    hp: [OnePoleHp; 2],
+    lp: [OnePoleLp; 2],
+    zone_a: [OnePoleLp; 2],
+    zone_b: [OnePoleLp; 2],
     zone_cut: f32,
     zone_target: f32,
+    /// Stereo width, collapsed toward mono while the zone runs.
+    width: f32,
+    width_target: f32,
     gain: f32,
 }
 
@@ -450,23 +606,35 @@ impl Default for Synth {
 impl Synth {
     pub fn new() -> Self {
         Synth {
-            p1: PulseCh::new(),
-            p2: PulseCh::new(),
+            pulses: [PulseCh::new(), PulseCh::new(), PulseCh::new()],
+            saw: SawCh::new(),
+            wave: WaveCh::new(),
             tri: TriCh::new(),
-            noi: NoiseCh::new(),
+            noise: [NoiseCh::new(), NoiseCh::new()],
+            wavetables: build_wavetables(),
             frame_acc: 0,
             pos: 0,
             // Removes the mixer's DC offset (its output swings 0..1, not
             // -1..1) as well as sub-bass mud. The console's own 440 Hz
             // high-pass is deliberately *not* modelled: it makes the mix
             // thin, and this is background music, not console output.
-            hp: OnePoleHp::new(34.0),
-            lp: OnePoleLp::new(14_000.0),
-            zone_a: OnePoleLp::new(OPEN_CUTOFF_HZ),
-            zone_b: OnePoleLp::new(OPEN_CUTOFF_HZ),
+            hp: [OnePoleHp::new(34.0), OnePoleHp::new(34.0)],
+            lp: [OnePoleLp::new(14_000.0), OnePoleLp::new(14_000.0)],
+            zone_a: [
+                OnePoleLp::new(OPEN_CUTOFF_HZ),
+                OnePoleLp::new(OPEN_CUTOFF_HZ),
+            ],
+            zone_b: [
+                OnePoleLp::new(OPEN_CUTOFF_HZ),
+                OnePoleLp::new(OPEN_CUTOFF_HZ),
+            ],
             zone_cut: OPEN_CUTOFF_HZ,
             zone_target: OPEN_CUTOFF_HZ,
-            gain: 1.7,
+            width: 1.0,
+            width_target: 1.0,
+            // Equal-power panning drops a centred voice 3 dB relative to
+            // a mono sum, so the master makes that back.
+            gain: 2.3,
         }
     }
 
@@ -480,15 +648,23 @@ impl Synth {
     }
 
     /// Slide the whole mix underwater (or back) — the zone treatment.
+    /// The stereo image narrows at the same time: closing in is part of
+    /// what makes the moment read as concentration.
     pub fn set_muffled(&mut self, on: bool) {
         self.zone_target = if on { ZONE_CUTOFF_HZ } else { OPEN_CUTOFF_HZ };
+        self.width_target = if on { 0.3 } else { 1.0 };
     }
 
     /// Release every sounding note. The gains ramp down over the current
     /// frame rather than snapping, so a hard cut between pieces does not
     /// click.
     pub fn all_notes_off(&mut self) {
-        for st in [&mut self.p1.st, &mut self.p2.st, &mut self.noi.st] {
+        let mut states: Vec<&mut VoiceState> = Vec::with_capacity(VOICE_COUNT);
+        states.extend(self.pulses.iter_mut().map(|c| &mut c.st));
+        states.push(&mut self.saw.st);
+        states.push(&mut self.wave.st);
+        states.extend(self.noise.iter_mut().map(|c| &mut c.st));
+        for st in states {
             st.active = false;
             st.frames_left = 0;
             st.set_gain_target(0.0);
@@ -501,15 +677,19 @@ impl Synth {
 
     pub fn note_on(&mut self, ev: &NoteEvent) {
         match ev.voice() {
-            Voice::Lead => self.p1.st.start(ev),
-            Voice::Harmony => self.p2.st.start(ev),
+            Voice::Lead => self.pulses[0].st.start(ev),
+            Voice::Harmony => self.pulses[1].st.start(ev),
+            Voice::Counter => self.pulses[2].st.start(ev),
+            Voice::Saw => self.saw.st.start(ev),
+            Voice::Wave => self.wave.st.start(ev),
             Voice::Bass => self.tri.st.start(ev),
             Voice::Perc => {
-                self.noi.st.start(ev);
+                self.noise[0].st.start(ev);
                 if ev.inst == Inst::Kick {
                     self.tri.kick();
                 }
             }
+            Voice::Hat => self.noise[1].st.start(ev),
         }
     }
 
@@ -517,15 +697,25 @@ impl Synth {
         // Exponential glide, ~4 frames to close. Fast enough to feel like
         // a filter slamming shut, slow enough not to click.
         self.zone_cut += (self.zone_target - self.zone_cut) * 0.22;
-        self.zone_a.set_cutoff(self.zone_cut);
-        self.zone_b.set_cutoff(self.zone_cut);
-        self.p1.tick_frame();
-        self.p2.tick_frame();
+        self.width += (self.width_target - self.width) * 0.18;
+        for i in 0..2 {
+            self.zone_a[i].set_cutoff(self.zone_cut);
+            self.zone_b[i].set_cutoff(self.zone_cut);
+        }
+        for p in &mut self.pulses {
+            p.tick_frame();
+        }
+        self.saw.tick_frame();
+        self.wave.tick_frame();
         self.tri.tick_frame();
-        self.noi.tick_frame();
+        for n in &mut self.noise {
+            n.tick_frame();
+        }
     }
 
-    pub fn next_sample(&mut self) -> f32 {
+    /// One stereo frame. The two samples are emitted interleaved by the
+    /// caller.
+    pub fn next_frame(&mut self) -> (f32, f32) {
         if self.frame_acc == 0 {
             self.tick_frame();
         }
@@ -535,46 +725,94 @@ impl Synth {
         }
         self.pos += 1;
 
-        let p = self.p1.sample() + self.p2.sample();
+        let p1 = self.pulses[0].sample();
+        let p2 = self.pulses[1].sample();
+        let p3 = self.pulses[2].sample();
+        let saw = self.saw.sample();
+        let wav = self.wave.sample(&self.wavetables);
         let t = self.tri.sample();
-        let n = self.noi.sample();
+        let n0 = self.noise[0].sample();
+        let n1 = self.noise[1].sample();
 
-        // The console's nonlinear mixer. This self-compression is why NES
-        // music never clips and why stacked channels glue together; a
-        // linear mix is the usual reason a from-scratch NES synth sounds
-        // harsh and too loud.
+        // The console's nonlinear mixer, on the four channels the console
+        // actually had. This self-compression is why NES music never clips
+        // and why stacked channels glue together; a linear mix is the usual
+        // reason a from-scratch NES synth sounds harsh and too loud.
+        //
+        // It combines channels before we can pan them, so its output is
+        // then split back across the contributing channels in proportion
+        // to their own amplitudes — the compression stays correct while
+        // each voice still gets its own place in the image.
+        let p = p1 + p2;
         let pulse_out = if p > 0.0 {
             95.52 / (8128.0 / p + 100.0)
         } else {
             0.0
         };
-        let tnd = 3.0 * t + 2.0 * n;
+        let tnd = 3.0 * t + 2.0 * n0;
         let tnd_out = if tnd > 0.0 {
             163.67 / (24329.0 / tnd + 100.0)
         } else {
             0.0
         };
 
-        let mut s = self.hp.step(pulse_out + tnd_out);
-        s = self.lp.step(s);
-        s = self.zone_b.step(self.zone_a.step(s));
-        // tanh limiter: musically transparent until it isn't.
-        (s * self.gain).tanh()
+        let w = self.width;
+        let mut left = 0.0;
+        let mut right = 0.0;
+        let mut place = |v: Voice, amp: f32| {
+            if amp == 0.0 {
+                return;
+            }
+            let (l, r) = pan_gains(VOICE_PAN[v as usize], w);
+            left += amp * l;
+            right += amp * r;
+        };
+        if p > 0.0 {
+            place(Voice::Lead, pulse_out * (p1 / p));
+            place(Voice::Harmony, pulse_out * (p2 / p));
+        }
+        if tnd > 0.0 {
+            place(Voice::Bass, tnd_out * (3.0 * t / tnd));
+            place(Voice::Perc, tnd_out * (2.0 * n0 / tnd));
+        }
+        // Expansion audio mixed in linearly, exactly as a cartridge chip
+        // would have. The scale factors put a full-scale expansion channel
+        // at roughly the level of one console pulse.
+        place(Voice::Counter, p3 / 15.0 * 0.105);
+        place(Voice::Saw, saw / 31.0 * 0.125);
+        place(Voice::Wave, wav / 15.0 * 0.100);
+        place(Voice::Hat, n1 / 15.0 * 0.070);
+
+        let mut out = [left, right];
+        for (i, s) in out.iter_mut().enumerate() {
+            *s = self.hp[i].step(*s);
+            *s = self.lp[i].step(*s);
+            *s = self.zone_b[i].step(self.zone_a[i].step(*s));
+            // tanh limiter: musically transparent until it isn't.
+            *s = (*s * self.gain).tanh();
+        }
+        (out[0], out[1])
     }
 
+    /// Fill an interleaved stereo buffer (L, R, L, R, ...).
     pub fn render(&mut self, out: &mut [f32]) {
-        for s in out.iter_mut() {
-            *s = self.next_sample();
+        for frame in out.chunks_mut(2) {
+            let (l, r) = self.next_frame();
+            frame[0] = l;
+            if frame.len() > 1 {
+                frame[1] = r;
+            }
         }
     }
 
     /// Peak amplitude currently sounding, 0..1-ish — the background
     /// visualizer's energy input.
     pub fn envelope(&self) -> f32 {
-        let p = (self.p1.st.gain + self.p2.st.gain) / 30.0;
+        let p: f32 = self.pulses.iter().map(|c| c.st.gain).sum::<f32>() / 45.0;
+        let e = (self.saw.st.gain + self.wave.st.gain) / 30.0 * 0.6;
         let t = self.tri.gate * 0.35;
-        let n = self.noi.st.gain / 15.0 * 0.5;
-        (p + t + n).min(1.0)
+        let n = (self.noise[0].st.gain + self.noise[1].st.gain) / 30.0 * 0.5;
+        (p + e + t + n).min(1.0)
     }
 }
 
@@ -591,6 +829,29 @@ mod tests {
             frames,
             arp: None,
         }
+    }
+
+    /// `frames` stereo frames, summed to mono — most of these tests care
+    /// about content, not placement.
+    fn mono(s: &mut Synth, frames: usize) -> Vec<f32> {
+        (0..frames)
+            .map(|_| {
+                let (l, r) = s.next_frame();
+                l + r
+            })
+            .collect()
+    }
+
+    /// Total absolute level per side over `frames`.
+    fn sides(s: &mut Synth, frames: usize) -> (f32, f32) {
+        let mut l_sum = 0.0;
+        let mut r_sum = 0.0;
+        for _ in 0..frames {
+            let (l, r) = s.next_frame();
+            l_sum += l.abs();
+            r_sum += r.abs();
+        }
+        (l_sum, r_sum)
     }
 
     #[test]
@@ -616,19 +877,107 @@ mod tests {
     #[test]
     fn output_never_leaves_the_rails() {
         let mut s = Synth::new();
-        // Everything at once, loudest instruments, for a second.
+        // Every channel at once, loudest instruments, for a second.
         for _ in 0..12 {
             s.note_on(&ev(Inst::Sustain, 84, 60));
             s.note_on(&ev(Inst::Organ, 72, 60));
+            s.note_on(&ev(Inst::Arp, 79, 60));
+            s.note_on(&ev(Inst::SawLead, 60, 60));
+            s.note_on(&ev(Inst::Bell, 67, 60));
             s.note_on(&ev(Inst::Bass, 36, 60));
             s.note_on(&ev(Inst::Kick, 0, 8));
-            let mut buf = vec![0.0; 4000];
+            s.note_on(&ev(Inst::Hat, 0, 6));
+            let mut buf = vec![0.0; 8000];
             s.render(&mut buf);
             assert!(
                 buf.iter().all(|v| v.is_finite() && v.abs() <= 1.0),
                 "output left [-1, 1]"
             );
         }
+    }
+
+    #[test]
+    fn every_voice_can_be_heard() {
+        // A note on each channel must actually reach the mix — a missing
+        // arm in note_on() or the mixer would be silent, not a crash.
+        for inst in crate::ALL_INSTRUMENTS {
+            let mut s = Synth::new();
+            let midi = if inst == Inst::Bass { 40 } else { 67 };
+            s.note_on(&ev(inst, midi, 20));
+            let level: f32 = mono(&mut s, 16_000).iter().map(|v| v.abs()).sum();
+            assert!(level > 0.5, "{inst:?} produced nothing ({level})");
+        }
+    }
+
+    #[test]
+    fn voices_are_spread_across_the_stereo_image() {
+        let side_bias = |inst: Inst, midi: u8| {
+            let mut s = Synth::new();
+            s.note_on(&ev(inst, midi, 40));
+            let (l, r) = sides(&mut s, 20_000);
+            (r - l) / (r + l).max(1e-6)
+        };
+        // The harmony sits left, the counter-melody right — an echo has to
+        // land opposite the lead or it reads as a doubling, not as space.
+        assert!(side_bias(Inst::Organ, 67) < -0.15, "harmony is not left");
+        assert!(side_bias(Inst::Echo, 67) > 0.15, "counter is not right");
+        assert!(side_bias(Inst::Hat, 0) > 0.10, "hats are not right");
+        // The low end must stay centred or the mix falls apart.
+        assert!(side_bias(Inst::Bass, 40).abs() < 0.02, "bass is off centre");
+    }
+
+    #[test]
+    fn the_zone_narrows_the_image() {
+        let spread = |muffled: bool| {
+            let mut s = Synth::new();
+            s.set_muffled(muffled);
+            // Let the width glide settle.
+            s.note_on(&ev(Inst::Organ, 67, 200));
+            mono(&mut s, 20_000);
+            s.note_on(&ev(Inst::Organ, 67, 200));
+            let (l, r) = sides(&mut s, 20_000);
+            (l - r).abs() / (l + r).max(1e-6)
+        };
+        let open = spread(false);
+        let closed = spread(true);
+        assert!(
+            closed < open * 0.6,
+            "zone did not pull the image in: {open} -> {closed}"
+        );
+    }
+
+    #[test]
+    fn the_two_noise_channels_do_not_mask_each_other() {
+        // The whole reason for a second noise channel: a hat landing on
+        // the same step as a kick used to be swallowed whole.
+        // Well below the limiter's knee, so this measures the mix and not
+        // tanh's incremental gain.
+        let render = |kick: bool, hat: bool| {
+            let mut s = Synth::new();
+            s.set_gain(0.25);
+            if kick {
+                s.note_on(&ev(Inst::Kick, 0, 8));
+            }
+            if hat {
+                s.note_on(&ev(Inst::Hat, 0, 6));
+            }
+            // Energy, not mean absolute level: the two sources are
+            // uncorrelated noise, and only their energies add.
+            mono(&mut s, 8_000).iter().map(|v| v * v).sum::<f32>()
+        };
+        let level = |with_hat: bool| render(true, with_hat);
+        let hat_alone = render(false, true);
+        let kick_only = level(false);
+        let both = level(true);
+        // The hat's own contribution has to survive the kick essentially
+        // intact. On one shared channel it did not survive at all: the
+        // later note simply took the channel.
+        let survived = both - kick_only;
+        assert!(
+            survived > hat_alone * 0.5,
+            "the hat lost {:.0}% under the kick (alone {hat_alone:.1}, survived {survived:.1})",
+            100.0 * (1.0 - survived / hat_alone)
+        );
     }
 
     #[test]
@@ -685,8 +1034,7 @@ mod tests {
             arp: None,
         });
         let n = 16384;
-        let mut buf = vec![0.0; n];
-        s.render(&mut buf);
+        let buf = mono(&mut s, n);
 
         // Goertzel-style DFT probe at a set of frequencies.
         let power = |hz: f32| -> f32 {
@@ -722,12 +1070,10 @@ mod tests {
             let mut s = Synth::new();
             s.set_muffled(muffled);
             // Let the filter settle before measuring.
-            let mut warm = vec![0.0; 12_000];
             s.note_on(&ev(Inst::Stab, 96, 200));
-            s.render(&mut warm);
-            let mut buf = vec![0.0; 16_000];
+            mono(&mut s, 12_000);
             s.note_on(&ev(Inst::Stab, 96, 200));
-            s.render(&mut buf);
+            let buf = mono(&mut s, 16_000);
             // Crude treble measure: mean absolute first difference.
             buf.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>() / buf.len() as f32
         };

@@ -22,7 +22,7 @@
 //! [`StarSurge`] on big clears).
 
 use bevy::prelude::*;
-use bevytris_chiptune::SAMPLE_RATE;
+use bevytris_chiptune::Voice;
 use rand::Rng;
 
 use crate::audio::PlaySfx;
@@ -903,39 +903,16 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
             Visibility::default(),
         ))
         .with_children(|parent| {
-            // Row banding: one strip per semitone. The composer publishes
-            // its scale, so these light up by scale membership and the
-            // whole texture visibly changes when the music modulates.
-            for row in 0..ROLL_ROWS {
-                parent.spawn((
-                    Sprite::from_color(Color::NONE, Vec2::new(1400.0, ROLL_ROW_H - 1.0)),
-                    Transform::from_xyz(0.0, row_y(row), 0.0),
-                    RollPart::Row(row),
-                ));
-            }
-            for i in 0..ROLL_LINES {
-                parent.spawn((
-                    Sprite::from_color(Color::NONE, Vec2::new(2.0, 720.0)),
-                    Transform::from_xyz(0.0, 0.0, 0.05),
-                    RollPart::Line(i),
-                ));
-            }
+            // Notes and nothing else. There is no grid, no row banding and
+            // no playhead line: a piano roll is already the most
+            // structured thing on screen, and behind a board that the
+            // player is reading closely, all that scaffolding just
+            // competes. The note-on flash marks where "now" is on its own.
             for i in 0..ROLL_NOTES {
                 parent.spawn((
                     Sprite::from_color(Color::NONE, Vec2::ZERO),
                     Transform::from_xyz(0.0, 0.0, 0.1 + 0.01 * (i % 4) as f32),
-                    RollPart::Note(i),
-                ));
-            }
-            // Playhead plus a short trail behind it.
-            for i in 0..ROLL_HEAD_PARTS {
-                parent.spawn((
-                    Sprite::from_color(
-                        Color::NONE,
-                        Vec2::new(if i == 0 { 2.0 } else { 9.0 }, 720.0),
-                    ),
-                    Transform::from_xyz(ROLL_PLAYHEAD_X - 5.0 * i as f32, 0.0, 0.2),
-                    RollPart::Head(i),
+                    RollPart(i),
                 ));
             }
         });
@@ -1000,7 +977,7 @@ fn update_audio_pulse(
     let mut real = [0.0f32; BANDS];
     for n in &feed.notes {
         // Drums carry no pitch and would all pile into one band.
-        if n.voice == 3 || n.at > feed.pos || feed.pos >= n.end {
+        if n.voice >= Voice::Perc as u8 || n.at > feed.pos || feed.pos >= n.end {
             continue;
         }
         let idx = (n.midi % 12) as usize + if n.midi >= 60 { 12 } else { 0 };
@@ -1691,33 +1668,23 @@ fn animate_visualizer(
 // PIANOROLL
 // ---------------------------------------------------------------------------
 
-/// Pooled sprites for the piano roll. One component instead of four
-/// markers keeps the animate system down to a single query.
+/// A pooled note rectangle for the piano roll.
 #[derive(Component)]
-enum RollPart {
-    /// Semitone banding strip.
-    Row(usize),
-    /// Scrolling beat/bar line.
-    Line(usize),
-    /// A note rectangle from the pool.
-    Note(usize),
-    /// The playhead and its trail segments.
-    Head(usize),
-}
+struct RollPart(usize);
 
 /// Lowest drawn pitch (A1) — the triangle bass bottoms out around here.
 const ROLL_LOW_MIDI: i32 = 33;
 const ROLL_ROWS: usize = 56;
 const ROLL_ROW_H: f32 = 12.0;
-/// Typical live count for four voices is well under half of this; the
-/// AUTOMATON scene already ships 2040 sprites, so there is headroom.
-const ROLL_NOTES: usize = 384;
-const ROLL_LINES: usize = 20;
-const ROLL_HEAD_PARTS: usize = 5;
+/// Eight voices at up to sixteen notes a bar over four bars of visible
+/// score; the AUTOMATON scene already ships 2040 sprites, so there is
+/// plenty of headroom.
+const ROLL_NOTES: usize = 512;
 /// Scroll rate. Sized so the visible future is a little under the
 /// composer's lookahead, otherwise notes pop in at the right edge.
 const ROLL_PX_PER_SEC: f32 = 240.0;
-/// The playhead sits left of center: mostly future, a little past.
+/// Where "now" sits: left of centre, so most of the screen is the music
+/// that has not happened yet.
 const ROLL_PLAYHEAD_X: f32 = -150.0;
 const ROLL_DRUM_Y: f32 = -348.0;
 
@@ -1770,7 +1737,7 @@ fn animate_pianoroll(
         if cx + w / 2.0 < -660.0 || cx - w / 2.0 > 660.0 {
             continue;
         }
-        let drum = n.voice == 3;
+        let drum = n.voice >= Voice::Perc as u8;
         let y = if drum {
             ROLL_DRUM_Y
         } else {
@@ -1780,12 +1747,16 @@ fn animate_pianoroll(
         let vel = 0.55 + 0.45 * (n.vel as f32 / 127.0);
         let playing = n.at <= feed.pos && feed.pos < n.end;
         let past = feed.pos >= n.end;
+        // With no grid behind them the notes carry the whole scene, so
+        // they sit a little brighter than they used to. The note-on flash
+        // is the only bloom source, and the column of flashes it makes as
+        // notes cross is what tells you where "now" is.
         let (base_alpha, glow) = if playing {
-            (0.50 * vel, 2.2 * glow_boost)
+            (0.62 * vel, 2.4 * glow_boost)
         } else if past {
-            (0.085 * vel, 1.0)
+            (0.10 * vel, 1.0)
         } else {
-            (0.155 * vel, 1.0)
+            (0.20 * vel, 1.0)
         };
         // Fade at both edges so nothing pops in or out.
         let edge = ((cx + 640.0) / 170.0).clamp(0.0, 1.0) * ((640.0 - cx) / 130.0).clamp(0.0, 1.0);
@@ -1794,63 +1765,37 @@ fn animate_pianoroll(
             y,
             w: if drum { 9.0 } else { w },
             h: if drum { 9.0 } else { 9.0 * (0.75 + 0.25 * n.vel as f32 / 127.0) },
-            color: palette.formation[(n.voice as usize).min(3)],
+            color: palette.formation[voice_hue(n.voice)],
             alpha: base_alpha * edge * global,
             glow,
         });
         slot += 1;
     }
 
-    let px_per_beat = ROLL_PX_PER_SEC * 60.0 / feed.bpm.max(1.0);
-    let beat_now = feed.pos as f64 / SAMPLE_RATE as f64 * feed.bpm as f64 / 60.0;
-
     for (part, mut tf, mut sprite) in &mut parts {
-        match part {
-            RollPart::Row(row) => {
-                let midi = ROLL_LOW_MIDI + *row as i32;
-                let pc = midi.rem_euclid(12) as usize;
-                // FL-Studio-style scale banding, plus a brighter line on
-                // every C — the cheapest way to make a field of
-                // rectangles read as "piano roll" and not "random bars".
-                let a = if pc == 0 {
-                    0.055
-                } else if feed.scale[pc] {
-                    0.026
-                } else {
-                    0.007
-                };
-                sprite.color = Color::srgba(0.62, 0.70, 0.92, a * global);
+        match draws[part.0] {
+            Some(d) => {
+                tf.translation.x = d.x;
+                tf.translation.y = d.y;
+                sprite.custom_size = Some(Vec2::new(d.w, d.h));
+                sprite.color = emissive(d.color, d.glow).with_alpha(d.alpha);
             }
-            RollPart::Line(i) => {
-                let beat = beat_now.floor() as i64 - 3 + *i as i64;
-                let x = ROLL_PLAYHEAD_X + (beat as f64 - beat_now) as f32 * px_per_beat;
-                tf.translation.x = x;
-                let bar = beat.rem_euclid(feed.quarters_per_bar.max(1) as i64) == 0;
-                let edge = ((x + 640.0) / 120.0).clamp(0.0, 1.0)
-                    * ((640.0 - x) / 120.0).clamp(0.0, 1.0);
-                sprite.custom_size = Some(Vec2::new(if bar { 2.0 } else { 1.0 }, 720.0));
-                sprite.color = emissive(palette.wave, 1.0)
-                    .with_alpha(if bar { 0.10 } else { 0.035 } * edge * global);
-            }
-            RollPart::Note(i) => match draws[*i] {
-                Some(d) => {
-                    tf.translation.x = d.x;
-                    tf.translation.y = d.y;
-                    sprite.custom_size = Some(Vec2::new(d.w, d.h));
-                    sprite.color = emissive(d.color, d.glow).with_alpha(d.alpha);
-                }
-                None => {
-                    // Cheaper than hiding the entity, and keeps the pool
-                    // in one archetype.
-                    sprite.color = Color::NONE;
-                }
-            },
-            RollPart::Head(i) => {
-                // Deliberately faint: a bright bar between the two boards
-                // pulls the eye away from the field.
-                let a = [0.08, 0.042, 0.028, 0.017, 0.009][(*i).min(4)];
-                sprite.color = emissive(palette.wave, 1.0).with_alpha(a * global);
+            None => {
+                // Cheaper than hiding the entity, and keeps the pool in
+                // one archetype.
+                sprite.color = Color::NONE;
             }
         }
+    }
+}
+
+/// Eight voices share the palette's four tints, grouped by role so
+/// related lines read as one part: melody, harmony, low end, percussion.
+fn voice_hue(voice: u8) -> usize {
+    match voice {
+        v if v == Voice::Lead as u8 || v == Voice::Counter as u8 => 0,
+        v if v == Voice::Harmony as u8 || v == Voice::Wave as u8 => 1,
+        v if v == Voice::Bass as u8 || v == Voice::Saw as u8 => 2,
+        _ => 3,
     }
 }

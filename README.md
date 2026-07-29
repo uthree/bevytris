@@ -108,12 +108,13 @@ Settings are stored as RON at the platform config directory, e.g.
   Dellacherie-style evaluation extended with attack and T-spin terms).
   Fully unit-tested; `cargo run -p bevytris-core --example selfplay
   --release` benchmarks the AI ladder headlessly.
-- `crates/chiptune` — the music engine, also engine-independent: a
-  four-voice NES-style synthesizer (PolyBLEP pulses, 32-step triangle,
-  15-bit LFSR noise, the console's own nonlinear mixer) plus an
-  algorithmic composer. `cargo run -p bevytris-chiptune --release
-  --example render -- --profile vs --seed 42 --secs 60 --ramp` writes a
-  WAV without launching the game.
+- `crates/chiptune` — the music engine, also engine-independent: an
+  eight-voice NES-style synthesizer (three PolyBLEP pulses, a VRC6-style
+  sawtooth, a 32-step wavetable, the 15-bit LFSR noise twice over, the
+  console's own nonlinear mixer, stereo panning) plus an algorithmic
+  composer. `cargo run -p bevytris-chiptune --release --example render --
+  --profile vs --seed 42 --secs 60 --ramp` writes a WAV without launching
+  the game.
 - `src/` — the Bevy app: rendering, input (DAS/ARR), menus, settings
   persistence, particles/shake/banner effects, audio playback (CC0 sample
   banks, with runtime pitch-shifting for combo chimes) and the streaming

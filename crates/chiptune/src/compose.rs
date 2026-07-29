@@ -484,10 +484,34 @@ fn mode_target(profile: Profile, intensity: f32) -> Mode {
     }
 }
 
+/// What the third pulse channel does when it is switched on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Counter {
+    /// A quiet delayed copy of the melody, panned opposite it.
+    Echo,
+    /// A fast chord arpeggio in sixteenths.
+    Arp,
+}
+
+/// What the sawtooth channel does when it is switched on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SawRole {
+    /// Doubles the bass an octave up, for weight.
+    BassDouble,
+    /// Doubles the melody's strong beats an octave down, for body.
+    LeadDouble,
+}
+
 struct Arrangement {
     lead: bool,
     harmony: bool,
     perc: bool,
+    /// Wavetable pad or bell under everything.
+    pad: Option<Inst>,
+    counter: Option<Counter>,
+    saw: Option<SawRole>,
+    /// Sixteenth-note shakers on top of the hats.
+    shaker: bool,
     lead_inst: Inst,
     harm_inst: Inst,
     bass_pat: usize,
@@ -517,11 +541,17 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
         Profile::Victory => (0.0, 0.0, 0.0),
     };
 
+    // The extra channels come in last, so the arrangement still builds
+    // rather than arriving all at once.
     let mut a = match profile {
         Profile::Ambient => Arrangement {
             lead: t >= l_at,
             harmony: t >= h_at,
             perc: false,
+            pad: Some(Inst::Bell),
+            counter: (t >= l_at + 18.0).then_some(Counter::Echo),
+            saw: None,
+            shaker: false,
             lead_inst: Inst::Soft,
             harm_inst: Inst::Pad,
             bass_pat: 0,
@@ -537,6 +567,14 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             lead: t >= l_at,
             harmony: t >= h_at,
             perc: t >= p_at,
+            pad: (t >= h_at).then_some(if i < 0.55 {
+                Inst::WaveOrgan
+            } else {
+                Inst::Glass
+            }),
+            counter: (t >= l_at + 14.0).then_some(Counter::Echo),
+            saw: (i >= 0.66).then_some(SawRole::LeadDouble),
+            shaker: i >= 0.82,
             lead_inst: if i < 0.45 { Inst::Soft } else { Inst::Sustain },
             harm_inst: if i < 0.62 { Inst::Pad } else { Inst::Organ },
             bass_pat: [0, 1, 2, 3][b],
@@ -552,6 +590,14 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             lead: t >= l_at,
             harmony: t >= h_at,
             perc: t >= p_at,
+            pad: (t >= h_at + 6.0).then_some(Inst::WaveBass),
+            counter: (t >= l_at + 10.0).then_some(if i < 0.5 {
+                Counter::Echo
+            } else {
+                Counter::Arp
+            }),
+            saw: (i >= 0.30).then_some(SawRole::BassDouble),
+            shaker: i >= 0.62,
             lead_inst: Inst::Pluck,
             harm_inst: if i < 0.55 { Inst::Organ } else { Inst::Stab },
             bass_pat: [1, 2, 2, 4][b],
@@ -568,6 +614,10 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             lead: true,
             harmony: true,
             perc: true,
+            pad: Some(Inst::Bell),
+            counter: Some(Counter::Arp),
+            saw: Some(SawRole::BassDouble),
+            shaker: false,
             lead_inst: Inst::Sustain,
             harm_inst: Inst::Organ,
             bass_pat: 1,
@@ -587,7 +637,11 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
     if ctx.zone {
         a.lead = false;
         a.perc = false;
+        a.counter = None;
+        a.saw = None;
+        a.shaker = false;
         a.harm_inst = Inst::Pad;
+        a.pad = Some(Inst::Glass);
     }
     a
 }
@@ -838,8 +892,58 @@ impl Composer {
             }
         }
 
+        // --- counter-melody -------------------------------------------
+        match arr.counter {
+            Some(Counter::Echo) if arr.lead => {
+                // Three sixteenths behind the lead and panned to the far
+                // side of it, which is what turns a doubling into space.
+                for n in melody.iter().filter(|n| n.prio <= arr.max_prio) {
+                    let step = n.step as f32 + 3.0;
+                    if step >= steps as f32 {
+                        continue;
+                    }
+                    out.push(NoteEvent {
+                        at: at(step),
+                        inst: Inst::Echo,
+                        midi: clamp_midi(tonic + 24 + mode.pitch(n.deg)),
+                        vel: 62,
+                        frames: frames(n.len.min(3)),
+                        arp: None,
+                    });
+                }
+            }
+            Some(Counter::Arp) => {
+                let tones = chord.tones();
+                for i in (0..steps).step_by(1) {
+                    let deg = tones[i as usize % 3] + 7;
+                    out.push(NoteEvent {
+                        at: at(i as f32),
+                        inst: Inst::Arp,
+                        midi: clamp_midi(tonic + 12 + mode.pitch(deg)),
+                        vel: 72,
+                        frames: frames(1),
+                        arp: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+
+        // --- wavetable pad --------------------------------------------
+        if let Some(pad) = arr.pad {
+            out.push(NoteEvent {
+                at: at(0.0),
+                inst: pad,
+                midi: clamp_midi(tonic + mode.pitch(chord.degree)),
+                vel: 76,
+                frames: frames(steps as u8),
+                arp: Some(chord.arp(mode)),
+            });
+        }
+
         // --- bass -----------------------------------------------------
-        for (step, len, deg) in bass_pattern(arr.bass_pat, chord.degree, meter) {
+        let bass = bass_pattern(arr.bass_pat, chord.degree, meter);
+        for &(step, len, deg) in &bass {
             out.push(NoteEvent {
                 at: at(step as f32),
                 inst: Inst::Bass,
@@ -848,6 +952,35 @@ impl Composer {
                 frames: frames(len),
                 arp: None,
             });
+        }
+
+        // --- sawtooth -------------------------------------------------
+        match arr.saw {
+            Some(SawRole::BassDouble) => {
+                for &(step, len, deg) in &bass {
+                    out.push(NoteEvent {
+                        at: at(step as f32),
+                        inst: Inst::SawBass,
+                        midi: clamp_midi(tonic + mode.pitch(deg)),
+                        vel: 88,
+                        frames: frames(len),
+                        arp: None,
+                    });
+                }
+            }
+            Some(SawRole::LeadDouble) if arr.lead => {
+                for n in melody.iter().filter(|n| n.prio == 0) {
+                    out.push(NoteEvent {
+                        at: at(n.step as f32),
+                        inst: Inst::SawLead,
+                        midi: clamp_midi(tonic + 12 + mode.pitch(n.deg)),
+                        vel: 80,
+                        frames: frames(n.len),
+                        arp: None,
+                    });
+                }
+            }
+            _ => {}
         }
 
         // --- drums ----------------------------------------------------
@@ -902,6 +1035,20 @@ impl Composer {
                         vel: if i % spbeat == 0 { 120 } else { 92 },
                         midi: 0,
                         frames: 6,
+                        arp: None,
+                    });
+                }
+            }
+            if arr.shaker {
+                // Sixteenths on the second noise channel, filling in
+                // between the hats without stealing them.
+                for i in (1..steps as usize).step_by(2) {
+                    out.push(NoteEvent {
+                        at: at(i as f32),
+                        inst: Inst::Shaker,
+                        midi: 0,
+                        vel: 58,
+                        frames: 3,
                         arp: None,
                     });
                 }
@@ -1265,10 +1412,58 @@ mod tests {
             assert!(d.vib_depth > 0.0 && d.vib_delay > 0, "{i:?} should wobble");
         }
         // A chord bed or a bass line that slides just sounds broken.
-        for i in [Inst::Organ, Inst::Pad, Inst::Stab, Inst::Bass] {
+        for i in [
+            Inst::Organ,
+            Inst::Pad,
+            Inst::Stab,
+            Inst::Bass,
+            Inst::Arp,
+            Inst::SawBass,
+            Inst::WaveOrgan,
+            Inst::WaveBass,
+            Inst::Bell,
+        ] {
             assert_eq!(inst_def(i).fall, 0.0, "{i:?} must not fall");
             assert_eq!(inst_def(i).vib_depth, 0.0, "{i:?} must not wobble");
         }
+    }
+
+    #[test]
+    fn the_extra_channels_arrive_late_and_leave_during_the_zone() {
+        let ctx = |elapsed: f32, intensity: f32, zone: bool| Context {
+            profile: Profile::VsIntense,
+            intensity,
+            elapsed,
+            zone,
+            ..Default::default()
+        };
+        // Nothing but the foundation at the start of a match.
+        let early = arrange(Profile::VsIntense, &ctx(0.0, 0.1, false));
+        assert!(early.counter.is_none() && early.saw.is_none() && !early.perc);
+        // Everything by the time it has been running a while and the
+        // stack is high.
+        let late = arrange(Profile::VsIntense, &ctx(120.0, 0.9, false));
+        assert!(late.counter.is_some() && late.saw.is_some() && late.pad.is_some());
+        assert!(late.shaker && late.perc && late.lead);
+        // The zone strips it back to a held chord over the bass.
+        let zone = arrange(Profile::VsIntense, &ctx(120.0, 0.9, true));
+        assert!(!zone.lead && !zone.perc && !zone.shaker);
+        assert!(zone.counter.is_none() && zone.saw.is_none());
+        assert!(zone.harmony && zone.pad.is_some());
+    }
+
+    #[test]
+    fn a_full_arrangement_reaches_every_voice() {
+        use std::collections::HashSet;
+        let out = run(Profile::Victory, 0.9, 8);
+        let voices: HashSet<u8> = out.iter().map(|e| e.voice() as u8).collect();
+        assert_eq!(
+            voices.len(),
+            crate::VOICE_COUNT,
+            "only {} of {} voices used: {voices:?}",
+            voices.len(),
+            crate::VOICE_COUNT
+        );
     }
 
     #[test]
@@ -1313,7 +1508,7 @@ mod tests {
                 for e in run(p, i, 24) {
                     // Drums carry no pitch, so only the tonal voices are
                     // checked against the playable range.
-                    if !matches!(e.inst, Inst::Kick | Inst::Snare | Inst::Hat) {
+                    if !e.inst.is_drum() {
                         assert!((21..=108).contains(&e.midi), "{p:?} emitted midi {}", e.midi);
                     }
                     assert!(e.frames >= 2);

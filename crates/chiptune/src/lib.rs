@@ -1,15 +1,19 @@
-//! A dependency-free chiptune engine: a NES-flavoured four-channel
-//! synthesizer ([`synth`]) driven by an algorithmic composer ([`compose`]).
+//! A dependency-free chiptune engine: an eight-voice synthesizer
+//! ([`synth`]) driven by an algorithmic composer ([`compose`]).
 //!
 //! Nothing in here knows about Bevy — the game wires it up in
 //! `src/music.rs`, and `cargo run -p bevytris-chiptune --example render`
 //! renders the exact same code to a WAV file offline, which is how the
 //! sound gets tuned without launching the game.
 //!
-//! The design follows the NES 2A03 discipline on purpose: four fixed
-//! voices, 4-bit volumes, an 11-bit period table, per-frame (60 Hz) macro
-//! envelopes and the console's own nonlinear mixer. Constraint is what
-//! makes it sound like a chiptune rather than like a cheap synth.
+//! The design follows the NES 2A03 discipline on purpose — 4-bit volumes,
+//! an 11-bit period table, per-frame (60 Hz) macro envelopes, the
+//! console's own nonlinear mixer — and then adds what cartridges added:
+//! a third pulse and a sawtooth after the VRC6, a user-defined wavetable
+//! after the Game Boy, and a second noise channel so hats stop being
+//! swallowed by kicks. Constraint is what makes it sound like a chiptune
+//! rather than like a cheap synth; the extra voices widen the arrangement
+//! without loosening any of the rules.
 
 pub mod compose;
 pub mod rng;
@@ -26,7 +30,13 @@ pub const SAMPLES_PER_FRAME: u32 = SAMPLE_RATE / FRAME_RATE;
 /// Sixteenth notes per 4/4 bar — the sequencer's resolution.
 pub const STEPS_PER_BAR: u32 = 16;
 
-/// The four hardware voices, in mix order.
+/// The eight hardware voices, in mix order.
+///
+/// The first four are the Famicom's own channels and go through its
+/// nonlinear mixer. The rest stand in for the expansion chips cartridges
+/// used to add — a third pulse and a sawtooth in the manner of Konami's
+/// VRC6, and a user-defined wavetable in the manner of the Game Boy —
+/// and, like real expansion audio, mix in linearly on top.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Voice {
@@ -34,11 +44,22 @@ pub enum Voice {
     Lead = 0,
     /// Pulse 2 — harmony, chord bed, arpeggios.
     Harmony = 1,
+    /// Pulse 3 — counter-melody, echoes, fast arpeggios.
+    Counter = 2,
+    /// Sawtooth — a buzzier lead or a bass double.
+    Saw = 3,
+    /// 32-step wavetable — pads and bells.
+    Wave = 4,
     /// Triangle — bass (and the body of a kick drum).
-    Bass = 2,
-    /// Noise — percussion.
-    Perc = 3,
+    Bass = 5,
+    /// Noise — kick and snare.
+    Perc = 6,
+    /// Second noise channel — hats and shakers, so they stop being
+    /// swallowed every time the kick lands.
+    Hat = 7,
 }
+
+pub const VOICE_COUNT: usize = 8;
 
 /// Instrument presets. Each one is a set of macro tables (below); the
 /// composer picks by role, never by number.
@@ -56,11 +77,29 @@ pub enum Inst {
     Stab,
     /// Quiet held pad, sits under everything.
     Pad,
+    /// Quiet delayed copy of the melody, on the third pulse.
+    Echo,
+    /// Fast chord arpeggio in sixteenths.
+    Arp,
+    /// Buzzy sawtooth lead.
+    SawLead,
+    /// Sawtooth doubling the bass an octave up, for weight.
+    SawBass,
+    /// Struck wavetable bell — bright odd harmonics, long decay.
+    Bell,
+    /// Soft sine wavetable.
+    Glass,
+    /// Drawbar-ish wavetable pad.
+    WaveOrgan,
+    /// Round wavetable bass for the calm profiles.
+    WaveBass,
     /// Triangle bass (gate only — the triangle has no volume control).
     Bass,
     Kick,
     Snare,
     Hat,
+    /// Sixteenth-note shaker, quieter and higher than the hat.
+    Shaker,
 }
 
 impl Inst {
@@ -69,9 +108,18 @@ impl Inst {
         match self {
             Inst::Pluck | Inst::Sustain | Inst::Soft => Voice::Lead,
             Inst::Organ | Inst::Stab | Inst::Pad => Voice::Harmony,
+            Inst::Echo | Inst::Arp => Voice::Counter,
+            Inst::SawLead | Inst::SawBass => Voice::Saw,
+            Inst::Bell | Inst::Glass | Inst::WaveOrgan | Inst::WaveBass => Voice::Wave,
             Inst::Bass => Voice::Bass,
-            Inst::Kick | Inst::Snare | Inst::Hat => Voice::Perc,
+            Inst::Kick | Inst::Snare => Voice::Perc,
+            Inst::Hat | Inst::Shaker => Voice::Hat,
         }
+    }
+
+    /// True for the unpitched drum instruments.
+    pub fn is_drum(self) -> bool {
+        matches!(self.voice(), Voice::Perc | Voice::Hat)
     }
 }
 
@@ -138,6 +186,8 @@ pub struct InstDef {
     /// Index into [`synth::NOISE_PERIODS`] for the drum instruments.
     pub noise_idx: u8,
     pub noise_short: bool,
+    /// Which 32-step table the wavetable channel plays.
+    pub wave: u8,
 }
 
 const fn m(v: &'static [i8], loop_at: Option<usize>) -> Macro {
@@ -159,6 +209,7 @@ const PLUCK: InstDef = InstDef {
     fall: 0.55,
     noise_idx: 0,
     noise_short: false,
+    wave: 0,
 };
 const SUSTAIN: InstDef = InstDef {
     vol: m(&[11, 14, 14, 13, 13, 12, 12, 12], Some(4)),
@@ -169,6 +220,7 @@ const SUSTAIN: InstDef = InstDef {
     fall: 0.65,
     noise_idx: 0,
     noise_short: false,
+    wave: 0,
 };
 const SOFT: InstDef = InstDef {
     vol: m(&[7, 10, 12, 12, 11, 11, 10, 10, 9], Some(5)),
@@ -179,6 +231,7 @@ const SOFT: InstDef = InstDef {
     fall: 0.34,
     noise_idx: 0,
     noise_short: false,
+    wave: 0,
 };
 const ORGAN: InstDef = InstDef {
     vol: m(&[10, 12, 11, 11, 10, 10], Some(2)),
@@ -191,6 +244,7 @@ const ORGAN: InstDef = InstDef {
     fall: STEADY.3,
     noise_idx: 0,
     noise_short: false,
+    wave: 0,
 };
 const STAB: InstDef = InstDef {
     vol: m(&[15, 13, 10, 8, 6, 4, 3, 2, 1], None),
@@ -201,6 +255,7 @@ const STAB: InstDef = InstDef {
     fall: STEADY.3,
     noise_idx: 0,
     noise_short: false,
+    wave: 0,
 };
 const PAD: InstDef = InstDef {
     vol: m(&[4, 6, 7, 8, 8, 7, 7], Some(4)),
@@ -211,6 +266,7 @@ const PAD: InstDef = InstDef {
     fall: STEADY.3,
     noise_idx: 0,
     noise_short: false,
+    wave: 0,
 };
 const BASS: InstDef = InstDef {
     // The triangle has no volume register: this macro is a pure gate.
@@ -223,6 +279,7 @@ const BASS: InstDef = InstDef {
     fall: STEADY.3,
     noise_idx: 0,
     noise_short: false,
+    wave: 0,
 };
 const KICK: InstDef = InstDef {
     vol: m(&[13, 9, 5, 2, 1], None),
@@ -233,6 +290,7 @@ const KICK: InstDef = InstDef {
     fall: STEADY.3,
     noise_idx: 13,
     noise_short: false,
+    wave: 0,
 };
 const SNARE: InstDef = InstDef {
     vol: m(&[15, 13, 11, 9, 7, 5, 4, 3, 2, 1], None),
@@ -243,6 +301,7 @@ const SNARE: InstDef = InstDef {
     fall: STEADY.3,
     noise_idx: 9,
     noise_short: false,
+    wave: 0,
 };
 const HAT: InstDef = InstDef {
     vol: m(&[9, 5, 3, 1], None),
@@ -253,6 +312,111 @@ const HAT: InstDef = InstDef {
     fall: STEADY.3,
     noise_idx: 2,
     noise_short: false,
+    wave: 0,
+};
+
+// --- expansion voices ------------------------------------------------------
+
+const ECHO: InstDef = InstDef {
+    vol: m(&[7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1], None),
+    // Thin duty so the echo reads as a reflection rather than as a second
+    // melody competing with the lead.
+    duty: 0,
+    vib_delay: 16,
+    vib_depth: 0.12,
+    vib_rate: 5.5,
+    fall: 0.4,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+const ARP: InstDef = InstDef {
+    vol: m(&[10, 8, 6, 5], None),
+    duty: 0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+const SAW_LEAD: InstDef = InstDef {
+    vol: m(&[13, 14, 13, 12, 12, 11, 11, 10], Some(4)),
+    duty: 0,
+    vib_delay: 14,
+    vib_depth: 0.15,
+    vib_rate: 5.8,
+    fall: 0.6,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+const SAW_BASS: InstDef = InstDef {
+    vol: m(&[12, 11, 10, 10, 9, 9], Some(3)),
+    duty: 0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+const BELL: InstDef = InstDef {
+    vol: m(&[15, 13, 11, 10, 9, 8, 7, 6, 5, 4, 4, 3, 2, 2, 1, 1], None),
+    duty: 0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 2,
+};
+const GLASS: InstDef = InstDef {
+    vol: m(&[9, 11, 11, 10, 10, 9, 9], Some(4)),
+    duty: 0,
+    vib_delay: 22,
+    vib_depth: 0.09,
+    vib_rate: 4.5,
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+const WAVE_ORGAN: InstDef = InstDef {
+    vol: m(&[7, 9, 10, 10, 9, 9], Some(3)),
+    duty: 0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 1,
+};
+const WAVE_BASS: InstDef = InstDef {
+    vol: m(&[12, 11, 11, 10, 10], Some(2)),
+    duty: 0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 3,
+};
+const SHAKER: InstDef = InstDef {
+    vol: m(&[6, 3, 1], None),
+    duty: 0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 1,
+    noise_short: false,
+    wave: 0,
 };
 
 pub fn inst_def(i: Inst) -> &'static InstDef {
@@ -263,12 +427,44 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
         Inst::Organ => &ORGAN,
         Inst::Stab => &STAB,
         Inst::Pad => &PAD,
+        Inst::Echo => &ECHO,
+        Inst::Arp => &ARP,
+        Inst::SawLead => &SAW_LEAD,
+        Inst::SawBass => &SAW_BASS,
+        Inst::Bell => &BELL,
+        Inst::Glass => &GLASS,
+        Inst::WaveOrgan => &WAVE_ORGAN,
+        Inst::WaveBass => &WAVE_BASS,
         Inst::Bass => &BASS,
         Inst::Kick => &KICK,
         Inst::Snare => &SNARE,
         Inst::Hat => &HAT,
+        Inst::Shaker => &SHAKER,
     }
 }
+
+/// Every instrument, for tests and for the offline renderer.
+pub const ALL_INSTRUMENTS: [Inst; 19] = [
+    Inst::Pluck,
+    Inst::Sustain,
+    Inst::Soft,
+    Inst::Organ,
+    Inst::Stab,
+    Inst::Pad,
+    Inst::Echo,
+    Inst::Arp,
+    Inst::SawLead,
+    Inst::SawBass,
+    Inst::Bell,
+    Inst::Glass,
+    Inst::WaveOrgan,
+    Inst::WaveBass,
+    Inst::Bass,
+    Inst::Kick,
+    Inst::Snare,
+    Inst::Hat,
+    Inst::Shaker,
+];
 
 #[cfg(test)]
 mod tests {
@@ -296,7 +492,34 @@ mod tests {
     fn instruments_land_on_their_own_channel() {
         assert_eq!(Inst::Pluck.voice(), Voice::Lead);
         assert_eq!(Inst::Stab.voice(), Voice::Harmony);
+        assert_eq!(Inst::Echo.voice(), Voice::Counter);
+        assert_eq!(Inst::SawBass.voice(), Voice::Saw);
+        assert_eq!(Inst::Bell.voice(), Voice::Wave);
         assert_eq!(Inst::Bass.voice(), Voice::Bass);
-        assert_eq!(Inst::Hat.voice(), Voice::Perc);
+        assert_eq!(Inst::Kick.voice(), Voice::Perc);
+        // Hats live on their own noise channel, so a kick no longer eats
+        // them.
+        assert_eq!(Inst::Hat.voice(), Voice::Hat);
+        assert_ne!(Inst::Kick.voice(), Inst::Hat.voice());
+    }
+
+    #[test]
+    fn every_instrument_is_defined_and_listed() {
+        assert_eq!(ALL_INSTRUMENTS.len(), 19);
+        for i in ALL_INSTRUMENTS {
+            let d = inst_def(i);
+            assert!(!d.vol.v.is_empty(), "{i:?} has no volume macro");
+            assert!(d.duty <= 2, "{i:?} has an out-of-range duty");
+            assert!(d.wave < 4, "{i:?} points at a missing wavetable");
+            assert!(d.noise_idx < 16);
+            assert_eq!(i.is_drum(), matches!(i, Inst::Kick | Inst::Snare | Inst::Hat | Inst::Shaker));
+        }
+        // Every voice must have at least one instrument that can reach it.
+        for v in 0..VOICE_COUNT {
+            assert!(
+                ALL_INSTRUMENTS.iter().any(|i| i.voice() as usize == v),
+                "voice {v} is unreachable"
+            );
+        }
     }
 }
