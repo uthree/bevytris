@@ -100,6 +100,8 @@ pub enum Inst {
     Hat,
     /// Sixteenth-note shaker, quieter and higher than the hat.
     Shaker,
+    /// Long ringing noise hit, for the downbeat of the final chorus.
+    Crash,
 }
 
 impl Inst {
@@ -113,7 +115,7 @@ impl Inst {
             Inst::Bell | Inst::Glass | Inst::WaveOrgan | Inst::WaveBass => Voice::Wave,
             Inst::Bass => Voice::Bass,
             Inst::Kick | Inst::Snare => Voice::Perc,
-            Inst::Hat | Inst::Shaker => Voice::Hat,
+            Inst::Hat | Inst::Shaker | Inst::Crash => Voice::Hat,
         }
     }
 
@@ -419,6 +421,21 @@ const SHAKER: InstDef = InstDef {
     wave: 0,
 };
 
+const CRASH: InstDef = InstDef {
+    vol: m(
+        &[15, 15, 14, 13, 12, 11, 10, 9, 9, 8, 7, 7, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1],
+        None,
+    ),
+    duty: 0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 3,
+    noise_short: false,
+    wave: 0,
+};
+
 pub fn inst_def(i: Inst) -> &'static InstDef {
     match i {
         Inst::Pluck => &PLUCK,
@@ -440,11 +457,12 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
         Inst::Snare => &SNARE,
         Inst::Hat => &HAT,
         Inst::Shaker => &SHAKER,
+        Inst::Crash => &CRASH,
     }
 }
 
 /// Every instrument, for tests and for the offline renderer.
-pub const ALL_INSTRUMENTS: [Inst; 19] = [
+pub const ALL_INSTRUMENTS: [Inst; 20] = [
     Inst::Pluck,
     Inst::Sustain,
     Inst::Soft,
@@ -464,6 +482,7 @@ pub const ALL_INSTRUMENTS: [Inst; 19] = [
     Inst::Snare,
     Inst::Hat,
     Inst::Shaker,
+    Inst::Crash,
 ];
 
 #[cfg(test)]
@@ -505,14 +524,20 @@ mod tests {
 
     #[test]
     fn every_instrument_is_defined_and_listed() {
-        assert_eq!(ALL_INSTRUMENTS.len(), 19);
+        assert_eq!(ALL_INSTRUMENTS.len(), 20);
         for i in ALL_INSTRUMENTS {
             let d = inst_def(i);
             assert!(!d.vol.v.is_empty(), "{i:?} has no volume macro");
             assert!(d.duty <= 2, "{i:?} has an out-of-range duty");
             assert!(d.wave < 4, "{i:?} points at a missing wavetable");
             assert!(d.noise_idx < 16);
-            assert_eq!(i.is_drum(), matches!(i, Inst::Kick | Inst::Snare | Inst::Hat | Inst::Shaker));
+            assert_eq!(
+                i.is_drum(),
+                matches!(
+                    i,
+                    Inst::Kick | Inst::Snare | Inst::Hat | Inst::Shaker | Inst::Crash
+                )
+            );
         }
         // Every voice must have at least one instrument that can reach it.
         for v in 0..VOICE_COUNT {

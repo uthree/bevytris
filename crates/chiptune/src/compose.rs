@@ -27,6 +27,14 @@ use crate::{FRAME_RATE, Inst, NoteEvent, SAMPLE_RATE};
 
 pub const BARS_PER_SECTION: u32 = 8;
 
+/// How far the final chorus lifts the key. A whole tone is the classic
+/// gear change — a semitone is subtler than the moment deserves, and
+/// anything larger stops sounding like the same song.
+const LIFT_STEP: i32 = 2;
+/// Long sessions run through the form several times, so the lift is
+/// capped rather than climbing out of the instruments' range.
+const LIFT_CAP: i32 = 6;
+
 /// Time signature, rolled once per piece. Three and six both fit twelve
 /// sixteenths in a bar; what separates them is where the accents fall,
 /// which is why they are distinct variants rather than one "12 steps".
@@ -692,6 +700,11 @@ pub struct Composer {
     bar: u32,
     next_bar_at: u64,
     transpose: i32,
+    /// Semitones the final chorus has lifted the key by so far.
+    lift: i32,
+    /// Set on the bar where the lift lands, so the caller can re-announce
+    /// the key.
+    modulated: bool,
 }
 
 impl Composer {
@@ -710,13 +723,20 @@ impl Composer {
             bar: 0,
             next_bar_at: 0,
             transpose: 0,
+            lift: 0,
+            modulated: false,
         }
+    }
+
+    /// True once, on the bar where the final chorus changes key.
+    pub fn take_modulated(&mut self) -> bool {
+        std::mem::take(&mut self.modulated)
     }
 
     pub fn info(&self) -> Info {
         Info {
             seed: self.seed,
-            tonic: self.root + self.transpose,
+            tonic: self.root + self.transpose + self.lift,
             mode: self.mode,
             meter: self.meter,
             bpm: self.bpm,
@@ -752,6 +772,8 @@ impl Composer {
         );
         self.mode = mode_target(profile, intensity);
         self.bar = 0;
+        // A new song starts back in its own key.
+        self.lift = 0;
     }
 
     /// Override the meter that [`Composer::set_profile`] rolled, and
@@ -813,16 +835,41 @@ impl Composer {
         // Tempo and meter are fixed for the whole piece — see tempo_range.
         let meter = self.meter;
         let steps = meter.steps();
-        let arr = arrange(self.profile, ctx);
         let spb = samples_per_step(self.bpm);
         let fps = frames_per_step(self.bpm);
         let bar_at = self.next_bar_at;
         let start = out.len();
 
-        let block = (self.bar / BARS_PER_SECTION) as usize % self.material.form.len();
+        let blocks = self.material.form.len();
+        let block = (self.bar / BARS_PER_SECTION) as usize % blocks;
         let sec_idx = self.material.form[block];
         let bar_in = (self.bar % BARS_PER_SECTION) as usize;
         let last_bar = bar_in == BARS_PER_SECTION as usize - 1;
+
+        // The last block of the form is the final chorus: the key steps up
+        // and the arrangement goes all in. Menus and the short fanfare sit
+        // this out — a title screen does not want a key change.
+        let big_finish = matches!(self.profile, Profile::SoloCalm | Profile::VsIntense);
+        let final_block = big_finish && block == blocks - 1;
+        // The bar immediately before it, where the run-up happens.
+        let run_up = big_finish && block == blocks - 2 && last_bar;
+        if final_block && bar_in == 0 && self.lift < LIFT_CAP {
+            self.lift = (self.lift + LIFT_STEP).min(LIFT_CAP);
+            self.modulated = true;
+        }
+
+        let mut arr = arrange(self.profile, ctx);
+        if final_block && !ctx.zone {
+            // Everything at once, whatever the layer schedule had planned.
+            arr.lead = true;
+            arr.harmony = true;
+            arr.perc = true;
+            arr.counter = Some(Counter::Arp);
+            arr.saw = Some(SawRole::BassDouble);
+            arr.pad = arr.pad.or(Some(Inst::Bell));
+            arr.shaker = true;
+            arr.max_prio = arr.max_prio.max(1);
+        }
         let (chord, hat_rot, kick_rot, melody) = {
             let sec = &self.material.sections[sec_idx];
             (
@@ -833,7 +880,7 @@ impl Composer {
             )
         };
 
-        let tonic = self.root + ctx.transpose;
+        let tonic = self.root + ctx.transpose + self.lift;
         let mode = self.mode;
         let at = |step: f32| -> u64 {
             let swung = if meter.swings() && (step as i32) % 2 == 1 {
@@ -1053,7 +1100,9 @@ impl Composer {
                     });
                 }
             }
-            if arr.snare {
+            // The run-up bar's roll replaces the backbeat rather than
+            // fighting through it.
+            if arr.snare && !run_up {
                 for &step in meter.snare_steps() {
                     out.push(NoteEvent {
                         at: at(step as f32),
@@ -1065,7 +1114,7 @@ impl Composer {
                     });
                 }
             }
-            if last_bar {
+            if last_bar && !run_up {
                 for k in 0..3u8 {
                     out.push(NoteEvent {
                         at: at((steps as u8 - 3 + k) as f32),
@@ -1077,6 +1126,47 @@ impl Composer {
                     });
                 }
             }
+        }
+
+        // --- into the final chorus -------------------------------------
+        if run_up && !ctx.zone {
+            // A full-bar snare roll and an ascending run, both crescendo,
+            // both still in the old key. Landing the new key cold on the
+            // downbeat is the whole trick.
+            let n = (steps / 2) as i32;
+            for k in 0..n {
+                let step = steps as i32 - n + k;
+                let grow = k as f32 / n as f32;
+                out.push(NoteEvent {
+                    at: at(step as f32),
+                    inst: Inst::Snare,
+                    midi: 0,
+                    vel: (72.0 + 50.0 * grow) as u8,
+                    frames: 3,
+                    arp: None,
+                });
+                out.push(NoteEvent {
+                    at: at(step as f32),
+                    inst: Inst::Arp,
+                    // Climb the scale to just under the octave, so the
+                    // modulation resolves it.
+                    midi: clamp_midi(tonic + 12 + mode.pitch(7 - n + k)),
+                    vel: (70.0 + 48.0 * grow) as u8,
+                    frames: frames(1),
+                    arp: None,
+                });
+            }
+        }
+        if final_block && bar_in == 0 && !ctx.zone {
+            // The arrival.
+            out.push(NoteEvent {
+                at: at(0.0),
+                inst: Inst::Crash,
+                midi: 0,
+                vel: 127,
+                frames: 26,
+                arp: None,
+            });
         }
 
         out[start..].sort_by_key(|e| e.at);
@@ -1450,6 +1540,142 @@ mod tests {
         assert!(!zone.lead && !zone.perc && !zone.shaker);
         assert!(zone.counter.is_none() && zone.saw.is_none());
         assert!(zone.harmony && zone.pad.is_some());
+    }
+
+    /// The form's last block is the final chorus: key up a whole tone,
+    /// everything in, and a run-up into it.
+    #[test]
+    fn the_final_chorus_changes_key_and_goes_all_in() {
+        let mut c = Composer::new(0x5A5A);
+        c.set_profile(Profile::VsIntense, 0.4);
+        let ctx = Context {
+            profile: Profile::VsIntense,
+            intensity: 0.4,
+            elapsed: 600.0,
+            ..Default::default()
+        };
+        let blocks = c.material.form.len() as u32;
+        let bars_per_pass = blocks * BARS_PER_SECTION;
+
+        // Everything up to the last block stays in the home key.
+        let mut out = Vec::new();
+        for _ in 0..bars_per_pass - BARS_PER_SECTION {
+            c.plan_bar(&ctx, &mut out);
+        }
+        assert_eq!(c.lift, 0, "the key moved before the final chorus");
+        assert!(!c.take_modulated());
+        let home = c.info().tonic;
+
+        let mark = out.len();
+        c.plan_bar(&ctx, &mut out);
+        assert_eq!(c.lift, LIFT_STEP, "the final chorus did not modulate");
+        assert!(c.take_modulated(), "the modulation was not reported");
+        assert!(!c.take_modulated(), "the flag must only fire once");
+        assert_eq!(c.info().tonic, home + LIFT_STEP);
+
+        // The downbeat of the final chorus carries the crash.
+        let bar = &out[mark..];
+        assert!(
+            bar.iter().any(|e| e.inst == Inst::Crash),
+            "no crash on the downbeat of the final chorus"
+        );
+        // ...and every voice is playing.
+        let voices: std::collections::HashSet<u8> =
+            bar.iter().map(|e| e.voice() as u8).collect();
+        assert_eq!(voices.len(), crate::VOICE_COUNT, "not all in: {voices:?}");
+    }
+
+    #[test]
+    fn the_run_up_crescendos_in_the_old_key() {
+        let mut c = Composer::new(0x5A5A);
+        c.set_profile(Profile::SoloCalm, 0.5);
+        let ctx = Context {
+            profile: Profile::SoloCalm,
+            intensity: 0.5,
+            elapsed: 600.0,
+            ..Default::default()
+        };
+        let blocks = c.material.form.len() as u32;
+        let mut out = Vec::new();
+        // Stop one bar short of the final block.
+        for _ in 0..(blocks - 1) * BARS_PER_SECTION - 1 {
+            c.plan_bar(&ctx, &mut out);
+        }
+        let before = c.info().tonic;
+        let mark = out.len();
+        c.plan_bar(&ctx, &mut out);
+        let bar = &out[mark..];
+
+        assert_eq!(c.info().tonic, before, "the run-up must stay in the old key");
+        let mut snares: Vec<u8> = bar
+            .iter()
+            .filter(|e| e.inst == Inst::Snare)
+            .map(|e| e.vel)
+            .collect();
+        assert!(snares.len() >= 6, "the roll is only {} hits", snares.len());
+        let first = snares[0];
+        snares.sort_unstable();
+        assert_eq!(snares[0], first, "the roll does not start at its quietest");
+        assert!(
+            *snares.last().unwrap() > first + 30,
+            "the roll does not crescendo"
+        );
+        // An ascending run on the counter channel.
+        let run: Vec<u8> = bar
+            .iter()
+            .filter(|e| e.inst == Inst::Arp)
+            .map(|e| e.midi)
+            .collect();
+        assert!(run.len() >= 6);
+        assert!(run.windows(2).all(|w| w[1] >= w[0]), "the run is not rising");
+    }
+
+    #[test]
+    fn the_lift_is_capped_and_never_falls() {
+        let mut c = Composer::new(7);
+        c.set_profile(Profile::VsIntense, 0.5);
+        let ctx = Context {
+            profile: Profile::VsIntense,
+            intensity: 0.5,
+            elapsed: 600.0,
+            ..Default::default()
+        };
+        let bars_per_pass = c.material.form.len() as u32 * BARS_PER_SECTION;
+        let mut out = Vec::new();
+        let mut last = 0;
+        // Ten passes: far longer than any real match.
+        for _ in 0..bars_per_pass * 10 {
+            c.plan_bar(&ctx, &mut out);
+            assert!(c.lift >= last, "the key dropped");
+            assert!(c.lift <= LIFT_CAP, "the key ran away to {}", c.lift);
+            last = c.lift;
+        }
+        assert_eq!(last, LIFT_CAP);
+        // Notes must still be playable after the lift.
+        for e in &out {
+            if !e.inst.is_drum() {
+                assert!((21..=108).contains(&e.midi));
+            }
+        }
+    }
+
+    #[test]
+    fn menus_never_get_a_final_chorus() {
+        for p in [Profile::Ambient, Profile::Victory] {
+            let mut c = Composer::new(3);
+            c.set_profile(p, 0.3);
+            let ctx = Context {
+                profile: p,
+                elapsed: 600.0,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            for _ in 0..c.material.form.len() as u32 * BARS_PER_SECTION * 3 {
+                c.plan_bar(&ctx, &mut out);
+            }
+            assert_eq!(c.lift, 0, "{p:?} modulated");
+            assert!(!out.iter().any(|e| e.inst == Inst::Crash));
+        }
     }
 
     #[test]

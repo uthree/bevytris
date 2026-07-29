@@ -449,6 +449,9 @@ fn plan_music(
         let pc = (info.tonic + info.mode.pitch(d)).rem_euclid(12) as usize;
         feed.scale[pc] = true;
     }
+    // The final chorus lifted the key: say so, since the toast names it.
+    let modulated = composer.take_modulated();
+
     for ev in scratch.iter() {
         // A closed channel only happens while the app is shutting down.
         let _ = tx.send(Cmd {
@@ -466,6 +469,10 @@ fn plan_music(
     // Keep a few seconds of history for the trailing half of the roll.
     let cutoff = pos.saturating_sub(SAMPLE_RATE as u64 * 4);
     feed.notes.retain(|n| n.end >= cutoff);
+
+    if modulated {
+        engine.announce = true;
+    }
 }
 
 /// Name the generated track in the corner, exactly where the old
