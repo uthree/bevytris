@@ -19,6 +19,7 @@ use crate::session::{
     format_race_time,
 };
 use crate::state::{AppState, GameMode, PlayState};
+use bevytris_chiptune::Inst;
 use bevytris_chiptune::compose::{Kit, Meter, Profile};
 use rand::Rng as _;
 
@@ -841,7 +842,18 @@ fn setup_custom(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 struct JukeboxRow(usize);
 
-const JUKEBOX_ROWS: usize = 7;
+const JUKEBOX_ROWS: usize = 8;
+
+/// The melody instruments the LEAD row cycles through, plus AUTO.
+const JUKEBOX_LEADS: [Inst; 7] = [
+    Inst::Soft,
+    Inst::Pluck,
+    Inst::Sustain,
+    Inst::Piano,
+    Inst::Guitar,
+    Inst::Marimba,
+    Inst::Brass,
+];
 
 #[derive(Resource, Default)]
 struct JukeboxCursor(usize);
@@ -1019,7 +1031,8 @@ fn jukebox_input(
                 }
             }
         }
-        5 => jukebox.intensity = (jukebox.intensity + 0.1 * step as f32).clamp(0.0, 1.0),
+        5 => jukebox.lead = cycle_option(jukebox.lead, &JUKEBOX_LEADS, step),
+        6 => jukebox.intensity = (jukebox.intensity + 0.1 * step as f32).clamp(0.0, 1.0),
         _ => jukebox.zone = !jukebox.zone,
     }
 }
@@ -1080,7 +1093,13 @@ fn refresh_jukebox(
                     .smooth
                     .map_or(auto.to_string(), |v| format!("{:.0}%", v * 100.0)),
             ),
-            5 => (s.jb_intensity, format!("{:.0}%", jukebox.intensity * 100.0)),
+            5 => (
+                s.jb_lead,
+                jukebox.lead.map_or(auto.to_string(), |i| {
+                    bevytris_chiptune::compose::lead_name(i).to_uppercase()
+                }),
+            ),
+            6 => (s.jb_intensity, format!("{:.0}%", jukebox.intensity * 100.0)),
             _ => (
                 s.jb_zone,
                 if jukebox.zone { "ON" } else { "OFF" }.to_string(),
@@ -1134,7 +1153,7 @@ mod jukebox_tests {
         // The cursor wraps over exactly the rows the screen spawns, and
         // the extra row index is the now-playing line rather than a
         // seventh setting.
-        assert_eq!(JUKEBOX_ROWS, 7);
+        assert_eq!(JUKEBOX_ROWS, 8);
         let s = crate::i18n::EN;
         for label in [
             s.jb_seed,
@@ -1142,10 +1161,29 @@ mod jukebox_tests {
             s.jb_meter,
             s.jb_kit,
             s.jb_smooth,
+            s.jb_lead,
             s.jb_intensity,
             s.jb_zone,
         ] {
             assert!(!label.is_empty());
+        }
+    }
+
+    /// The LEAD row offers every melody instrument the engine has, so a
+    /// new one cannot be added and then be unreachable for auditioning.
+    #[test]
+    fn the_lead_row_offers_every_melody_instrument() {
+        use bevytris_chiptune::{ALL_INSTRUMENTS, Voice};
+        for inst in ALL_INSTRUMENTS {
+            if inst.voice() == Voice::Lead {
+                assert!(
+                    JUKEBOX_LEADS.contains(&inst),
+                    "{inst:?} cannot be picked in the listening room"
+                );
+            }
+        }
+        for inst in JUKEBOX_LEADS {
+            assert_eq!(inst.voice(), Voice::Lead);
         }
     }
 

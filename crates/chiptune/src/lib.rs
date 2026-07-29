@@ -90,6 +90,16 @@ pub enum Inst {
     Sustain,
     /// Mellow 50%-duty lead for the calm profile.
     Soft,
+    /// Struck string: hammer strike, no sustain, darkening as it decays.
+    Piano,
+    /// Plucked string: a pick that slides into the note, then finger
+    /// vibrato on anything held.
+    Guitar,
+    /// Wooden mallet — very short, hollow, no tail at all.
+    Marimba,
+    /// Blown lead: the one here that swells into the note rather than
+    /// starting at full volume.
+    Brass,
     /// Held 50%-duty chord bed.
     Organ,
     /// Percussive 12.5%-duty chord stab.
@@ -139,7 +149,13 @@ impl Inst {
     /// Which hardware channel this instrument must be played on.
     pub fn voice(self) -> Voice {
         match self {
-            Inst::Pluck | Inst::Sustain | Inst::Soft => Voice::Lead,
+            Inst::Pluck
+            | Inst::Sustain
+            | Inst::Soft
+            | Inst::Piano
+            | Inst::Guitar
+            | Inst::Marimba
+            | Inst::Brass => Voice::Lead,
             Inst::Organ | Inst::Stab | Inst::Pad => Voice::Harmony,
             Inst::Echo | Inst::Arp => Voice::Counter,
             Inst::SawLead | Inst::SawBass => Voice::Saw,
@@ -242,6 +258,20 @@ pub struct InstDef {
     pub vol: Macro,
     /// Pulse duty index: 0 = 12.5%, 1 = 25%, 2 = 50%.
     pub duty: u8,
+    /// Per-frame duty index, if the timbre changes as the note decays.
+    /// The last entry holds for the rest of the note; empty means `duty`
+    /// applies throughout.
+    ///
+    /// This is how a pulse channel imitates an instrument that darkens
+    /// as it rings: a narrow pulse is harmonically rich, a 50% pulse has
+    /// only odd harmonics and sounds hollow, so walking 0 -> 2 over the
+    /// decay is a struck string losing its brightness.
+    pub duty_seq: &'static [u8],
+    /// Semitone offsets for the first frames of the note, then zero.
+    /// A plucked or struck string is momentarily off-pitch before it
+    /// settles; this is that, and it is most of what separates a pick
+    /// or a hammer from a note that simply switches on.
+    pub attack: &'static [f32],
     /// Frames before vibrato starts; 0 depth disables it. The delay is
     /// what makes vibrato a property of *long* notes without the composer
     /// having to pick a different instrument for them.
@@ -269,6 +299,8 @@ const STEADY: (u16, f32, f32, f32) = (0, 0.0, 0.0, 0.0);
 const PLUCK: InstDef = InstDef {
     vol: m(&[15, 15, 14, 12, 11, 10, 10, 9, 9, 8, 8, 7], Some(8)),
     duty: 1,
+    duty_seq: &[],
+    attack: &[],
     // Short notes finish before the delay expires, so only held ones
     // wobble — one instrument covers both jobs.
     vib_delay: 13,
@@ -282,6 +314,8 @@ const PLUCK: InstDef = InstDef {
 const SUSTAIN: InstDef = InstDef {
     vol: m(&[11, 14, 14, 13, 13, 12, 12, 12], Some(4)),
     duty: 1,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: 12,
     vib_depth: 0.17,
     vib_rate: 6.0,
@@ -293,6 +327,8 @@ const SUSTAIN: InstDef = InstDef {
 const SOFT: InstDef = InstDef {
     vol: m(&[7, 10, 12, 12, 11, 11, 10, 10, 9], Some(5)),
     duty: 2,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: 18,
     vib_depth: 0.11,
     vib_rate: 5.0,
@@ -301,9 +337,84 @@ const SOFT: InstDef = InstDef {
     noise_short: false,
     wave: 0,
 };
+/// A hammer strike: full volume at once, then a decay that never levels
+/// off, so the note dies on its own rather than being cut. The duty walk
+/// 0 -> 2 takes the harmonics out as it fades, and the pitch settles down
+/// onto the note the way a struck string does.
+const PIANO: InstDef = InstDef {
+    vol: m(
+        &[
+            15, 15, 14, 13, 12, 11, 11, 10, 9, 9, 8, 8, 7, 7, 6, 6, 5, 5, 5, 4, 4, 4, 3, 3, 3, 2,
+            2, 2, 1, 1, 1,
+        ],
+        None,
+    ),
+    duty: 0,
+    duty_seq: &[0, 0, 0, 1, 1, 1, 1, 1, 2],
+    attack: &[0.4, 0.16, 0.05],
+    // A piano has no vibrato and does not bend off the end of a note.
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+/// A pick that lands slightly flat and slides up into the note, a decay
+/// to a held body, and finger vibrato once the note has been sitting
+/// there long enough to deserve it.
+const GUITAR: InstDef = InstDef {
+    vol: m(
+        &[15, 15, 14, 13, 12, 11, 11, 10, 10, 10, 9, 9, 9, 8],
+        Some(9),
+    ),
+    duty: 1,
+    duty_seq: &[1, 1, 1, 1, 2],
+    attack: &[-0.7, -0.32, -0.12, -0.04],
+    vib_delay: 16,
+    vib_depth: 0.22,
+    vib_rate: 5.5,
+    fall: 0.4,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+/// Wood, not string: a very short 50% blip with nothing after it.
+const MARIMBA: InstDef = InstDef {
+    vol: m(&[15, 14, 11, 8, 6, 4, 3, 2, 1], None),
+    duty: 2,
+    duty_seq: &[1, 2],
+    attack: &[0.25, 0.08],
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+/// The one lead that swells. Everything else here starts at full volume,
+/// which is what makes them all read as struck or plucked; a ramp in is
+/// the cheapest way to sound blown instead.
+const BRASS: InstDef = InstDef {
+    vol: m(&[4, 7, 10, 12, 13, 14, 14, 13, 13, 13, 12, 12], Some(6)),
+    duty: 0,
+    duty_seq: &[0, 0, 1, 1, 1],
+    attack: &[],
+    vib_delay: 20,
+    vib_depth: 0.15,
+    vib_rate: 5.8,
+    fall: 0.5,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
 const ORGAN: InstDef = InstDef {
     vol: m(&[10, 12, 11, 11, 10, 10], Some(2)),
     duty: 2,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -317,6 +428,8 @@ const ORGAN: InstDef = InstDef {
 const STAB: InstDef = InstDef {
     vol: m(&[15, 13, 10, 8, 6, 4, 3, 2, 1], None),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -328,6 +441,8 @@ const STAB: InstDef = InstDef {
 const PAD: InstDef = InstDef {
     vol: m(&[4, 6, 7, 8, 8, 7, 7], Some(4)),
     duty: 2,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -340,6 +455,8 @@ const BASS: InstDef = InstDef {
     // The triangle has no volume register: this macro is a pure gate.
     vol: m(&[15], Some(0)),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -352,6 +469,8 @@ const BASS: InstDef = InstDef {
 const KICK: InstDef = InstDef {
     vol: m(&[13, 9, 5, 2, 1], None),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -363,6 +482,8 @@ const KICK: InstDef = InstDef {
 const SNARE: InstDef = InstDef {
     vol: m(&[15, 13, 11, 9, 7, 5, 4, 3, 2, 1], None),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -374,6 +495,8 @@ const SNARE: InstDef = InstDef {
 const HAT: InstDef = InstDef {
     vol: m(&[9, 5, 3, 1], None),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -390,6 +513,8 @@ const ECHO: InstDef = InstDef {
     // Thin duty so the echo reads as a reflection rather than as a second
     // melody competing with the lead.
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: 16,
     vib_depth: 0.12,
     vib_rate: 5.5,
@@ -401,6 +526,8 @@ const ECHO: InstDef = InstDef {
 const ARP: InstDef = InstDef {
     vol: m(&[10, 8, 6, 5], None),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -412,6 +539,8 @@ const ARP: InstDef = InstDef {
 const SAW_LEAD: InstDef = InstDef {
     vol: m(&[13, 14, 13, 12, 12, 11, 11, 10], Some(4)),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: 14,
     vib_depth: 0.15,
     vib_rate: 5.8,
@@ -423,6 +552,8 @@ const SAW_LEAD: InstDef = InstDef {
 const SAW_BASS: InstDef = InstDef {
     vol: m(&[12, 11, 10, 10, 9, 9], Some(3)),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -434,6 +565,8 @@ const SAW_BASS: InstDef = InstDef {
 const BELL: InstDef = InstDef {
     vol: m(&[15, 13, 11, 10, 9, 8, 7, 6, 5, 4, 4, 3, 2, 2, 1, 1], None),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -445,6 +578,8 @@ const BELL: InstDef = InstDef {
 const GLASS: InstDef = InstDef {
     vol: m(&[9, 11, 11, 10, 10, 9, 9], Some(4)),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: 22,
     vib_depth: 0.09,
     vib_rate: 4.5,
@@ -456,6 +591,8 @@ const GLASS: InstDef = InstDef {
 const WAVE_ORGAN: InstDef = InstDef {
     vol: m(&[7, 9, 10, 10, 9, 9], Some(3)),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -467,6 +604,8 @@ const WAVE_ORGAN: InstDef = InstDef {
 const WAVE_BASS: InstDef = InstDef {
     vol: m(&[12, 11, 11, 10, 10], Some(2)),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -478,6 +617,8 @@ const WAVE_BASS: InstDef = InstDef {
 const SHAKER: InstDef = InstDef {
     vol: m(&[6, 3, 1], None),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -493,6 +634,8 @@ const SHAKER: InstDef = InstDef {
 const SAMPLED: InstDef = InstDef {
     vol: m(&[15], Some(0)),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -510,6 +653,8 @@ const CRASH: InstDef = InstDef {
         None,
     ),
     duty: 0,
+    duty_seq: &[],
+    attack: &[],
     vib_delay: STEADY.0,
     vib_depth: STEADY.1,
     vib_rate: STEADY.2,
@@ -524,6 +669,10 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
         Inst::Pluck => &PLUCK,
         Inst::Sustain => &SUSTAIN,
         Inst::Soft => &SOFT,
+        Inst::Piano => &PIANO,
+        Inst::Guitar => &GUITAR,
+        Inst::Marimba => &MARIMBA,
+        Inst::Brass => &BRASS,
         Inst::Organ => &ORGAN,
         Inst::Stab => &STAB,
         Inst::Pad => &PAD,
@@ -548,10 +697,14 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
 }
 
 /// Every instrument, for tests and for the offline renderer.
-pub const ALL_INSTRUMENTS: [Inst; 26] = [
+pub const ALL_INSTRUMENTS: [Inst; 30] = [
     Inst::Pluck,
     Inst::Sustain,
     Inst::Soft,
+    Inst::Piano,
+    Inst::Guitar,
+    Inst::Marimba,
+    Inst::Brass,
     Inst::Organ,
     Inst::Stab,
     Inst::Pad,
@@ -630,11 +783,29 @@ mod tests {
 
     #[test]
     fn every_instrument_is_defined_and_listed() {
-        assert_eq!(ALL_INSTRUMENTS.len(), 26);
+        assert_eq!(ALL_INSTRUMENTS.len(), 30);
         for i in ALL_INSTRUMENTS {
             let d = inst_def(i);
             assert!(!d.vol.v.is_empty(), "{i:?} has no volume macro");
             assert!(d.duty <= 2, "{i:?} has an out-of-range duty");
+            for step in d.duty_seq {
+                assert!(*step <= 2, "{i:?} has an out-of-range duty step {step}");
+            }
+            // A duty sequence or a pitch attack on anything but a pulse
+            // channel is silently ignored, which is the kind of thing
+            // that gets written once and puzzled over later.
+            if !d.duty_seq.is_empty() || !d.attack.is_empty() {
+                assert!(
+                    matches!(i.voice(), Voice::Lead | Voice::Harmony | Voice::Counter),
+                    "{i:?} is not a pulse channel, so its duty/attack macros do nothing"
+                );
+            }
+            for off in d.attack {
+                assert!(
+                    off.abs() <= 3.0,
+                    "{i:?} starts {off} semitones off pitch, which reads as a wrong note"
+                );
+            }
             assert!(d.wave < 4, "{i:?} points at a missing wavetable");
             assert!(d.noise_idx < 16);
             assert!(i.sample() < 6, "{i:?} points at a missing sample");

@@ -60,6 +60,7 @@ pub struct Director {
     pin_meter: Option<crate::compose::Meter>,
     pin_kit: Option<crate::compose::Kit>,
     pin_smooth: Option<f32>,
+    pin_lead: Option<crate::Inst>,
     ctx: Context,
     /// The bar currently being played out, in time order.
     bar: Vec<NoteEvent>,
@@ -80,6 +81,7 @@ impl Director {
             pin_meter: None,
             pin_kit: None,
             pin_smooth: None,
+            pin_lead: None,
             ctx: Context::default(),
             bar: Vec::with_capacity(256),
             cursor: 0,
@@ -170,6 +172,15 @@ impl Director {
         }
     }
 
+    /// Hold the melody instrument across re-rolls; `None` lets each
+    /// piece roll its own from the profile palette.
+    pub fn pin_lead(&mut self, lead: Option<crate::Inst>) {
+        if lead != self.pin_lead {
+            self.pin_lead = lead;
+            self.apply_pins();
+        }
+    }
+
     fn apply_pins(&mut self) {
         if let Some(m) = self.pin_meter {
             self.composer.force_meter(m);
@@ -181,6 +192,7 @@ impl Director {
         // here (go back to the profile default), unlike the others where
         // it just means "leave what the roll picked".
         self.composer.force_smoothness(self.pin_smooth);
+        self.composer.force_lead(self.pin_lead);
     }
 
     /// Restart the piece in place, after something that changed its

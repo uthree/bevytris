@@ -62,10 +62,13 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
   a spiral galaxy, an audio-reactive visualizer, plants, a Sierpinski
   carpet, a pixel sunset, Conway's Life, and a live piano roll of the
   music) that all pulse with the game's own soundscape
-- **Generated music** — there are no music files. A four-voice NES-style
+- **Generated music** — there are no music files. A nine-voice NES-style
   synthesizer and an algorithmic composer write the BGM as you play: calm
-  and bright in solo modes, fast and minor in versus, with the tempo
-  stepping up as the stack climbs. See [`crates/chiptune`](crates/chiptune)
+  and bright in solo modes, fast and minor in versus, slow and open in
+  zen, and thickening as the stack climbs. Every piece also rolls the
+  instrument that sings the melody — pluck, soft, sustain, piano, guitar,
+  marimba or brass — so two pieces on the same preset do not arrive with
+  the same voice on top. See [`crates/chiptune`](crates/chiptune)
 - **Audio** — CC0 8-bit sound effects by Juhani Junkala; combo chimes climb
   a pentatonic scale as the combo counter grows
 
@@ -138,6 +141,9 @@ Settings are stored as RON at the platform config directory, e.g.
   `cargo run -p bevytris-chiptune --release --example render --
   --profile vs --seed 42 --secs 60 --ramp` writes a WAV without launching
   the game, running exactly the code the game runs.
+  `--lead piano|guitar|marimba|brass|...` and `--smooth 0..1` audition the
+  melody instrument and how stepwise the line is; both are also rows in
+  the in-game MUSIC room.
 
 ### Reproducing a piece of music
 

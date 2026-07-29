@@ -32,6 +32,7 @@ use bevy::audio::{AddAudioSource, ChannelCount, Decodable, SampleRate, Source, V
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 
+use bevytris_chiptune::Inst;
 use bevytris_chiptune::compose::{Context, Info, Kit, Meter, Profile};
 use bevytris_chiptune::director::Director;
 use bevytris_chiptune::{NoteEvent, SAMPLE_RATE, SAMPLES_PER_FRAME};
@@ -59,6 +60,8 @@ pub struct Wanted {
     /// How stepwise the melodies are, 0..=1; `None` uses the profile's
     /// own default.
     pub smooth: Option<f32>,
+    /// Melody instrument override; `None` lets each piece roll its own.
+    pub lead: Option<Inst>,
 }
 
 pub struct Link {
@@ -146,6 +149,7 @@ impl Iterator for ChiptuneDecoder {
                 director.pin_meter(want.meter);
                 director.pin_kit(want.kit);
                 director.pin_smoothness(want.smooth);
+                director.pin_lead(want.lead);
                 director.set_context(want.ctx);
             }
             if let Ok(mut out) = self.link.out.try_lock() {
@@ -273,6 +277,8 @@ pub struct Jukebox {
     pub kit: Option<Kit>,
     /// How stepwise the melodies are, 0..=1; `None` = the profile default.
     pub smooth: Option<f32>,
+    /// Melody instrument; `None` = whatever the piece rolled.
+    pub lead: Option<Inst>,
     /// Stands in for the danger level, which there is no board to supply.
     pub intensity: f32,
     pub zone: bool,
@@ -286,6 +292,7 @@ impl Jukebox {
             meter: None,
             kit: None,
             smooth: None,
+            lead: None,
             intensity: 0.45,
             zone: false,
         }
@@ -318,6 +325,7 @@ impl Plugin for MusicPlugin {
             meter: None,
             kit: None,
             smooth: None,
+            lead: None,
         }));
         app.insert_resource(Jukebox::new(seed));
         // Built here rather than in a Startup system: bevy_state runs the
@@ -507,11 +515,13 @@ fn drive_music(
             want.meter = jukebox.meter;
             want.kit = jukebox.kit;
             want.smooth = jukebox.smooth;
+            want.lead = jukebox.lead;
         } else {
             want.seed = engine.seed;
             want.meter = None;
             want.kit = None;
             want.smooth = None;
+            want.lead = None;
         }
     }
 
@@ -654,6 +664,7 @@ mod tests {
                 meter: None,
                 kit: None,
                 smooth: None,
+                lead: None,
             })),
         }
     }
@@ -865,6 +876,7 @@ mod tests {
                     meter: None,
                     kit: None,
                     smooth: None,
+                    lead: None,
                 })),
             };
             let mut d = s.decoder();

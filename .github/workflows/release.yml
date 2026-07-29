@@ -118,6 +118,9 @@ jobs:
               VSync & fullscreen (F11)
             - English / Japanese UI, auto-detected from the OS (switchable in settings)
             - HDR bloom, particles, shockwaves, board inertia, Misaki pixel font
+            - Seven melody instruments — pluck, soft, sustain, piano, guitar, marimba,
+              brass — one rolled per piece, so two pieces on a preset do not arrive
+              with the same voice on the tune
             - No music files. A nine-voice NES-style synthesizer and an algorithmic
               composer write the BGM live: bright and unhurried in solo, fast and minor
               in versus, with the mode darkening and the drums thickening as the stack

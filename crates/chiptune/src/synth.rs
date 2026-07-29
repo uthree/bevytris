@@ -428,6 +428,17 @@ impl VoiceState {
         v as f32 * self.vel
     }
 
+    /// Duty index for this frame. Instruments with a duty sequence walk
+    /// it once and then hold its last entry for the rest of the note.
+    fn duty_now(&self) -> u8 {
+        let seq = self.inst.duty_seq;
+        if seq.is_empty() {
+            return self.inst.duty;
+        }
+        let i = (self.frames_played.saturating_sub(1) as usize).min(seq.len() - 1);
+        seq[i]
+    }
+
     /// Current pitch in MIDI numbers, including the arpeggio macro and
     /// vibrato.
     fn midi_now(&self) -> f32 {
@@ -441,6 +452,14 @@ impl VoiceState {
             m += (self.glide_from - self.base_midi) * k;
         }
         let d = self.inst;
+        // The pick or the hammer: a few frames off-pitch at the very
+        // start, before anything else gets a say.
+        if !d.attack.is_empty() {
+            let i = self.frames_played.saturating_sub(1) as usize;
+            if let Some(off) = d.attack.get(i) {
+                m += off;
+            }
+        }
         if d.vib_depth > 0.0 && self.frames_played > d.vib_delay {
             let t = (self.frames_played - d.vib_delay) as f32 / FRAME_RATE as f32;
             m += d.vib_depth * (std::f32::consts::TAU * d.vib_rate * t).sin();
@@ -483,7 +502,7 @@ impl PulseCh {
         if self.st.active {
             let hz = quantize_pulse(midi_to_hz(self.st.midi_now()));
             self.inc = hz / SAMPLE_RATE as f32;
-            self.duty = DUTIES[(self.st.inst.duty as usize).min(2)];
+            self.duty = DUTIES[(self.st.duty_now() as usize).min(2)];
         }
     }
 

@@ -27,6 +27,7 @@ fn main() {
     let mut meter: Option<Meter> = None;
     let mut kit: Option<Kit> = None;
     let mut smooth: Option<f32> = None;
+    let mut lead: Option<bevytris_chiptune::Inst> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -96,6 +97,21 @@ fn main() {
                 };
                 i += 2;
             }
+            "--lead" => {
+                use bevytris_chiptune::Inst;
+                lead = match next(i).as_str() {
+                    "auto" => None,
+                    "pluck" => Some(Inst::Pluck),
+                    "sustain" => Some(Inst::Sustain),
+                    "soft" => Some(Inst::Soft),
+                    "piano" => Some(Inst::Piano),
+                    "guitar" => Some(Inst::Guitar),
+                    "marimba" => Some(Inst::Marimba),
+                    "brass" => Some(Inst::Brass),
+                    other => panic!("unknown lead {other}"),
+                };
+                i += 2;
+            }
             "--ramp" => {
                 ramp = true;
                 i += 1;
@@ -116,6 +132,7 @@ fn main() {
     director.pin_meter(meter);
     director.pin_kit(kit);
     director.pin_smoothness(smooth);
+    director.pin_lead(lead);
 
     let mut samples = vec![0.0f32; total * 2];
     let mut notes = Vec::new();

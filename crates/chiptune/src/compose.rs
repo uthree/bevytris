@@ -724,7 +724,53 @@ impl Arrangement {
 /// Names matching the bits of [`Arrangement::layers`].
 pub const LAYER_NAMES: [&str; 8] = ["bass", "harm", "pad", "perc", "lead", "cntr", "saw", "shkr"];
 
-fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
+/// Lead instruments each profile is allowed to sing with, one rolled per
+/// piece. This is the main reason two pieces on the same profile do not
+/// sound like the same song twice: the melody is the thing you follow,
+/// so changing what plays it changes more than changing anything else.
+///
+/// The palettes are not interchangeable. Zen never picks anything with a
+/// hard attack, versus never picks a mallet, and the fanfare only gets
+/// instruments that can hold a note.
+pub fn lead_palette(profile: Profile) -> &'static [Inst] {
+    match profile {
+        Profile::Ambient => &[Inst::Soft, Inst::Piano, Inst::Marimba],
+        Profile::Zen => &[Inst::Soft, Inst::Piano, Inst::Guitar, Inst::Marimba],
+        Profile::SoloCalm => &[
+            Inst::Soft,
+            Inst::Sustain,
+            Inst::Pluck,
+            Inst::Piano,
+            Inst::Guitar,
+            Inst::Marimba,
+            Inst::Brass,
+        ],
+        Profile::VsIntense => &[
+            Inst::Pluck,
+            Inst::Sustain,
+            Inst::Guitar,
+            Inst::Brass,
+            Inst::Piano,
+        ],
+        Profile::Victory => &[Inst::Sustain, Inst::Brass, Inst::Piano],
+    }
+}
+
+/// Short name for the listening screen and the now-playing toast.
+pub fn lead_name(inst: Inst) -> &'static str {
+    match inst {
+        Inst::Pluck => "pluck",
+        Inst::Sustain => "sustain",
+        Inst::Soft => "soft",
+        Inst::Piano => "piano",
+        Inst::Guitar => "guitar",
+        Inst::Marimba => "marimba",
+        Inst::Brass => "brass",
+        _ => "lead",
+    }
+}
+
+fn arrange(profile: Profile, ctx: &Context, lead: Inst) -> Arrangement {
     let i = ctx.intensity.clamp(0.0, 1.0);
     let b = band(i);
     // High intensity pulls the layer schedule forward: a desperate board
@@ -760,7 +806,7 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             counter: (t >= l_at + 18.0).then_some(Counter::Echo),
             saw: None,
             shaker: false,
-            lead_inst: Inst::Soft,
+            lead_inst: lead,
             harm_inst: Inst::Pad,
             bass_pat: 0,
             hat_k: 0,
@@ -783,7 +829,7 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             counter: (t >= l_at + 12.0).then_some(Counter::Echo),
             saw: None,
             shaker: false,
-            lead_inst: Inst::Soft,
+            lead_inst: lead,
             harm_inst: Inst::Pad,
             // The drums stay a texture rather than a beat: a sparse
             // Euclidean kick, no snare, no backbeat to nod along to.
@@ -808,7 +854,7 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             counter: (t >= l_at + 14.0).then_some(Counter::Echo),
             saw: (i >= 0.66).then_some(SawRole::LeadDouble),
             shaker: i >= 0.82,
-            lead_inst: if i < 0.45 { Inst::Soft } else { Inst::Sustain },
+            lead_inst: lead,
             harm_inst: if i < 0.62 { Inst::Pad } else { Inst::Organ },
             bass_pat: [0, 1, 2, 3][b],
             hat_k: [0, 2, 4, 8][b],
@@ -831,7 +877,7 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             }),
             saw: (i >= 0.30).then_some(SawRole::BassDouble),
             shaker: i >= 0.62,
-            lead_inst: Inst::Pluck,
+            lead_inst: lead,
             harm_inst: if i < 0.55 { Inst::Organ } else { Inst::Stab },
             bass_pat: [1, 2, 2, 4][b],
             hat_k: [4, 8, 11, 13][b],
@@ -851,7 +897,7 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             counter: Some(Counter::Arp),
             saw: Some(SawRole::BassDouble),
             shaker: false,
-            lead_inst: Inst::Sustain,
+            lead_inst: lead,
             harm_inst: Inst::Organ,
             bass_pat: 1,
             hat_k: 4,
@@ -896,6 +942,8 @@ pub struct Info {
     pub mode: Mode,
     pub meter: Meter,
     pub kit: Kit,
+    /// What this piece is singing the melody with.
+    pub lead: Inst,
     pub bpm: f32,
     pub bar: u32,
     /// Bitmask of the layers the last planned bar actually used; see
@@ -925,11 +973,12 @@ impl Info {
     /// out as a tofu box. See the test below.
     pub fn label(&self) -> String {
         format!(
-            "{} {}・{}・{:.0} BPM・#{:06x}",
+            "{} {}・{}・{:.0} BPM・{}・#{:06x}",
             NOTE_NAMES[(self.tonic.rem_euclid(12)) as usize],
             self.mode.name(),
             self.meter.name(),
             self.bpm,
+            lead_name(self.lead),
             self.seed & 0xff_ffff
         )
     }
@@ -946,6 +995,10 @@ pub struct Composer {
     bpm: f32,
     meter: Meter,
     kit: Kit,
+    /// The instrument this piece sings its melody with, rolled per piece.
+    lead: Inst,
+    /// Set by [`Composer::force_lead`]; survives re-rolls.
+    lead_override: Option<Inst>,
     /// How stepwise this piece's melodies are, 0..=1 (see [`contour`]).
     smoothness: f32,
     /// Set by [`Composer::force_smoothness`]; survives re-rolls, where
@@ -979,6 +1032,8 @@ impl Composer {
             bpm: roll_tempo(profile, Meter::Four, &mut Rng::new(seed)),
             meter: Meter::Four,
             kit: Kit::Chip,
+            lead: lead_palette(profile)[0],
+            lead_override: None,
             smoothness: default_smoothness(profile),
             smooth_override: None,
             piece: 0,
@@ -1004,6 +1059,7 @@ impl Composer {
             mode: self.mode,
             meter: self.meter,
             kit: self.kit,
+            lead: self.lead,
             bpm: self.bpm,
             bar: self.bar,
             layers: self.layers,
@@ -1035,6 +1091,15 @@ impl Composer {
         self.smoothness = self
             .smooth_override
             .unwrap_or_else(|| default_smoothness(profile));
+        let palette = lead_palette(profile);
+        // An explicit pin wins over the palette — the palettes are taste,
+        // and someone auditioning an instrument wants to hear it on
+        // whatever preset they picked. It still has to belong to the lead
+        // channel, or it would silently land on someone else's voice.
+        self.lead = self
+            .lead_override
+            .filter(|i| i.voice() == crate::Voice::Lead)
+            .unwrap_or_else(|| palette[rng.below(palette.len())]);
         self.material = build_material(
             self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
             profile,
@@ -1098,6 +1163,31 @@ impl Composer {
 
     pub fn smoothness(&self) -> f32 {
         self.smoothness
+    }
+
+    /// Override the instrument the melody is played on. `None` hands the
+    /// choice back to the per-piece roll. Anything that is not a lead
+    /// instrument is ignored rather than played on the wrong channel.
+    pub fn force_lead(&mut self, lead: Option<Inst>) {
+        let lead = lead.filter(|i| i.voice() == crate::Voice::Lead);
+        if lead == self.lead_override {
+            return;
+        }
+        self.lead_override = lead;
+        let palette = lead_palette(self.profile);
+        self.lead = lead.unwrap_or_else(|| {
+            // Back to what this piece's own roll would have chosen.
+            let mut rng = Rng::new(self.seed ^ (self.piece.wrapping_mul(0x1000_0193)));
+            // Consume the same draws set_profile made before the lead.
+            roll_meter(self.profile, &mut rng);
+            roll_tempo(self.profile, self.meter, &mut rng);
+            roll_kit(self.profile, &mut rng);
+            palette[rng.below(palette.len())]
+        });
+    }
+
+    pub fn lead(&self) -> Inst {
+        self.lead
     }
 
     /// Drop the playhead at `at` — used once, when the audio stream starts.
@@ -1183,7 +1273,7 @@ impl Composer {
             self.modulated = true;
         }
 
-        let mut arr = arrange(self.profile, ctx);
+        let mut arr = arrange(self.profile, ctx, self.lead);
         if final_block && !ctx.zone {
             // Everything at once, whatever the layer schedule had planned.
             arr.lead = true;
@@ -1933,6 +2023,76 @@ mod tests {
     }
 
     #[test]
+    fn every_lead_palette_holds_only_lead_instruments() {
+        // A palette entry on the wrong channel would not be a wrong
+        // sound, it would be a melody played over the pad or the bass.
+        for profile in Profile::ALL {
+            let palette = lead_palette(profile);
+            assert!(!palette.is_empty(), "{profile:?} has no lead to play");
+            for inst in palette {
+                assert_eq!(
+                    inst.voice(),
+                    crate::Voice::Lead,
+                    "{inst:?} in {profile:?}'s palette is not a lead instrument"
+                );
+                assert_ne!(lead_name(*inst), "lead", "{inst:?} has no display name");
+            }
+        }
+    }
+
+    #[test]
+    fn pieces_do_not_all_pick_the_same_lead() {
+        // The whole point of the palette: two pieces on one profile
+        // should not keep arriving with the same voice on the melody.
+        let mut seen: Vec<Inst> = Vec::new();
+        for seed in 0..40u64 {
+            let mut c = Composer::new(seed);
+            c.set_profile(Profile::SoloCalm, 0.4);
+            if !seen.contains(&c.lead()) {
+                seen.push(c.lead());
+            }
+        }
+        assert!(
+            seen.len() >= 4,
+            "40 seeds only ever produced {} lead(s): {seen:?}",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn pinning_a_lead_holds_it_and_unpinning_gives_it_back() {
+        let mut c = Composer::new(31);
+        c.set_profile(Profile::SoloCalm, 0.4);
+        let rolled = c.lead();
+
+        c.force_lead(Some(Inst::Guitar));
+        assert_eq!(c.lead(), Inst::Guitar);
+
+        // Dropping the pin restores exactly what THIS piece rolled — the
+        // roll is per piece, so this only holds without a re-roll in
+        // between.
+        c.force_lead(None);
+        assert_eq!(c.lead(), rolled, "unpinning must restore the rolled lead");
+
+        // A pin outlives the next piece, like the meter and kit pins.
+        c.force_lead(Some(Inst::Guitar));
+        c.set_profile(Profile::VsIntense, 0.8);
+        assert_eq!(c.lead(), Inst::Guitar);
+    }
+
+    #[test]
+    fn a_pin_on_the_wrong_channel_is_refused() {
+        let mut c = Composer::new(5);
+        c.set_profile(Profile::SoloCalm, 0.4);
+        let rolled = c.lead();
+        // Bass is a triangle instrument; honouring this would put the
+        // melody on the bass channel.
+        c.force_lead(Some(Inst::Bass));
+        assert_eq!(c.lead(), rolled);
+        assert_eq!(c.lead().voice(), crate::Voice::Lead);
+    }
+
+    #[test]
     fn unpinning_smoothness_restores_the_profile_default() {
         let mut c = Composer::new(7);
         c.set_profile(Profile::VsIntense, 0.5);
@@ -2116,7 +2276,7 @@ mod tests {
             elapsed: 600.0,
             ..Default::default()
         };
-        assert!(arrange(Profile::VsIntense, &ctx).four_floor);
+        assert!(arrange(Profile::VsIntense, &ctx, Inst::Pluck).four_floor);
 
         // Check it in the emitted score, not just the flag — and in every
         // meter, since "four on the floor" means three in a waltz.
@@ -2235,7 +2395,7 @@ mod tests {
                 elapsed,
                 ..Default::default()
             };
-            arrange(Profile::SoloCalm, &ctx)
+            arrange(Profile::SoloCalm, &ctx, Inst::Pluck)
         };
         let opening = at(0.0);
         assert!(!opening.perc && !opening.lead);
@@ -2254,15 +2414,15 @@ mod tests {
             ..Default::default()
         };
         // Nothing but the foundation at the start of a match.
-        let early = arrange(Profile::VsIntense, &ctx(0.0, 0.1, false));
+        let early = arrange(Profile::VsIntense, &ctx(0.0, 0.1, false), Inst::Pluck);
         assert!(early.counter.is_none() && early.saw.is_none() && !early.perc);
         // Everything by the time it has been running a while and the
         // stack is high.
-        let late = arrange(Profile::VsIntense, &ctx(120.0, 0.9, false));
+        let late = arrange(Profile::VsIntense, &ctx(120.0, 0.9, false), Inst::Pluck);
         assert!(late.counter.is_some() && late.saw.is_some() && late.pad.is_some());
         assert!(late.shaker && late.perc && late.lead);
         // The zone strips it back to a held chord over the bass.
-        let zone = arrange(Profile::VsIntense, &ctx(120.0, 0.9, true));
+        let zone = arrange(Profile::VsIntense, &ctx(120.0, 0.9, true), Inst::Pluck);
         assert!(!zone.lead && !zone.perc && !zone.shaker);
         assert!(zone.counter.is_none() && zone.saw.is_none());
         assert!(zone.harmony && zone.pad.is_some());
@@ -2631,7 +2791,7 @@ mod tests {
             zone: true,
             ..Default::default()
         };
-        let a = arrange(Profile::VsIntense, &ctx);
+        let a = arrange(Profile::VsIntense, &ctx, Inst::Pluck);
         assert!(!a.lead && !a.perc && a.harmony);
     }
 
