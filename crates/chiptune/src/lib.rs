@@ -100,6 +100,14 @@ pub enum Inst {
     /// Blown lead: the one here that swells into the note rather than
     /// starting at full volume.
     Brass,
+    /// The chord family: one sustained voice per pulse channel, played
+    /// together so a chord is an actual chord rather than one channel
+    /// arpeggiating fast enough to imply one. Only the blocks that put
+    /// the harmony in the foreground use these, because they cost all
+    /// three pulses — the melody has nowhere to go while they sound.
+    ChordHi,
+    ChordMid,
+    ChordLo,
     /// Held 50%-duty chord bed.
     Organ,
     /// Percussive 12.5%-duty chord stab.
@@ -155,9 +163,10 @@ impl Inst {
             | Inst::Piano
             | Inst::Guitar
             | Inst::Marimba
-            | Inst::Brass => Voice::Lead,
-            Inst::Organ | Inst::Stab | Inst::Pad => Voice::Harmony,
-            Inst::Echo | Inst::Arp => Voice::Counter,
+            | Inst::Brass
+            | Inst::ChordHi => Voice::Lead,
+            Inst::Organ | Inst::Stab | Inst::Pad | Inst::ChordMid => Voice::Harmony,
+            Inst::Echo | Inst::Arp | Inst::ChordLo => Voice::Counter,
             Inst::SawLead | Inst::SawBass => Voice::Saw,
             Inst::Bell | Inst::Glass | Inst::WaveOrgan | Inst::WaveBass => Voice::Wave,
             Inst::Bass => Voice::Bass,
@@ -176,6 +185,19 @@ impl Inst {
     /// sweeps and impacts, which are all played back at a fixed rate.
     pub fn is_drum(self) -> bool {
         matches!(self.voice(), Voice::Perc | Voice::Hat | Voice::Sample)
+    }
+
+    /// True for the three sustained voices that make up a block chord.
+    /// They occupy the pulse channels, `ChordHi` the melody's own, so
+    /// "is on the lead channel" is not the same question as "can play
+    /// the tune".
+    pub fn is_chord_voice(self) -> bool {
+        matches!(self, Inst::ChordHi | Inst::ChordMid | Inst::ChordLo)
+    }
+
+    /// True for the instruments that may carry the melody.
+    pub fn is_melody(self) -> bool {
+        self.voice() == Voice::Lead && !self.is_chord_voice()
     }
 
     /// True for either kit's kick — the composer swaps them per piece, so
@@ -406,6 +428,50 @@ const BRASS: InstDef = InstDef {
     vib_depth: 0.15,
     vib_rate: 5.8,
     fall: 0.5,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+/// The three chord voices. Same shape, three levels: the top of a
+/// voicing carries it, so it is loudest, and the bottom stays out of the
+/// bass's way. All three ease in rather than snapping on — three hard
+/// attacks landing on the same frame is a click, not a chord.
+const CHORD_HI: InstDef = InstDef {
+    vol: m(&[6, 10, 12, 12, 12, 11, 11, 11, 10], Some(5)),
+    duty: 2,
+    duty_seq: &[],
+    attack: &[],
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    // A held chord that slides out of tune is just wrong.
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+const CHORD_MID: InstDef = InstDef {
+    vol: m(&[5, 8, 10, 10, 10, 9, 9, 9, 8], Some(5)),
+    duty: 2,
+    duty_seq: &[],
+    attack: &[],
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+const CHORD_LO: InstDef = InstDef {
+    vol: m(&[4, 7, 9, 9, 9, 8, 8, 8, 7], Some(5)),
+    duty: 1,
+    duty_seq: &[],
+    attack: &[],
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
     noise_idx: 0,
     noise_short: false,
     wave: 0,
@@ -673,6 +739,9 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
         Inst::Guitar => &GUITAR,
         Inst::Marimba => &MARIMBA,
         Inst::Brass => &BRASS,
+        Inst::ChordHi => &CHORD_HI,
+        Inst::ChordMid => &CHORD_MID,
+        Inst::ChordLo => &CHORD_LO,
         Inst::Organ => &ORGAN,
         Inst::Stab => &STAB,
         Inst::Pad => &PAD,
@@ -697,7 +766,7 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
 }
 
 /// Every instrument, for tests and for the offline renderer.
-pub const ALL_INSTRUMENTS: [Inst; 30] = [
+pub const ALL_INSTRUMENTS: [Inst; 33] = [
     Inst::Pluck,
     Inst::Sustain,
     Inst::Soft,
@@ -705,6 +774,9 @@ pub const ALL_INSTRUMENTS: [Inst; 30] = [
     Inst::Guitar,
     Inst::Marimba,
     Inst::Brass,
+    Inst::ChordHi,
+    Inst::ChordMid,
+    Inst::ChordLo,
     Inst::Organ,
     Inst::Stab,
     Inst::Pad,
@@ -783,7 +855,7 @@ mod tests {
 
     #[test]
     fn every_instrument_is_defined_and_listed() {
-        assert_eq!(ALL_INSTRUMENTS.len(), 30);
+        assert_eq!(ALL_INSTRUMENTS.len(), 33);
         for i in ALL_INSTRUMENTS {
             let d = inst_def(i);
             assert!(!d.vol.v.is_empty(), "{i:?} has no volume macro");

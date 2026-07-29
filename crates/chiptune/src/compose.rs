@@ -296,9 +296,44 @@ struct Section {
     kick_rot: usize,
 }
 
+/// What a block of the form is for.
+///
+/// This is the piece's shape, and it is the thing that was missing: the
+/// arrangement used to be a pure function of intensity and elapsed time,
+/// so it only ever thickened. Nothing ever stopped. A tune that never
+/// takes the melody away has no way to bring it back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BlockRole {
+    /// Everything the layer schedule allows.
+    Full,
+    /// The melody sits out and all three pulses hold a real chord
+    /// instead. The block where the harmony is the point.
+    Chords,
+    /// The melody sits out and almost everything goes with it — bass,
+    /// pad and a bare kick. The air before the tune comes back.
+    Break,
+}
+
+/// Which block does what. Two chord blocks and one breakdown across the
+/// ten-block form: often enough to shape the piece, rare enough that the
+/// tune is what you mostly hear.
+const FORM_ROLES: [BlockRole; 10] = [
+    BlockRole::Full,
+    BlockRole::Full,
+    BlockRole::Chords,
+    BlockRole::Full,
+    BlockRole::Full,
+    BlockRole::Break,
+    BlockRole::Full,
+    BlockRole::Chords,
+    BlockRole::Full,
+    BlockRole::Full,
+];
+
 struct Material {
     sections: Vec<Section>,
     form: Vec<usize>,
+    roles: Vec<BlockRole>,
     /// Which rhythm cells this piece drew. Nothing reads it at runtime;
     /// it exists so the "at most eight cells" invariant is testable.
     #[allow(dead_code)]
@@ -486,6 +521,7 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         // returning every other block — 30% new material, which is where
         // real songs sit.
         form: vec![0, 0, 1, 0, 2, 0, 1, 0, 2, 0],
+        roles: FORM_ROLES.to_vec(),
         rhythms_used,
     }
 }
@@ -1128,6 +1164,10 @@ pub struct Composer {
     lead: Inst,
     /// Set by [`Composer::force_lead`]; survives re-rolls.
     lead_override: Option<Inst>,
+    /// The second instrument the melody switches to partway through the
+    /// form, and whichever of the two the last planned bar used.
+    lead_alt: Inst,
+    lead_now: Inst,
     /// How stepwise this piece's melodies are, 0..=1 (see [`contour`]).
     smoothness: f32,
     /// Set by [`Composer::force_smoothness`]; survives re-rolls, where
@@ -1163,6 +1203,8 @@ impl Composer {
             kit: Kit::Chip,
             lead: lead_palette(profile)[0],
             lead_override: None,
+            lead_alt: lead_palette(profile)[0],
+            lead_now: lead_palette(profile)[0],
             smoothness: default_smoothness(profile),
             smooth_override: None,
             piece: 0,
@@ -1227,8 +1269,10 @@ impl Composer {
         // channel, or it would silently land on someone else's voice.
         self.lead = self
             .lead_override
-            .filter(|i| i.voice() == crate::Voice::Lead)
+            .filter(|i| i.is_melody())
             .unwrap_or_else(|| palette[rng.below(palette.len())]);
+        self.lead_alt = self.roll_alt_lead(&mut rng, palette);
+        self.lead_now = self.lead;
         self.material = build_material(
             self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
             profile,
@@ -1298,24 +1342,61 @@ impl Composer {
     /// choice back to the per-piece roll. Anything that is not a lead
     /// instrument is ignored rather than played on the wrong channel.
     pub fn force_lead(&mut self, lead: Option<Inst>) {
-        let lead = lead.filter(|i| i.voice() == crate::Voice::Lead);
+        let lead = lead.filter(|i| i.is_melody());
         if lead == self.lead_override {
             return;
         }
         self.lead_override = lead;
         let palette = lead_palette(self.profile);
-        self.lead = lead.unwrap_or_else(|| {
-            // Back to what this piece's own roll would have chosen.
-            let mut rng = Rng::new(self.seed ^ (self.piece.wrapping_mul(0x1000_0193)));
-            // Consume the same draws set_profile made before the lead.
-            roll_meter(self.profile, &mut rng);
-            roll_tempo(self.profile, self.meter, &mut rng);
-            roll_kit(self.profile, &mut rng);
-            palette[rng.below(palette.len())]
-        });
+        match lead {
+            // A pin holds for the whole form: no mid-piece switch either,
+            // or auditioning one instrument would still play the other.
+            Some(pinned) => {
+                self.lead = pinned;
+                self.lead_alt = pinned;
+            }
+            None => {
+                // Back to what this piece's own roll would have chosen,
+                // by replaying the draws `set_profile` made.
+                let mut rng = Rng::new(self.seed ^ (self.piece.wrapping_mul(0x1000_0193)));
+                roll_meter(self.profile, &mut rng);
+                roll_tempo(self.profile, self.meter, &mut rng);
+                roll_kit(self.profile, &mut rng);
+                self.lead = palette[rng.below(palette.len())];
+                self.lead_alt = self.roll_alt_lead(&mut rng, palette);
+            }
+        }
+        self.lead_now = self.lead;
     }
 
+    /// A different instrument from `self.lead`, for the second half of
+    /// the form. A pinned lead pins both — someone auditioning one
+    /// instrument does not want the other one turning up.
+    fn roll_alt_lead(&self, rng: &mut Rng, palette: &[Inst]) -> Inst {
+        if self.lead_override.is_some() || palette.len() < 2 {
+            return self.lead;
+        }
+        for _ in 0..8 {
+            let pick = palette[rng.below(palette.len())];
+            if pick != self.lead {
+                return pick;
+            }
+        }
+        // Vanishingly unlikely; take whatever is not the first entry.
+        *palette
+            .iter()
+            .find(|i| **i != self.lead)
+            .unwrap_or(&self.lead)
+    }
+
+    /// The instrument the melody is on right now. This moves partway
+    /// through the form, so it is what the readouts should show.
     pub fn lead(&self) -> Inst {
+        self.lead_now
+    }
+
+    /// The instrument this piece rolled for the first half of the form.
+    pub fn lead_first(&self) -> Inst {
         self.lead
     }
 
@@ -1402,7 +1483,40 @@ impl Composer {
             self.modulated = true;
         }
 
-        let mut arr = arrange(self.profile, ctx, self.lead);
+        // The melody changes instrument halfway through the form, so a
+        // long piece does not spend eighty bars on one timbre. One swap,
+        // at the midpoint — alternating every block or two reads as a
+        // fault rather than as an arrangement, and it puts the second
+        // instrument on the final chorus, where a new colour pays off.
+        let role = self.material.roles[block];
+        self.lead_now = if block >= blocks / 2 {
+            self.lead_alt
+        } else {
+            self.lead
+        };
+
+        let mut arr = arrange(self.profile, ctx, self.lead_now);
+        match role {
+            BlockRole::Full => {}
+            BlockRole::Chords => {
+                // All three pulses are about to hold a chord, so nothing
+                // else may be using them.
+                arr.lead = false;
+                arr.harmony = false;
+                arr.counter = None;
+            }
+            BlockRole::Break => {
+                arr.lead = false;
+                arr.counter = None;
+                arr.saw = None;
+                arr.shaker = false;
+                arr.snare = false;
+                arr.hat_k = 0;
+                arr.kick_extra = &[];
+                arr.four_floor = false;
+                arr.harm_rate = HarmRate::HalfBar;
+            }
+        }
         if final_block && !ctx.zone {
             // Everything at once, whatever the layer schedule had planned.
             arr.lead = true;
@@ -1488,6 +1602,36 @@ impl Composer {
                         vel: 84,
                         frames: frames(span as u8),
                         arp: Some(arp),
+                        glide: 0,
+                    });
+                }
+            }
+        }
+
+        // --- block chords ---------------------------------------------
+        // Three pulses holding one voicing. Everywhere else in this file
+        // a "chord" is one channel running an arpeggio macro fast enough
+        // to imply one; here it is three notes actually sounding at
+        // once, which is a different thing to listen to and the whole
+        // reason these blocks exist.
+        if role == BlockRole::Chords {
+            let voicing = chord.voicing();
+            let (span, hits) = HarmRate::HalfBar.grid(meter);
+            for k in 0..hits {
+                for (v, inst) in [Inst::ChordLo, Inst::ChordMid, Inst::ChordHi]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, inst)| (voicing[i], inst))
+                {
+                    out.push(NoteEvent {
+                        at: at((k * span) as f32),
+                        inst,
+                        midi: clamp_midi(tonic + 12 + mode.pitch(v)),
+                        // Let it ring right up to the next strike: the
+                        // point is the sustain, not the attack.
+                        frames: frames(span as u8),
+                        vel: 92,
+                        arp: None,
                         glide: 0,
                     });
                 }
@@ -2168,6 +2312,140 @@ mod tests {
             }
         }
         total / bars
+    }
+
+    /// Plan one whole form and report, per block, how many notes each
+    /// instrument played.
+    fn blocks_of(profile: Profile, intensity: f32) -> Vec<Vec<(Inst, usize)>> {
+        let mut c = Composer::new(0x5EED);
+        c.set_profile(profile, intensity);
+        let ctx = Context {
+            profile,
+            intensity,
+            elapsed: 600.0,
+            ..Default::default()
+        };
+        let blocks = c.material.form.len();
+        let mut out = Vec::new();
+        (0..blocks)
+            .map(|_| {
+                let start = out.len();
+                for _ in 0..BARS_PER_SECTION {
+                    c.plan_bar(&ctx, &mut out);
+                }
+                let mut insts: Vec<(Inst, usize)> = Vec::new();
+                for n in &out[start..] {
+                    match insts.iter_mut().find(|(i, _)| *i == n.inst) {
+                        Some((_, c)) => *c += 1,
+                        None => insts.push((n.inst, 1)),
+                    }
+                }
+                insts
+            })
+            .collect()
+    }
+
+    /// How many notes `pred` matched in a block.
+    fn count(block: &[(Inst, usize)], pred: impl Fn(Inst) -> bool) -> usize {
+        block
+            .iter()
+            .filter(|(i, _)| pred(*i))
+            .map(|(_, c)| *c)
+            .sum()
+    }
+
+    #[test]
+    fn the_chord_blocks_rest_the_melody_and_hold_a_real_chord() {
+        let blocks = blocks_of(Profile::VsIntense, 0.7);
+        let melody = |i: Inst| i.is_melody();
+        let full_snares = count(&blocks[0], |i| i.is_snare());
+        let full_hats = count(&blocks[0], |i| i == Inst::Hat || i == Inst::Shaker);
+
+        for (i, role) in FORM_ROLES.iter().enumerate() {
+            let b = &blocks[i];
+            let has = |want: Inst| b.iter().any(|(x, _)| *x == want);
+            match role {
+                BlockRole::Chords => {
+                    assert_eq!(
+                        count(b, melody),
+                        0,
+                        "block {i} is a chord block, lead played"
+                    );
+                    // All three pulses, sounding together — that is what
+                    // makes it a chord rather than an implied one.
+                    for want in [Inst::ChordLo, Inst::ChordMid, Inst::ChordHi] {
+                        assert!(has(want), "block {i} is missing {want:?}");
+                    }
+                }
+                BlockRole::Break => {
+                    assert_eq!(count(b, melody), 0, "block {i} is a break, lead played");
+                    // The backbeat stops. The fill in the last bar does
+                    // not — that is the pickup back into the tune, and
+                    // taking it away would make the return arrive from
+                    // nowhere.
+                    let snares = count(b, |x| x.is_snare());
+                    assert!(
+                        snares * 3 < full_snares,
+                        "block {i} is a break but kept {snares} snare hits against {full_snares}"
+                    );
+                    let hats = count(b, |x| x == Inst::Hat || x == Inst::Shaker);
+                    assert!(
+                        hats * 5 < full_hats,
+                        "block {i} is a break but kept {hats} hats against {full_hats}"
+                    );
+                }
+                BlockRole::Full => {
+                    assert!(count(b, melody) > 0, "block {i} is full but has no melody");
+                    assert!(
+                        !has(Inst::ChordHi),
+                        "block {i} should not hold block chords"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_melody_changes_instrument_partway_through() {
+        // Not every seed rolls two different instruments for every
+        // profile, but across a spread of them the swap has to show up.
+        let mut swapped = 0;
+        for seed in 0..25u64 {
+            let mut c = Composer::new(seed);
+            c.set_profile(Profile::VsIntense, 0.7);
+            if c.lead_alt != c.lead_first() {
+                swapped += 1;
+            }
+        }
+        assert!(
+            swapped >= 20,
+            "only {swapped}/25 pieces rolled a second lead"
+        );
+
+        // And the second instrument really is what the later blocks use.
+        let blocks = blocks_of(Profile::SoloCalm, 0.6);
+        let melodies = |b: &Vec<(Inst, usize)>| -> Vec<Inst> {
+            b.iter()
+                .map(|(i, _)| *i)
+                .filter(|i| i.is_melody())
+                .collect()
+        };
+        let early = melodies(&blocks[0]);
+        let late = melodies(&blocks[blocks.len() - 1]);
+        assert!(!early.is_empty() && !late.is_empty());
+        assert_ne!(early, late, "the melody never changed instrument");
+    }
+
+    #[test]
+    fn the_form_ends_on_a_full_block() {
+        // The last block is the final chorus, which forces every layer
+        // on. A rest or a chord block there would be overridden anyway,
+        // so the roles must not put one there.
+        assert_eq!(FORM_ROLES[FORM_ROLES.len() - 1], BlockRole::Full);
+        assert_eq!(FORM_ROLES.len(), 10);
+        // And there has to be some contrast in there at all.
+        assert!(FORM_ROLES.iter().any(|r| *r == BlockRole::Chords));
+        assert!(FORM_ROLES.iter().any(|r| *r == BlockRole::Break));
     }
 
     #[test]

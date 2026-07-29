@@ -1173,9 +1173,9 @@ mod jukebox_tests {
     /// new one cannot be added and then be unreachable for auditioning.
     #[test]
     fn the_lead_row_offers_every_melody_instrument() {
-        use bevytris_chiptune::{ALL_INSTRUMENTS, Voice};
+        use bevytris_chiptune::ALL_INSTRUMENTS;
         for inst in ALL_INSTRUMENTS {
-            if inst.voice() == Voice::Lead {
+            if inst.is_melody() {
                 assert!(
                     JUKEBOX_LEADS.contains(&inst),
                     "{inst:?} cannot be picked in the listening room"
@@ -1183,7 +1183,7 @@ mod jukebox_tests {
             }
         }
         for inst in JUKEBOX_LEADS {
-            assert_eq!(inst.voice(), Voice::Lead);
+            assert!(inst.is_melody(), "{inst:?} cannot carry a tune");
         }
     }
 

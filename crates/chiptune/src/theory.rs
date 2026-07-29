@@ -166,6 +166,18 @@ impl Chord {
         best
     }
 
+    /// The three degrees a block chord should actually sound, low to
+    /// high — the same selection [`Chord::arp`] implies, but as absolute
+    /// degrees so they can be handed to three separate channels.
+    pub fn voicing(&self) -> [i32; 3] {
+        let (ladder, n) = self.ladder();
+        if n == 4 {
+            [ladder[1], ladder[2], ladder[3]]
+        } else {
+            [ladder[0], ladder[1], ladder[2]]
+        }
+    }
+
     /// Semitone offsets above the chord's own root, for the three-slot
     /// arpeggio macro the hardware voices run. Read through the mode, so
     /// a i chord really is minor and a V really is major.
