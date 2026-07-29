@@ -1,5 +1,9 @@
 //! bevytris: a guideline-flavored Tetris clone built on Bevy.
 
+// Release builds must not pop a console window on Windows; debug builds
+// keep it for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use bevy::camera::{Hdr, ScalingMode};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -26,7 +30,15 @@ use state::{AppState, GameMode, PlayState};
 fn main() -> AppExit {
     let settings = config::load_settings();
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+    app.add_plugins(DefaultPlugins
+        .set(bevy::log::LogPlugin {
+            // The bundled ICU4X data has no CJK segmentation dictionary, so
+            // laying out Japanese text warns on every reshape; the fallback
+            // segmentation is fine for our UI, silence the noise.
+            filter: format!("{},icu_provider=error", bevy::log::DEFAULT_FILTER),
+            ..Default::default()
+        })
+        .set(WindowPlugin {
             primary_window: Some(Window {
                 title: "BEVYTRIS".into(),
                 resolution: (1280, 720).into(),
