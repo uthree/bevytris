@@ -4,10 +4,11 @@ version = "0.3.0"
 edition = "2024"
 
 [workspace]
-members = [".", "crates/core"]
+members = [".", "crates/core", "crates/chiptune"]
 
 [dependencies]
 bevytris-core = { path = "crates/core" }
+bevytris-chiptune = { path = "crates/chiptune" }
 bevy = { version = "0.19", features = ["wav"] }
 dirs = "6"
 sys-locale = "0.3"

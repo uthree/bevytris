@@ -113,8 +113,10 @@ jobs:
               VSync & fullscreen (F11)
             - English / Japanese UI, auto-detected from the OS (switchable in settings)
             - HDR bloom, particles, shockwaves, board inertia, Misaki pixel font
-            - CC0 chiptune BGM (Juhani Junkala, SketchyLogic); SFX from CC0 samples plus
-              procedurally synthesized bells and booms
+            - No music files: a built-in NES-style synthesizer and algorithmic composer
+              write the BGM live (calm in solo, fast and minor in versus, tempo rising
+              with the stack), with a piano-roll background scene showing the score
+            - SFX from CC0 samples plus procedurally synthesized bells and booms
 
             Full third-party credits in `assets/CREDITS.md`.
           files: |

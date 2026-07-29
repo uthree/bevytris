@@ -1797,6 +1797,7 @@ name = "bevytris"
 version = "0.3.0"
 dependencies = [
  "bevy",
+ "bevytris-chiptune",
  "bevytris-core",
  "dirs",
  "rand 0.9.5",
@@ -1804,6 +1805,10 @@ dependencies = [
  "serde",
  "sys-locale",
 ]
+
+[[package]]
+name = "bevytris-chiptune"
+version = "0.3.0"
 
 [[package]]
 name = "bevytris-core"

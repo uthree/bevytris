@@ -9,18 +9,25 @@
 //!   square stars, and the occasional shooting star.
 //! * VISUALIZER — EQ bars along the screen edges and a waveform of
 //!   squares through the middle.
+//! * GARDEN, FRACTAL, SUNSET, AUTOMATON — plants, a Sierpinski carpet
+//!   zoom, a pixel sunset, and Conway's Life.
+//! * PIANOROLL — the score the auto-composer is generating right now,
+//!   scrolling past a fixed playhead.
 //!
 //! Scenes crossfade on a 40-70 s timer (random next pick). Everything
-//! breathes with [`AudioPulse`], an energy level fed by every sound
-//! effect the game plays — an audio visualizer driven by the game's own
-//! soundscape. The classic falling starfield stays on across all scenes
-//! (and still lunges via [`StarSurge`] on big clears).
+//! breathes with [`AudioPulse`], which is fed by the synthesizer's own
+//! envelope plus every sound effect the game plays — so the visualizer
+//! bars really are the notes you are hearing. The classic falling
+//! starfield stays on across all scenes (and still lunges via
+//! [`StarSurge`] on big clears).
 
 use bevy::prelude::*;
+use bevytris_chiptune::SAMPLE_RATE;
 use rand::Rng;
 
 use crate::audio::PlaySfx;
 use crate::emissive;
+use crate::music::{MusicEngine, ScoreFeed};
 use crate::session::{GameSession, HumanControlled};
 use crate::state::AppState;
 
@@ -61,7 +68,7 @@ impl Default for AudioPulse {
     }
 }
 
-const SCENE_COUNT: usize = 8;
+const SCENE_COUNT: usize = 9;
 const FORMATION: usize = 0;
 const CYBER: usize = 1;
 const GALAXY: usize = 2;
@@ -70,6 +77,7 @@ const GARDEN: usize = 4;
 const FRACTAL: usize = 5;
 const SUNSET: usize = 6;
 const AUTOMATON: usize = 7;
+const PIANOROLL: usize = 8;
 
 /// One color scheme shared by every scene.
 struct Palette {
@@ -262,6 +270,7 @@ impl Plugin for BackgroundPlugin {
             Ok("fractal") => (FRACTAL, true),
             Ok("sunset") => (SUNSET, true),
             Ok("automaton") => (AUTOMATON, true),
+            Ok("pianoroll") => (PIANOROLL, true),
             _ => (rand::rng().random_range(0..SCENE_COUNT), false),
         };
         app.init_resource::<StarSurge>()
@@ -294,6 +303,7 @@ impl Plugin for BackgroundPlugin {
                     animate_fractal,
                     animate_sunset,
                     animate_automaton,
+                    animate_pianoroll,
                 )
                     .chain(),
             );
@@ -881,8 +891,59 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
             }
         });
 
+    // PIANOROLL — the composer's own score, scrolling right to left past
+    // a fixed playhead. Horizontal on purpose: tetrominoes already own
+    // the vertical axis, and falling notes make the piece look like it is
+    // drifting sideways. It also survives the opaque board slab, since
+    // streaks pass behind it and come out the other side.
+    commands
+        .spawn((
+            SceneRoot(PIANOROLL),
+            Transform::from_xyz(0.0, 0.0, -26.0),
+            Visibility::default(),
+        ))
+        .with_children(|parent| {
+            // Row banding: one strip per semitone. The composer publishes
+            // its scale, so these light up by scale membership and the
+            // whole texture visibly changes when the music modulates.
+            for row in 0..ROLL_ROWS {
+                parent.spawn((
+                    Sprite::from_color(Color::NONE, Vec2::new(1400.0, ROLL_ROW_H - 1.0)),
+                    Transform::from_xyz(0.0, row_y(row), 0.0),
+                    RollPart::Row(row),
+                ));
+            }
+            for i in 0..ROLL_LINES {
+                parent.spawn((
+                    Sprite::from_color(Color::NONE, Vec2::new(2.0, 720.0)),
+                    Transform::from_xyz(0.0, 0.0, 0.05),
+                    RollPart::Line(i),
+                ));
+            }
+            for i in 0..ROLL_NOTES {
+                parent.spawn((
+                    Sprite::from_color(Color::NONE, Vec2::ZERO),
+                    Transform::from_xyz(0.0, 0.0, 0.1 + 0.01 * (i % 4) as f32),
+                    RollPart::Note(i),
+                ));
+            }
+            // Playhead plus a short trail behind it.
+            for i in 0..ROLL_HEAD_PARTS {
+                parent.spawn((
+                    Sprite::from_color(
+                        Color::NONE,
+                        Vec2::new(if i == 0 { 2.0 } else { 9.0 }, 720.0),
+                    ),
+                    Transform::from_xyz(ROLL_PLAYHEAD_X - 5.0 * i as f32, 0.0, 0.2),
+                    RollPart::Head(i),
+                ));
+            }
+        });
+
     // Palette-tinted backdrop gradients (sunset paints its own sky).
-    for scene in [FORMATION, CYBER, GALAXY, VISUALIZER, GARDEN, FRACTAL, AUTOMATON] {
+    for scene in [
+        FORMATION, CYBER, GALAXY, VISUALIZER, GARDEN, FRACTAL, AUTOMATON, PIANOROLL,
+    ] {
         commands.spawn((
             Sprite::from_color(Color::NONE, Vec2::new(1440.0, 800.0)),
             Transform::from_xyz(0.0, 0.0, -29.0),
@@ -910,6 +971,8 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 fn update_audio_pulse(
     time: Res<Time>,
+    engine: Res<MusicEngine>,
+    feed: Res<ScoreFeed>,
     mut pulse: ResMut<AudioPulse>,
     mut sfx: MessageReader<PlaySfx>,
 ) {
@@ -920,7 +983,10 @@ fn update_audio_pulse(
     for msg in sfx.read() {
         hit += (msg.gain.min(1.5)) * 0.3;
     }
-    pulse.energy = (pulse.energy + hit).min(1.6);
+    // The synthesizer publishes its own envelope, so the background now
+    // reacts to the music itself and not just to a proxy.
+    let music = engine.shared.energy().min(1.0);
+    pulse.energy = (pulse.energy.max(0.35 * music) + hit).min(1.6);
     // Fast decay toward a gentle idle breath, so quiet menus still move.
     let idle = 0.12 + 0.05 * (t * 0.8).sin().abs();
     pulse.energy += (idle - pulse.energy) * (2.2 * dt).min(1.0);
@@ -928,13 +994,23 @@ fn update_audio_pulse(
     let energy = pulse.energy;
     pulse.slow += (energy - pulse.slow) * (1.2 * dt).min(1.0);
 
-    // Pseudo-spectrum: incommensurate sine mixes per band, scaled by the
-    // energy envelope. Reads like an equalizer without needing an FFT.
-    let energy = pulse.energy;
+    // Real spectrum: twelve pitch classes in two registers, taken from
+    // the notes actually sounding right now. A sine wobble stands in
+    // underneath so quiet menus still have something to show.
+    let mut real = [0.0f32; BANDS];
+    for n in &feed.notes {
+        // Drums carry no pitch and would all pile into one band.
+        if n.voice == 3 || n.at > feed.pos || feed.pos >= n.end {
+            continue;
+        }
+        let idx = (n.midi % 12) as usize + if n.midi >= 60 { 12 } else { 0 };
+        real[idx.min(BANDS - 1)] += n.vel as f32 / 127.0;
+    }
     for (i, band) in pulse.bands.iter_mut().enumerate() {
         let fi = i as f32;
         let wobble = ((t * (2.1 + fi * 0.37)).sin() * (t * (1.3 + fi * 0.11) + fi).cos()).abs();
-        let target = (0.12 + wobble) * (0.35 + energy);
+        let floor = (0.12 + wobble) * (0.35 + energy) * 0.5;
+        let target = real[i].min(1.4).max(floor);
         *band += (target - *band) * (8.0 * dt).min(1.0);
     }
 }
@@ -1607,5 +1683,174 @@ fn animate_visualizer(
             + (f * 9.0 - t * 1.4).sin() * 8.0;
         tf.translation.y = y;
         sprite.color = emissive(palette.wave, 1.4).with_alpha(weight * 0.3);
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// PIANOROLL
+// ---------------------------------------------------------------------------
+
+/// Pooled sprites for the piano roll. One component instead of four
+/// markers keeps the animate system down to a single query.
+#[derive(Component)]
+enum RollPart {
+    /// Semitone banding strip.
+    Row(usize),
+    /// Scrolling beat/bar line.
+    Line(usize),
+    /// A note rectangle from the pool.
+    Note(usize),
+    /// The playhead and its trail segments.
+    Head(usize),
+}
+
+/// Lowest drawn pitch (A1) — the triangle bass bottoms out around here.
+const ROLL_LOW_MIDI: i32 = 33;
+const ROLL_ROWS: usize = 56;
+const ROLL_ROW_H: f32 = 12.0;
+/// Typical live count for four voices is well under half of this; the
+/// AUTOMATON scene already ships 2040 sprites, so there is headroom.
+const ROLL_NOTES: usize = 384;
+const ROLL_LINES: usize = 20;
+const ROLL_HEAD_PARTS: usize = 5;
+/// Scroll rate. Sized so the visible future is a little under the
+/// composer's lookahead, otherwise notes pop in at the right edge.
+const ROLL_PX_PER_SEC: f32 = 240.0;
+/// The playhead sits left of center: mostly future, a little past.
+const ROLL_PLAYHEAD_X: f32 = -150.0;
+const ROLL_DRUM_Y: f32 = -348.0;
+
+fn row_y(row: usize) -> f32 {
+    -336.0 + row as f32 * ROLL_ROW_H + ROLL_ROW_H / 2.0
+}
+
+/// What one pool slot should draw this frame.
+#[derive(Clone, Copy)]
+struct RollDraw {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: Color,
+    alpha: f32,
+    glow: f32,
+}
+
+fn animate_pianoroll(
+    weights: Res<SceneWeights>,
+    palettes: Res<ScenePalettes>,
+    pulse: Res<AudioPulse>,
+    surge: Res<StarSurge>,
+    feed: Res<ScoreFeed>,
+    mut parts: Query<(&RollPart, &mut Transform, &mut Sprite)>,
+) {
+    let weight = weights.scenes[PIANOROLL];
+    if weight <= 0.001 {
+        return;
+    }
+    let palette = palettes.of(PIANOROLL);
+    // Brightness may follow the spiky energy; nothing that MOVES may.
+    let glow_boost = 1.0 + 0.35 * (surge.0 - 1.0).clamp(0.0, 1.5);
+    let global = weight * (0.9 + 0.25 * pulse.slow.min(1.0));
+
+    // Lay the visible notes out into pool slots.
+    let mut draws: [Option<RollDraw>; ROLL_NOTES] = [None; ROLL_NOTES];
+    let mut slot = 0usize;
+    for n in &feed.notes {
+        if slot >= ROLL_NOTES {
+            break;
+        }
+        let x0 = ROLL_PLAYHEAD_X + feed.secs_from_now(n.at) * ROLL_PX_PER_SEC;
+        let x1 = ROLL_PLAYHEAD_X + feed.secs_from_now(n.end) * ROLL_PX_PER_SEC;
+        // A sixteenth at 140 BPM is 107 ms; below a couple of pixels the
+        // sliver just flickers.
+        let w = (x1 - x0).max(14.0);
+        let cx = x0 + w / 2.0;
+        if cx + w / 2.0 < -660.0 || cx - w / 2.0 > 660.0 {
+            continue;
+        }
+        let drum = n.voice == 3;
+        let y = if drum {
+            ROLL_DRUM_Y
+        } else {
+            let row = (n.midi as i32 - ROLL_LOW_MIDI).rem_euclid(ROLL_ROWS as i32) as usize;
+            row_y(row)
+        };
+        let vel = 0.55 + 0.45 * (n.vel as f32 / 127.0);
+        let playing = n.at <= feed.pos && feed.pos < n.end;
+        let past = feed.pos >= n.end;
+        let (base_alpha, glow) = if playing {
+            (0.50 * vel, 2.2 * glow_boost)
+        } else if past {
+            (0.085 * vel, 1.0)
+        } else {
+            (0.155 * vel, 1.0)
+        };
+        // Fade at both edges so nothing pops in or out.
+        let edge = ((cx + 640.0) / 170.0).clamp(0.0, 1.0) * ((640.0 - cx) / 130.0).clamp(0.0, 1.0);
+        draws[slot] = Some(RollDraw {
+            x: cx,
+            y,
+            w: if drum { 9.0 } else { w },
+            h: if drum { 9.0 } else { 9.0 * (0.75 + 0.25 * n.vel as f32 / 127.0) },
+            color: palette.formation[(n.voice as usize).min(3)],
+            alpha: base_alpha * edge * global,
+            glow,
+        });
+        slot += 1;
+    }
+
+    let px_per_beat = ROLL_PX_PER_SEC * 60.0 / feed.bpm.max(1.0);
+    let beat_now = feed.pos as f64 / SAMPLE_RATE as f64 * feed.bpm as f64 / 60.0;
+
+    for (part, mut tf, mut sprite) in &mut parts {
+        match part {
+            RollPart::Row(row) => {
+                let midi = ROLL_LOW_MIDI + *row as i32;
+                let pc = midi.rem_euclid(12) as usize;
+                // FL-Studio-style scale banding, plus a brighter line on
+                // every C — the cheapest way to make a field of
+                // rectangles read as "piano roll" and not "random bars".
+                let a = if pc == 0 {
+                    0.055
+                } else if feed.scale[pc] {
+                    0.026
+                } else {
+                    0.007
+                };
+                sprite.color = Color::srgba(0.62, 0.70, 0.92, a * global);
+            }
+            RollPart::Line(i) => {
+                let beat = beat_now.floor() as i64 - 3 + *i as i64;
+                let x = ROLL_PLAYHEAD_X + (beat as f64 - beat_now) as f32 * px_per_beat;
+                tf.translation.x = x;
+                let bar = beat.rem_euclid(4) == 0;
+                let edge = ((x + 640.0) / 120.0).clamp(0.0, 1.0)
+                    * ((640.0 - x) / 120.0).clamp(0.0, 1.0);
+                sprite.custom_size = Some(Vec2::new(if bar { 2.0 } else { 1.0 }, 720.0));
+                sprite.color = emissive(palette.wave, 1.0)
+                    .with_alpha(if bar { 0.10 } else { 0.035 } * edge * global);
+            }
+            RollPart::Note(i) => match draws[*i] {
+                Some(d) => {
+                    tf.translation.x = d.x;
+                    tf.translation.y = d.y;
+                    sprite.custom_size = Some(Vec2::new(d.w, d.h));
+                    sprite.color = emissive(d.color, d.glow).with_alpha(d.alpha);
+                }
+                None => {
+                    // Cheaper than hiding the entity, and keeps the pool
+                    // in one archetype.
+                    sprite.color = Color::NONE;
+                }
+            },
+            RollPart::Head(i) => {
+                // Deliberately faint: a bright bar between the two boards
+                // pulls the eye away from the field.
+                let a = [0.08, 0.042, 0.028, 0.017, 0.009][(*i).min(4)];
+                sprite.color = emissive(palette.wave, 1.0).with_alpha(a * global);
+            }
+        }
     }
 }

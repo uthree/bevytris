@@ -32,40 +32,16 @@
   from pitch-shifted copies of that same note), and `zone_ready.wav`
   (two-note rising chime — octave, then octave+5th — from the same bell).
 
-## Music (`assets/music/`)
+## Music
 
-**"Retro Game Music Pack" (5 Chiptunes: Action)** by **Juhani Junkala** (SubspaceAudio)
+**None shipped.** The game has no music files at all. Every note of BGM is
+generated while you play by `crates/chiptune` — an original four-voice
+NES-style synthesizer and algorithmic composer written for this project,
+covered by the repository's own license.
 
-- Source: https://opengameart.org/content/5-chiptunes-action
-- License: **CC0 1.0** (public domain dedication) — confirmed in the pack's INFO.txt:
-  "These music tracks have been released under CC0 creative commons license.
-  You can do anything you want with these tunes."
-- Files: `title.ogg` (Title Screen), `level1.ogg` (Level 1), `level2.ogg`
-  (Level 2), `level3.ogg` (Level 3), `ending.ogg` (Ending)
-- Modifications: converted from the original WAV files to OGG Vorbis;
-  otherwise unchanged.
-- Although CC0 requires no attribution, we credit the author with pleasure.
-  Contact for commissions: juhani.junkala@musician.org
-
-**"4 Chiptunes (Adventure)"** by **Juhani Junkala** (SubspaceAudio)
-
-- Source: https://opengameart.org/content/4-chiptunes-adventure
-- License: **CC0 1.0** (public domain dedication) — confirmed in the pack's
-  INFO.txt: "These music tracks have been released under CC0 creative
-  commons license. You can do anything you want with these tunes."
-- Files: `stage1.ogg` (Stage 1), `stage2.ogg` (Stage 2), `boss_fight.ogg`
-  (Boss Fight), `stage_select.ogg` (Stage Select)
-- Modifications: renamed only (the pack ships OGG Vorbis).
-
-**"NES Shooter Music (5 tracks, 3 jingles)"** by **SketchyLogic**
-
-- Source: https://opengameart.org/content/nes-shooter-music-5-tracks-3-jingles
-- License: **CC0 1.0** (public domain dedication), as stated on the source
-  page ("Attribution is completely optional").
-- Files: `venus.wav` (Venus), `map.wav` (Map), `mars.wav` (Mars),
-  `mercury.wav` (Mercury) — the pack's remaining tracks and jingles are
-  not shipped.
-- Modifications: renamed only.
+(Earlier releases used CC0 tracks by **Juhani Junkala** (SubspaceAudio) and
+**SketchyLogic** from OpenGameArt. Those files were removed in 0.4.0; the
+sound effects below are unaffected.)
 
 ## Images (`assets/images/`)
 

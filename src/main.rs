@@ -16,6 +16,7 @@ mod effects;
 mod i18n;
 mod input;
 mod menu;
+mod music;
 mod progress;
 mod render;
 mod session;
@@ -64,8 +65,8 @@ fn main() -> AppExit {
         // custom|vs-stage-N|vs-easy|vs-normal|vs-hard preselects the game
         // mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages,
         // BEVYTRIS_ZONE_CHARGE=1 starts zone gauges full, and
-        // BEVYTRIS_SCENE=formation|cyber|galaxy|visualizer pins the
-        // background scene.
+        // BEVYTRIS_SCENE=formation|cyber|galaxy|visualizer|garden|fractal|
+        // sunset|automaton|pianoroll pins the background scene.
         .insert_state(match std::env::var("BEVYTRIS_SCREEN").as_deref() {
             Ok("settings") => AppState::Settings,
             Ok("solo") => AppState::SoloSelect,
@@ -95,6 +96,7 @@ fn main() -> AppExit {
             i18n::I18nPlugin,
             input::PadInputPlugin,
             audio::GameAudioPlugin,
+            music::MusicPlugin,
             session::SessionPlugin,
             render::RenderPlugin,
             background::BackgroundPlugin,

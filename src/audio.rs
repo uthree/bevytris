@@ -1,16 +1,21 @@
 //! Audio: sound effects come from Juhani Junkala's CC0 "512 Sound Effects
 //! (8-bit style)" collection (assets/sfx, peak-normalized; see
-//! assets/CREDITS.md), BGM streams from his CC0 "Retro Game Music Pack".
-//! Combo sounds are one coin sample pitched up a pentatonic step per combo.
+//! assets/CREDITS.md). Combo sounds are one coin sample pitched up a
+//! pentatonic step per combo.
+//!
+//! There are no music files. The BGM is generated at runtime — see
+//! `src/music.rs` and `crates/chiptune`. What lives here is the half of
+//! the plumbing the two share: the [`Bgm`] marker, the volume slider, the
+//! zone duck, pause/resume and the corner "now playing" toast, all of
+//! which are sink-level and source-agnostic.
 
 use bevy::audio::{AudioSource, PlaybackSettings, Volume};
 use bevy::prelude::*;
-use rand::seq::IndexedRandom;
 use std::collections::HashMap;
 
 use crate::config::GameSettings;
-use crate::session::{GameSession, HumanControlled, SessionResult};
-use crate::state::{AppState, PlayState};
+use crate::session::{GameSession, HumanControlled};
+use crate::state::PlayState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sfx {
@@ -213,32 +218,11 @@ pub fn player_zone_active(
 // Bevy plumbing
 // ---------------------------------------------------------------------------
 
-/// BGM streamed from CC0 assets (Juhani Junkala's "Retro Game Music Pack"
-/// and "4 Chiptunes (Adventure)", SketchyLogic's "NES Shooter Music"; see
-/// assets/CREDITS.md). In-game tracks are picked at random per match.
-#[derive(Resource)]
-pub struct BgmBank {
-    title: BgmTrack,
-    stage_select: BgmTrack,
-    game: Vec<BgmTrack>,
-    victory: Handle<AudioSource>,
-}
-
-/// A music track plus what the corner toast should call it.
-#[derive(Clone)]
-struct BgmTrack {
-    name: &'static str,
-    handle: Handle<AudioSource>,
-}
-
-/// Marker for the currently playing BGM entity.
+/// Marker for the BGM entity. `src/music.rs` spawns exactly one of these
+/// at startup and it lives for the whole process — the generated stream
+/// never stops, it only changes what it is playing.
 #[derive(Component)]
 pub struct Bgm;
-
-/// Which track is currently playing, so re-entering a state (Settings →
-/// Title, or a match restart) doesn't restart the music from bar one.
-#[derive(Resource, Default)]
-struct CurrentBgm(Option<Handle<AudioSource>>);
 
 #[derive(Message)]
 pub struct PlaySfx {
@@ -281,40 +265,11 @@ impl Plugin for GameAudioPlugin {
         app.insert_resource(bank);
         app.insert_resource(muffled);
         app.init_resource::<BgmDuck>();
-        let track = |name: &'static str, file: &str| BgmTrack {
-            name,
-            handle: asset_server.load(format!("music/{file}")),
-        };
-        app.insert_resource(BgmBank {
-            title: track("Title Screen - Juhani Junkala", "title.ogg"),
-            stage_select: track("Stage Select - Juhani Junkala", "stage_select.ogg"),
-            game: vec![
-                track("Level 1 - Juhani Junkala", "level1.ogg"),
-                track("Level 2 - Juhani Junkala", "level2.ogg"),
-                track("Level 3 - Juhani Junkala", "level3.ogg"),
-                track("Stage 1 - Juhani Junkala", "stage1.ogg"),
-                track("Stage 2 - Juhani Junkala", "stage2.ogg"),
-                track("Boss Fight - Juhani Junkala", "boss_fight.ogg"),
-                track("Venus - SketchyLogic", "venus.wav"),
-                track("Map - SketchyLogic", "map.wav"),
-                track("Mars - SketchyLogic", "mars.wav"),
-                track("Mercury - SketchyLogic", "mercury.wav"),
-            ],
-            victory: asset_server.load("music/ending.ogg"),
-        });
 
         app.add_message::<PlaySfx>()
-            .init_resource::<CurrentBgm>()
             .add_systems(Update, (play_sfx, apply_bgm_volume, update_bgm_toasts))
-            .add_systems(OnEnter(AppState::Title), start_title_bgm)
-            .add_systems(OnEnter(AppState::SoloSelect), start_stage_select_bgm)
-            .add_systems(OnEnter(AppState::ZoneSelect), start_stage_select_bgm)
-            .add_systems(OnEnter(AppState::StageSelect), start_stage_select_bgm)
-            .add_systems(OnEnter(AppState::CustomSetup), start_stage_select_bgm)
-            .add_systems(OnEnter(AppState::Playing), start_game_bgm)
             .add_systems(OnEnter(PlayState::Paused), pause_bgm)
-            .add_systems(OnExit(PlayState::Paused), resume_bgm)
-            .add_systems(OnEnter(PlayState::Finished), (pause_bgm, play_victory_jingle));
+            .add_systems(OnExit(PlayState::Paused), resume_bgm);
     }
 }
 
@@ -350,100 +305,13 @@ fn play_sfx(
     }
 }
 
-fn start_title_bgm(
-    commands: Commands,
-    bank: Res<BgmBank>,
-    settings: Res<GameSettings>,
-    current: ResMut<CurrentBgm>,
-    sinks: Query<&AudioSink, With<Bgm>>,
-) {
-    swap_bgm(commands, &bank.title, &settings, current, sinks);
-}
-
-fn start_stage_select_bgm(
-    commands: Commands,
-    bank: Res<BgmBank>,
-    settings: Res<GameSettings>,
-    current: ResMut<CurrentBgm>,
-    sinks: Query<&AudioSink, With<Bgm>>,
-) {
-    swap_bgm(commands, &bank.stage_select, &settings, current, sinks);
-}
-
-fn start_game_bgm(
-    commands: Commands,
-    bank: Res<BgmBank>,
-    settings: Res<GameSettings>,
-    current: ResMut<CurrentBgm>,
-    sinks: Query<&AudioSink, With<Bgm>>,
-) {
-    let track = bank
-        .game
-        .choose(&mut rand::rng())
-        .expect("game BGM list is never empty")
-        .clone();
-    swap_bgm(commands, &track, &settings, current, sinks);
-}
-
-/// On a VS win or a finished race, celebrate with the (CC0) ending jingle.
-fn play_victory_jingle(
-    mut commands: Commands,
-    bank: Res<BgmBank>,
-    settings: Res<GameSettings>,
-    result: Option<Res<SessionResult>>,
-) {
-    if matches!(
-        result.as_deref(),
-        Some(SessionResult::VsWin { winner: 0 } | SessionResult::RaceDone)
-    ) {
-        commands.spawn((
-            AudioPlayer::new(bank.victory.clone()),
-            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(settings.bgm_linear())),
-            // Cut the jingle if the player leaves the result screen early.
-            DespawnOnExit(PlayState::Finished),
-        ));
-    }
-}
-
-fn swap_bgm(
-    mut commands: Commands,
-    track: &BgmTrack,
-    settings: &GameSettings,
-    mut current: ResMut<CurrentBgm>,
-    sinks: Query<&AudioSink, With<Bgm>>,
-) {
-    if current.0.as_ref() == Some(&track.handle) {
-        // Same track: keep playing where it is (it may have been paused by
-        // a result screen — a match restart must un-pause it).
-        for sink in &sinks {
-            sink.play();
-        }
-        return;
-    }
-    current.0 = Some(track.handle.clone());
-    debug!("bgm: starting {:?}", track.handle.path());
-    commands.queue(|world: &mut World| {
-        let old: Vec<Entity> = world
-            .query_filtered::<Entity, Or<(With<Bgm>, With<BgmToast>)>>()
-            .iter(world)
-            .collect();
-        for e in old {
-            world.entity_mut(e).despawn();
-        }
-    });
-    commands.spawn((
-        AudioPlayer::new(track.handle.clone()),
-        PlaybackSettings::LOOP.with_volume(Volume::Linear(settings.bgm_linear())),
-        Bgm,
-    ));
-    spawn_bgm_toast(&mut commands, track.name);
-}
-
 // ---------------------------------------------------------------------------
 // "Now playing" toast
 // ---------------------------------------------------------------------------
 
-/// Corner note naming the track whenever the BGM actually changes.
+/// Corner note naming what is playing. It used to name a CC0 file; it now
+/// names the generated track — key, mode, tempo and the low bits of the
+/// session seed, which makes it a bug-report handle as well as a label.
 #[derive(Component)]
 struct BgmToast {
     life: f32,
@@ -451,7 +319,7 @@ struct BgmToast {
 
 const BGM_TOAST_LIFE: f32 = 4.5;
 
-fn spawn_bgm_toast(commands: &mut Commands, name: &str) {
+pub fn spawn_bgm_toast(commands: &mut Commands, name: &str) {
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
