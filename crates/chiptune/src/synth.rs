@@ -82,6 +82,12 @@ fn vel_scale(vel: u8) -> f32 {
     0.35 + 0.65 * (vel.min(127) as f32 / 127.0)
 }
 
+/// A note must last this many frames (~0.4 s) before it gets a tail fall.
+/// Anything shorter reads as a wrong note rather than as expression.
+const FALL_MIN_FRAMES: u16 = 24;
+/// How many frames the fall occupies at the end of the note.
+const FALL_FRAMES: u16 = 6;
+
 // ---------------------------------------------------------------------------
 // Filters
 // ---------------------------------------------------------------------------
@@ -147,6 +153,8 @@ struct VoiceState {
     vel: f32,
     arp: Option<[i8; 3]>,
     base_midi: f32,
+    /// The note's full length, so the tail fall knows where the tail is.
+    total_frames: u16,
     /// Volume is ramped per sample between macro steps: the raw 60 Hz
     /// staircase leaves an error signal only ~14 dB below the tone, which
     /// is an audible buzz on short decays.
@@ -166,6 +174,7 @@ impl VoiceState {
             vel: 1.0,
             arp: None,
             base_midi: 60.0,
+            total_frames: 0,
             gain: 0.0,
             gain_step: 0.0,
         }
@@ -177,6 +186,7 @@ impl VoiceState {
         self.active = true;
         self.cursor = 0;
         self.frames_left = ev.frames.max(1);
+        self.total_frames = ev.frames.max(1);
         self.frames_played = 0;
         self.vel = vel_scale(ev.vel);
         self.arp = ev.arp;
@@ -214,6 +224,13 @@ impl VoiceState {
         if d.vib_depth > 0.0 && self.frames_played > d.vib_delay {
             let t = (self.frames_played - d.vib_delay) as f32 / FRAME_RATE as f32;
             m += d.vib_depth * (std::f32::consts::TAU * d.vib_rate * t).sin();
+        }
+        // Tail fall: an accelerating slide off the end of a held note.
+        // Squaring the progress is what makes it read as a fall rather
+        // than as a portamento to nowhere.
+        if d.fall > 0.0 && self.total_frames >= FALL_MIN_FRAMES && self.frames_left < FALL_FRAMES {
+            let k = (FALL_FRAMES - self.frames_left) as f32;
+            m -= d.fall * k * k / 3.0;
         }
         m
     }

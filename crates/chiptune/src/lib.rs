@@ -126,10 +126,15 @@ pub struct InstDef {
     pub vol: Macro,
     /// Pulse duty index: 0 = 12.5%, 1 = 25%, 2 = 50%.
     pub duty: u8,
-    /// Frames before vibrato starts; 0 depth disables it.
+    /// Frames before vibrato starts; 0 depth disables it. The delay is
+    /// what makes vibrato a property of *long* notes without the composer
+    /// having to pick a different instrument for them.
     pub vib_delay: u16,
     pub vib_depth: f32,
     pub vib_rate: f32,
+    /// Semitone scale of the pitch fall at the tail of a held note. 0
+    /// disables it; see [`synth`] for the length threshold.
+    pub fall: f32,
     /// Index into [`synth::NOISE_PERIODS`] for the drum instruments.
     pub noise_idx: u8,
     pub noise_short: bool,
@@ -139,57 +144,71 @@ const fn m(v: &'static [i8], loop_at: Option<usize>) -> Macro {
     Macro { v, loop_at }
 }
 
+/// No vibrato, no fall — the shared tail for the instruments that hold
+/// steady.
+const STEADY: (u16, f32, f32, f32) = (0, 0.0, 0.0, 0.0);
+
 const PLUCK: InstDef = InstDef {
     vol: m(&[15, 15, 14, 12, 11, 10, 10, 9, 9, 8, 8, 7], Some(8)),
     duty: 1,
-    vib_delay: 0,
-    vib_depth: 0.0,
-    vib_rate: 0.0,
+    // Short notes finish before the delay expires, so only held ones
+    // wobble — one instrument covers both jobs.
+    vib_delay: 13,
+    vib_depth: 0.14,
+    vib_rate: 6.5,
+    fall: 0.55,
     noise_idx: 0,
     noise_short: false,
 };
 const SUSTAIN: InstDef = InstDef {
     vol: m(&[11, 14, 14, 13, 13, 12, 12, 12], Some(4)),
     duty: 1,
-    vib_delay: 14,
-    vib_depth: 0.10,
+    vib_delay: 12,
+    vib_depth: 0.17,
     vib_rate: 6.0,
+    fall: 0.65,
     noise_idx: 0,
     noise_short: false,
 };
 const SOFT: InstDef = InstDef {
     vol: m(&[7, 10, 12, 12, 11, 11, 10, 10, 9], Some(5)),
     duty: 2,
-    vib_delay: 20,
-    vib_depth: 0.07,
+    vib_delay: 18,
+    vib_depth: 0.11,
     vib_rate: 5.0,
+    fall: 0.34,
     noise_idx: 0,
     noise_short: false,
 };
 const ORGAN: InstDef = InstDef {
     vol: m(&[10, 12, 11, 11, 10, 10], Some(2)),
     duty: 2,
-    vib_delay: 0,
-    vib_depth: 0.0,
-    vib_rate: 0.0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    // A chord bed that slides out of tune under the melody just sounds
+    // broken, so the harmony voices never fall.
+    fall: STEADY.3,
     noise_idx: 0,
     noise_short: false,
 };
 const STAB: InstDef = InstDef {
     vol: m(&[15, 13, 10, 8, 6, 4, 3, 2, 1], None),
     duty: 0,
-    vib_delay: 0,
-    vib_depth: 0.0,
-    vib_rate: 0.0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
     noise_idx: 0,
     noise_short: false,
 };
 const PAD: InstDef = InstDef {
     vol: m(&[4, 6, 7, 8, 8, 7, 7], Some(4)),
     duty: 2,
-    vib_delay: 0,
-    vib_depth: 0.0,
-    vib_rate: 0.0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
     noise_idx: 0,
     noise_short: false,
 };
@@ -197,36 +216,41 @@ const BASS: InstDef = InstDef {
     // The triangle has no volume register: this macro is a pure gate.
     vol: m(&[15], Some(0)),
     duty: 0,
-    vib_delay: 0,
-    vib_depth: 0.0,
-    vib_rate: 0.0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    // The low end stays solid.
+    fall: STEADY.3,
     noise_idx: 0,
     noise_short: false,
 };
 const KICK: InstDef = InstDef {
     vol: m(&[13, 9, 5, 2, 1], None),
     duty: 0,
-    vib_delay: 0,
-    vib_depth: 0.0,
-    vib_rate: 0.0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
     noise_idx: 13,
     noise_short: false,
 };
 const SNARE: InstDef = InstDef {
     vol: m(&[15, 13, 11, 9, 7, 5, 4, 3, 2, 1], None),
     duty: 0,
-    vib_delay: 0,
-    vib_depth: 0.0,
-    vib_rate: 0.0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
     noise_idx: 9,
     noise_short: false,
 };
 const HAT: InstDef = InstDef {
     vol: m(&[9, 5, 3, 1], None),
     duty: 0,
-    vib_delay: 0,
-    vib_depth: 0.0,
-    vib_rate: 0.0,
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
     noise_idx: 2,
     noise_short: false,
 };

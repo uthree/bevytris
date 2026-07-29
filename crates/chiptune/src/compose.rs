@@ -91,21 +91,25 @@ const RHYTHMS: [&[(u8, u8)]; 8] = [
 
 /// I-V-vi-IV and friends. Degrees are 0-indexed, so 4 is V and 5 is vi
 /// (or bVI in a minor mode — the same numbers work in every mode, which
-/// is the whole point of storing degrees).
+/// is the whole point of storing degrees). Only the victory fanfare uses
+/// these; everything else stays in a minor mode, which is both cooler and
+/// closer to the genre.
 const CALM_LOOPS: [[i32; 4]; 4] = [
     [0, 4, 5, 3],
     [5, 3, 0, 4],
     [0, 3, 4, 0],
     [0, 5, 3, 4],
 ];
-/// The minor-mode set. `[0, 6, 5, 4]` is the Andalusian cadence — the
-/// harmonic cousin of the Korobeiniki idiom, so it reads as genre-correct
-/// without quoting anything.
-const DARK_LOOPS: [[i32; 4]; 4] = [
+/// The minor set. `[0, 6, 5, 4]` is the Andalusian cadence — the harmonic
+/// cousin of the Korobeiniki idiom, so it reads as genre-correct without
+/// quoting anything.
+const DARK_LOOPS: [[i32; 4]; 6] = [
     [0, 3, 4, 0],
     [0, 5, 2, 6],
     [0, 6, 5, 4],
     [0, 1, 4, 0],
+    [0, 2, 5, 6],
+    [0, 6, 3, 4],
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -165,7 +169,10 @@ enum Transform {
 
 fn build_material(seed: u64, profile: Profile) -> Material {
     let mut rng = Rng::new(seed ^ ((profile as u64 + 1) * 0x9E37_79B9));
-    let dark = matches!(profile, Profile::VsIntense);
+    // Everything but the fanfare lives in minor. Major progressions read
+    // as cheerful, and cheerful is the wrong register for a stack that is
+    // about to top out.
+    let dark = !matches!(profile, Profile::Victory);
 
     // Four motifs, each on its own rhythm cell.
     let mut rhythms_used: Vec<usize> = Vec::new();
@@ -183,7 +190,7 @@ fn build_material(seed: u64, profile: Profile) -> Material {
         });
     }
 
-    let loops = if dark { &DARK_LOOPS } else { &CALM_LOOPS };
+    let loops: &[[i32; 4]] = if dark { &DARK_LOOPS } else { &CALM_LOOPS };
     let mut sections = Vec::new();
     for _ in 0..3 {
         let base = *rng.pick(loops);
@@ -317,27 +324,37 @@ fn tempo_target(profile: Profile, intensity: f32) -> f32 {
         Profile::Ambient => 96.0,
         Profile::Victory => 132.0,
         Profile::SoloCalm => [118.0, 132.0, 150.0, 174.0][band(intensity)],
-        Profile::VsIntense => [148.0, 162.0, 178.0, 214.0][band(intensity)],
+        Profile::VsIntense => [168.0, 184.0, 200.0, 232.0][band(intensity)],
     }
 }
 
 /// Mode ladder, bright to dark. The tonic never moves, so the bass never
 /// has to know this happened.
+///
+/// Every playing profile is minor: Dorian is the cool, unhurried one
+/// (its major sixth keeps it from sounding sad), Aeolian is the plain
+/// one, harmonic minor sharpens the pull home, and Phrygian's flat second
+/// is the darkest diatonic mode there is — saved for real danger. Only
+/// the victory fanfare goes major.
+///
+/// Phrygian dominant is deliberately unused here despite fitting the
+/// mood: its tonic triad is *major*, and one bright chord is enough to
+/// undo the whole effect.
 fn mode_target(profile: Profile, intensity: f32) -> Mode {
     match profile {
-        Profile::Ambient => Mode::Ionian,
+        Profile::Ambient => Mode::Dorian,
         Profile::Victory => Mode::Lydian,
         Profile::SoloCalm => [
-            Mode::Ionian,
-            Mode::Mixolydian,
             Mode::Dorian,
             Mode::Aeolian,
+            Mode::Aeolian,
+            Mode::HarmonicMinor,
         ][band(intensity)],
         Profile::VsIntense => [
-            Mode::Dorian,
             Mode::Aeolian,
             Mode::Aeolian,
-            Mode::PhrygianDominant,
+            Mode::HarmonicMinor,
+            Mode::Phrygian,
         ][band(intensity)],
     }
 }
@@ -351,6 +368,12 @@ struct Arrangement {
     bass_pat: usize,
     hat_k: usize,
     kick_k: usize,
+    /// Four-on-the-floor: a kick on every quarter, unconditionally, with
+    /// [`Arrangement::kick_extra`] syncopations layered on top rather
+    /// than replacing the pulse. A Euclidean kick is more interesting but
+    /// it wanders off the beat, and versus wants a floor to stand on.
+    four_floor: bool,
+    kick_extra: &'static [u8],
     snare: bool,
     swing: f32,
     max_prio: u8,
@@ -379,6 +402,8 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             bass_pat: 0,
             hat_k: 0,
             kick_k: 0,
+            four_floor: false,
+            kick_extra: &[],
             snare: false,
             swing: 0.58,
             max_prio: 0,
@@ -392,6 +417,8 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             bass_pat: [0, 1, 2, 3][b],
             hat_k: [0, 2, 4, 8][b],
             kick_k: [2, 2, 3, 4][b],
+            four_floor: false,
+            kick_extra: &[],
             snare: i >= 0.50,
             swing: 0.56,
             max_prio: if i < 0.35 { 0 } else { 1 },
@@ -404,7 +431,10 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             harm_inst: if i < 0.55 { Inst::Organ } else { Inst::Stab },
             bass_pat: [1, 2, 2, 4][b],
             hat_k: [4, 8, 11, 13][b],
-            kick_k: [4, 4, 5, 6][b],
+            kick_k: 4,
+            four_floor: true,
+            // Pickups layered onto the pulse as it heats up.
+            kick_extra: [&[][..], &[14], &[7, 14], &[7, 11, 14]][b],
             snare: true,
             swing: 0.52,
             max_prio: if i < 0.30 { 1 } else { 2 },
@@ -417,7 +447,9 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             harm_inst: Inst::Organ,
             bass_pat: 1,
             hat_k: 4,
-            kick_k: 3,
+            kick_k: 4,
+            four_floor: true,
+            kick_extra: &[],
             snare: true,
             swing: 0.54,
             max_prio: 1,
@@ -674,13 +706,31 @@ impl Composer {
                     });
                 }
             }
-            for (i, on) in euclid_rot(kick_k, 16, kick_rot).iter().enumerate() {
+            let mut kick_mask = if arr.four_floor {
+                let mut m = [false; 16];
+                for step in (0..16).step_by(4) {
+                    m[step] = true;
+                }
+                m
+            } else {
+                let mut m = [false; 16];
+                for (i, on) in euclid_rot(kick_k, 16, kick_rot).iter().enumerate() {
+                    m[i] = *on;
+                }
+                m
+            };
+            for &step in arr.kick_extra {
+                kick_mask[step as usize % 16] = true;
+            }
+            for (i, on) in kick_mask.iter().enumerate() {
                 if *on {
                     out.push(NoteEvent {
                         at: at(i as f32),
                         inst: Inst::Kick,
+                        // Pickups sit under the four-on-the-floor pulse
+                        // rather than competing with it.
+                        vel: if i % 4 == 0 { 120 } else { 92 },
                         midi: 0,
-                        vel: 118,
                         frames: 6,
                         arp: None,
                     });
@@ -863,11 +913,73 @@ mod tests {
     #[test]
     fn calm_is_slower_and_brighter_than_versus() {
         assert!(tempo_target(Profile::SoloCalm, 0.5) < tempo_target(Profile::VsIntense, 0.5));
-        assert!(!mode_target(Profile::SoloCalm, 0.0).is_minor());
-        assert!(mode_target(Profile::SoloCalm, 0.9).is_minor());
-        assert!(mode_target(Profile::VsIntense, 0.0).is_minor());
+        // Everything that plays during a match is minor; only the
+        // fanfare is allowed to be cheerful.
+        for p in [Profile::Ambient, Profile::SoloCalm, Profile::VsIntense] {
+            for i in [0.0f32, 0.5, 1.0] {
+                assert!(mode_target(p, i).is_minor(), "{p:?} at {i} went major");
+            }
+        }
+        assert!(!mode_target(Profile::Victory, 0.0).is_minor());
+        // Solo is still the brighter of the two minors: Dorian's major
+        // sixth is what keeps it from sounding grim.
+        assert!(
+            mode_target(Profile::SoloCalm, 0.0).pitch(5)
+                > mode_target(Profile::VsIntense, 0.0).pitch(5)
+        );
         // Danger really does push the tempo up.
         assert!(tempo_target(Profile::VsIntense, 0.95) > tempo_target(Profile::VsIntense, 0.1));
+    }
+
+    #[test]
+    fn versus_kicks_on_every_quarter() {
+        let ctx = Context {
+            profile: Profile::VsIntense,
+            intensity: 0.9,
+            elapsed: 600.0,
+            ..Default::default()
+        };
+        let arr = arrange(Profile::VsIntense, &ctx);
+        assert!(arr.four_floor);
+
+        // Check it in the emitted score, not just the flag: every bar
+        // must carry a kick on all four beats.
+        let out = run(Profile::VsIntense, 0.9, 8);
+        let mut c = Composer::new(0xBEEF);
+        c.set_profile(Profile::VsIntense, 0.9);
+        let spb = samples_per_step(tempo_target(Profile::VsIntense, 0.9));
+        let bar_len = (spb * STEPS_PER_BAR as f64) as u64;
+        let kicks: Vec<u64> = out
+            .iter()
+            .filter(|e| e.inst == Inst::Kick)
+            .map(|e| e.at)
+            .collect();
+        assert!(kicks.len() >= 8 * 4, "only {} kicks in 8 bars", kicks.len());
+        for beat in 0..4u64 {
+            let want = (beat as f64 * 4.0 * spb) as u64;
+            assert!(
+                kicks
+                    .iter()
+                    .any(|&k| (k % bar_len).abs_diff(want) < spb as u64 / 2),
+                "no kick on beat {}",
+                beat + 1
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_lead_bends_its_long_notes() {
+        use crate::inst_def;
+        for i in [Inst::Pluck, Inst::Sustain, Inst::Soft] {
+            let d = inst_def(i);
+            assert!(d.fall > 0.0, "{i:?} should fall");
+            assert!(d.vib_depth > 0.0 && d.vib_delay > 0, "{i:?} should wobble");
+        }
+        // A chord bed or a bass line that slides just sounds broken.
+        for i in [Inst::Organ, Inst::Pad, Inst::Stab, Inst::Bass] {
+            assert_eq!(inst_def(i).fall, 0.0, "{i:?} must not fall");
+            assert_eq!(inst_def(i).vib_depth, 0.0, "{i:?} must not wobble");
+        }
     }
 
     #[test]
