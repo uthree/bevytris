@@ -67,8 +67,10 @@ pub enum Leveling {
     /// Cleared lines never change it, so efficient downstacking is never
     /// punished with extra gravity and stalling never keeps a match slow.
     Timed { seconds_per_level: f32 },
-    /// Race rule (sprint / dig): the level never moves — runs are timed,
-    /// so gravity stays constant and only execution speed matters.
+    /// Sprint and zen rule: the level never moves. A race is timed, so
+    /// gravity stays constant and only execution speed matters; zen keeps
+    /// it constant because a rising floor is exactly the pressure the mode
+    /// exists to remove.
     Fixed,
 }
 
@@ -153,6 +155,9 @@ pub enum GameEvent {
         attack: u32,
     },
     TopOut,
+    /// Endless play only: the stack reached the top, so the field was
+    /// wiped and play continued instead of the run ending.
+    BoardReset,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -164,6 +169,8 @@ pub struct Stats {
     pub attack_sent: u32,
     pub perfect_clears: u32,
     pub time: f64,
+    /// How many times an endless run has been wiped and restarted.
+    pub board_resets: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +215,10 @@ pub struct Game {
     /// 0 = one clean well per batch (the guideline default), 100 = every
     /// row somewhere else, which turns attacks into cheese to dig.
     pub garbage_messiness: u32,
+
+    /// Endless play: topping out wipes the field and the run carries on
+    /// instead of ending. `game_over` never becomes true.
+    pub endless: bool,
 
     /// False bans the hold slot outright: [`Game::hold`] refuses and the
     /// frontend hides the box.
@@ -264,6 +275,7 @@ impl Game {
             incoming: VecDeque::new(),
             garbage_rng: StdRng::seed_from_u64(seed ^ 0x6761_7262_6167_65),
             garbage_messiness: 0,
+            endless: false,
             hold_enabled: true,
             visible_previews: PREVIEW_COUNT,
             margin_time: None,
@@ -626,7 +638,11 @@ impl Game {
             // Block out: the new piece overlaps the stack.
             self.active = piece;
             self.top_out();
-            return;
+            if self.game_over {
+                return;
+            }
+            // Endless: the field was just wiped, so the piece fits now
+            // and the normal spawn below can run.
         }
         // Guideline: the piece immediately drops one row if unobstructed.
         self.active = if self.board.fits(&piece.shifted(0, -1)) {
@@ -643,7 +659,22 @@ impl Game {
         self.events.push(GameEvent::Spawned);
     }
 
+    /// The stack reached the top. Normally that ends the run; in endless
+    /// play the field is wiped instead and `game_over` stays false, so
+    /// every caller must re-check it rather than assuming the game is
+    /// over once this returns.
     fn top_out(&mut self) {
+        if self.endless {
+            self.board = Board::new();
+            // The chain died with the stack; starting the fresh field on
+            // a live combo or back-to-back would be unearned.
+            self.combo = -1;
+            self.b2b_armed = false;
+            self.incoming.clear();
+            self.stats.board_resets += 1;
+            self.events.push(GameEvent::BoardReset);
+            return;
+        }
         self.game_over = true;
         self.events.push(GameEvent::TopOut);
     }
@@ -672,6 +703,15 @@ impl Game {
                 self.end_zone();
             } else {
                 self.top_out();
+                if self.game_over {
+                    return;
+                }
+                // Endless: the field (including the piece that just
+                // locked) is gone, so there is nothing left to clear and
+                // no garbage to rise. Go straight to the next piece.
+                self.hold_used = false;
+                let kind = self.next_from_queue();
+                self.spawn_active(kind);
                 return;
             }
         }
@@ -1015,6 +1055,84 @@ mod tests {
         game.active = ActivePiece::spawn(kind);
         game.active = game.active.shifted(0, -1);
         game.last_rotation_kick = None;
+    }
+
+    /// Fill the field to the ceiling, leaving column 0 open so no row is
+    /// complete: the next piece has nowhere to spawn and nothing clears
+    /// to save it.
+    fn bury(game: &mut Game) {
+        for y in 0..crate::board::BOARD_HEIGHT {
+            for x in 1..BOARD_WIDTH {
+                game.board.set_cell(x, y, Some(Cell::Garbage));
+            }
+        }
+    }
+
+    #[test]
+    fn endless_play_wipes_the_field_instead_of_ending() {
+        let mut game = Game::new(5, 1);
+        game.endless = true;
+        game.score = 4321;
+        game.lines = 77;
+        bury(&mut game);
+        game.take_events();
+
+        game.hard_drop();
+
+        assert!(!game.game_over, "zen must never end");
+        assert!(game.board.is_empty(), "the field should have been wiped");
+        assert_eq!(game.stats.board_resets, 1);
+        assert!(
+            game.events
+                .iter()
+                .any(|e| matches!(e, GameEvent::BoardReset))
+        );
+        assert!(
+            !game.events.iter().any(|e| matches!(e, GameEvent::TopOut)),
+            "a wipe is not a top-out"
+        );
+        // The run continues: the score and line count carry over and
+        // there is a live piece to play.
+        assert_eq!(game.score, 4321);
+        assert_eq!(game.lines, 77);
+        assert!(game.board.fits(&game.active));
+    }
+
+    #[test]
+    fn a_wipe_breaks_the_combo_and_back_to_back() {
+        let mut game = Game::new(5, 1);
+        game.endless = true;
+        game.combo = 4;
+        game.b2b_armed = true;
+        bury(&mut game);
+        game.hard_drop();
+        assert_eq!(game.combo(), -1);
+        assert!(!game.b2b_armed());
+    }
+
+    /// The same situation without `endless` must still end the run —
+    /// zen's escape hatch must not leak into marathon or versus.
+    #[test]
+    fn a_normal_run_still_tops_out() {
+        let mut game = Game::new(5, 1);
+        bury(&mut game);
+        game.take_events();
+        game.hard_drop();
+        assert!(game.game_over);
+        assert_eq!(game.stats.board_resets, 0);
+        assert!(game.events.iter().any(|e| matches!(e, GameEvent::TopOut)));
+    }
+
+    #[test]
+    fn endless_play_survives_being_buried_over_and_over() {
+        let mut game = Game::new(9, 1);
+        game.endless = true;
+        for _ in 0..25 {
+            bury(&mut game);
+            game.hard_drop();
+            assert!(!game.game_over);
+        }
+        assert_eq!(game.stats.board_resets, 25);
     }
 
     #[test]

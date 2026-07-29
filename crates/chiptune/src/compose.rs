@@ -146,6 +146,10 @@ pub enum Profile {
     VsIntense = 2,
     /// The result screen.
     Victory = 3,
+    /// Zen: the slowest and most open writing here. Nothing in that mode
+    /// can be lost, so the music has nothing to warn about — it brightens
+    /// when the field is clear and only clouds over as the stack climbs.
+    Zen = 4,
 }
 
 /// Everything the composer is allowed to know about the game.
@@ -311,11 +315,12 @@ impl Kit {
 }
 
 impl Profile {
-    pub const ALL: [Profile; 4] = [
+    pub const ALL: [Profile; 5] = [
         Profile::Ambient,
         Profile::SoloCalm,
         Profile::VsIntense,
         Profile::Victory,
+        Profile::Zen,
     ];
 
     /// Short English name, for the listening screen.
@@ -325,6 +330,7 @@ impl Profile {
             Profile::SoloCalm => "SOLO",
             Profile::VsIntense => "VERSUS",
             Profile::Victory => "VICTORY",
+            Profile::Zen => "ZEN",
         }
     }
 }
@@ -338,6 +344,9 @@ fn roll_meter(profile: Profile, rng: &mut Rng) -> Meter {
         Profile::Ambient => [0.55, 0.25, 0.20],
         Profile::SoloCalm => [0.66, 0.17, 0.17],
         Profile::VsIntense => [0.78, 0.07, 0.15],
+        // Zen is the one place a lopsided bar is an asset: there is no
+        // stack to react to on the beat, so 3/4 and 6/8 just float.
+        Profile::Zen => [0.40, 0.30, 0.30],
     };
     [Meter::Four, Meter::Three, Meter::Six][rng.weighted(&w)]
 }
@@ -519,6 +528,9 @@ fn band(intensity: f32) -> usize {
 /// keep moving. Only the pulse holds still.
 fn tempo_range(profile: Profile) -> (f32, f32) {
     match profile {
+        // Slower than the menus, which is to say slower than anything
+        // else the composer writes.
+        Profile::Zen => (74.0, 88.0),
         Profile::Ambient => (92.0, 104.0),
         Profile::Victory => (128.0, 138.0),
         Profile::SoloCalm => (122.0, 144.0),
@@ -531,6 +543,7 @@ fn tempo_range(profile: Profile) -> (f32, f32) {
 /// makes the rest of the arrangement sound like a chip.
 fn roll_kit(profile: Profile, rng: &mut Rng) -> Kit {
     let sampled = match profile {
+        Profile::Zen => 0.20,
         Profile::Ambient => 0.25,
         Profile::SoloCalm => 0.35,
         Profile::VsIntense => 0.45,
@@ -564,6 +577,11 @@ fn mode_target(profile: Profile, intensity: f32) -> Mode {
     match profile {
         Profile::Ambient => Mode::Dorian,
         Profile::Victory => Mode::Lydian,
+        // Zen inverts the usual reading of intensity. Nothing here is at
+        // stake, so a clear field gets the brightest mode in the set and
+        // a tall stack only shades it back toward minor — colour, not a
+        // warning.
+        Profile::Zen => [Mode::Lydian, Mode::Ionian, Mode::Dorian, Mode::Aeolian][band(intensity)],
         Profile::SoloCalm => [
             Mode::Dorian,
             Mode::Aeolian,
@@ -674,6 +692,9 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
         Profile::SoloCalm => (0.0, 6.0, 16.0),
         Profile::VsIntense => (0.0, 2.0, 7.0),
         Profile::Victory => (0.0, 0.0, 0.0),
+        // A soft pulse from the start (zen still wants a tempo to play
+        // to) and a melody that takes its time arriving.
+        Profile::Zen => (0.0, 4.0, 10.0),
     };
 
     // The extra channels come in last, so the arrangement still builds
@@ -696,6 +717,31 @@ fn arrange(profile: Profile, ctx: &Context) -> Arrangement {
             kick_extra: &[],
             snare: false,
             swing: 0.58,
+            max_prio: 0,
+        },
+        Profile::Zen => Arrangement {
+            lead: t >= l_at,
+            harmony: t >= h_at,
+            perc: t >= p_at,
+            pad: Some(if i < 0.6 {
+                Inst::Glass
+            } else {
+                Inst::WaveOrgan
+            }),
+            counter: (t >= l_at + 12.0).then_some(Counter::Echo),
+            saw: None,
+            shaker: false,
+            lead_inst: Inst::Soft,
+            harm_inst: Inst::Pad,
+            // The drums stay a texture rather than a beat: a sparse
+            // Euclidean kick, no snare, no backbeat to nod along to.
+            bass_pat: 0,
+            hat_k: [0, 2, 3, 4][b],
+            kick_k: [1, 2, 2, 3][b],
+            four_floor: false,
+            kick_extra: &[],
+            snare: false,
+            swing: 0.60,
             max_prio: 0,
         },
         Profile::SoloCalm => Arrangement {

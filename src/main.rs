@@ -63,7 +63,7 @@ fn main() -> AppExit {
     .insert_resource(i18n::Locale(settings.language.resolve()))
     .insert_resource(settings)
     // Dev helpers: BEVYTRIS_SCREEN=settings|solo|stages|zones|custom|
-    // music|playing skips the title menu, BEVYTRIS_MODE=sprint|dig|zone|
+    // music|playing skips the title menu, BEVYTRIS_MODE=sprint|zen|zone|
     // custom|vs-stage-N|vs-easy|vs-normal|vs-hard preselects the game
     // mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages,
     // BEVYTRIS_ZONE_CHARGE=1 starts zone gauges full, and
@@ -81,7 +81,7 @@ fn main() -> AppExit {
     })
     .insert_resource(match std::env::var("BEVYTRIS_MODE").as_deref() {
         Ok("sprint") => GameMode::Sprint,
-        Ok("dig") => GameMode::Dig,
+        Ok("zen") => GameMode::Zen,
         Ok("zone") => GameMode::ZoneBattle { stage: 15 },
         Ok("custom") => GameMode::Custom,
         Ok("vs-easy") => GameMode::VsCpu { stage: 5 },

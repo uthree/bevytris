@@ -7,7 +7,7 @@ pub enum AppState {
     #[default]
     Title,
     Settings,
-    /// Mode picker for the solo modes (marathon / sprint / dig).
+    /// Mode picker for the solo modes (marathon / sprint / zen).
     SoloSelect,
     /// Stage picker for VS CPU mode.
     StageSelect,
@@ -45,8 +45,10 @@ pub enum GameMode {
     Single,
     /// Race: clear 40 lines as fast as possible.
     Sprint,
-    /// Race: dig through a pre-stacked field of holed garbage rows.
-    Dig,
+    /// Endless, no failure state: gravity never rises and topping out
+    /// wipes the field instead of ending the run. Lines cleared here add
+    /// to a lifetime total that survives across sessions.
+    Zen,
     VsCpu {
         stage: u32,
     },

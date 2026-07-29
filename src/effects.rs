@@ -1155,6 +1155,34 @@ fn map_events_to_effects(
                     }
                 }
             }
+            // Zen's wipe. Deliberately nothing like a top-out: a soft
+            // white bloom and a settling nudge, no red, no thud, no
+            // shake. The field ran out of room, and the run goes on.
+            GameEvent::BoardReset => {
+                play(Sfx::ZoneReady, gain * 0.7);
+                if let Ok(mut kick) = kicks.get_mut(msg.board) {
+                    kick.impulse(Vec2::new(0.0, -60.0));
+                }
+                spawn_flash(&mut commands, Color::srgb(0.75, 0.9, 1.0), 0.16, 0.5);
+                // The stack is already gone by the time this arrives, so
+                // the motes come from the field itself rather than from
+                // the cells that were standing in it.
+                for y in (0..VISIBLE_HEIGHT).step_by(2) {
+                    for x in (0..BOARD_WIDTH).step_by(2) {
+                        spawn_burst(
+                            &mut commands,
+                            &glow_tex,
+                            cell_world(board_tf, theme, x, y),
+                            Color::srgb(0.6, 0.85, 1.0),
+                            1,
+                            90.0,
+                            theme.cell * 0.22,
+                            1.4,
+                            60.0,
+                        );
+                    }
+                }
+            }
             GameEvent::TopOut => {
                 play(Sfx::GameOver, gain);
                 shake.add(0.55);

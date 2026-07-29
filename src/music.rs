@@ -408,7 +408,9 @@ fn profile_for(
         AppState::Playing | AppState::Restarting => {
             if play == Some(PlayState::Finished) {
                 Profile::Victory
-            } else if matches!(mode, GameMode::Single | GameMode::Sprint | GameMode::Dig) {
+            } else if mode == GameMode::Zen {
+                Profile::Zen
+            } else if matches!(mode, GameMode::Single | GameMode::Sprint) {
                 Profile::SoloCalm
             } else {
                 Profile::VsIntense
@@ -656,7 +658,7 @@ mod tests {
         for mode in [
             GameMode::Single,
             GameMode::Sprint,
-            GameMode::Dig,
+            GameMode::Zen,
             GameMode::VsCpu { stage: 15 },
             GameMode::ZoneBattle { stage: 15 },
             GameMode::Custom,
@@ -688,7 +690,8 @@ mod tests {
                 PlayState::RoundOver,
             ] {
                 let want = match mode {
-                    GameMode::Single | GameMode::Sprint | GameMode::Dig => Profile::SoloCalm,
+                    GameMode::Zen => Profile::Zen,
+                    GameMode::Single | GameMode::Sprint => Profile::SoloCalm,
                     _ => Profile::VsIntense,
                 };
                 assert_eq!(

@@ -101,7 +101,9 @@ jobs:
             and run the `bevytris` binary. Keep the bundled `assets/` folder
             next to the executable.
 
-            - Solo modes: Marathon, Sprint (40-line race) and Dig (cheese race) with personal bests
+            - Solo modes: Marathon, Sprint (40-line race, with a personal best) and ZEN —
+              endless and unlosable, where gravity never rises, topping out just wipes the
+              field, and every line ever cleared feeds a lifetime ZEN level
             - Two 30-stage VS CPU campaigns (first-to-n rounds, S-D grades): the classic ladder
               and ZONE BATTLE, whose time-stop super move charges by cancelling garbage
             - CUSTOM MATCH: pick the opponent (CPU or a second player on the same keyboard),

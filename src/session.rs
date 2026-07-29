@@ -24,8 +24,6 @@ const VS_SECONDS_PER_LEVEL: f32 = 25.0;
 
 /// Sprint race: clear this many lines to finish.
 pub const SPRINT_GOAL_LINES: u32 = 40;
-/// Dig race: garbage rows stacked at the start.
-pub const DIG_ROWS: u32 = 10;
 /// VS margin time: past this many seconds into a round, both players'
 /// attack scales up (x1.5 -> x4, see `Game::attack_multiplier`) so long
 /// rounds escalate to a finish instead of stalling.
@@ -46,9 +44,9 @@ fn stack_cheese(game: &mut Game, seed: u64, rows: u32) {
     }
 }
 
-/// A fresh board for `mode`; VS boards use the timed gravity ramp, races
-/// pin gravity at level 1 and dig pre-stacks its cheese. Custom matches
-/// apply the user's rule sheet.
+/// A fresh board for `mode`; VS boards use the timed gravity ramp while
+/// sprint and zen pin gravity at level 1. Custom matches apply the user's
+/// rule sheet.
 fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
     let start_level = match mode {
         GameMode::Custom if custom.speed_level > 0 => custom.speed_level,
@@ -70,9 +68,11 @@ fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
             game.zone = Some(Zone::default());
         }
         GameMode::Sprint => game.leveling = Leveling::Fixed,
-        GameMode::Dig => {
+        GameMode::Zen => {
+            // The whole point: nothing speeds up and nothing can end the
+            // run, so there is never a reason to stop except wanting to.
             game.leveling = Leveling::Fixed;
-            stack_cheese(&mut game, seed, DIG_ROWS);
+            game.endless = true;
         }
         GameMode::Custom => {
             game.leveling = if custom.speed_level > 0 {
@@ -277,7 +277,7 @@ pub struct MatchState {
 impl MatchState {
     fn new(mode: GameMode, custom: &CustomMatchConfig) -> Self {
         let (stage, wins_needed) = match mode {
-            GameMode::Single | GameMode::Sprint | GameMode::Dig => (None, 1),
+            GameMode::Single | GameMode::Sprint | GameMode::Zen => (None, 1),
             // Boss stages (10/20/30) are first-to-3, the rest first-to-2.
             GameMode::VsCpu { stage } | GameMode::ZoneBattle { stage } => {
                 (Some(stage), if stage % 10 == 0 { 3 } else { 2 })
@@ -304,6 +304,40 @@ pub struct Countdown {
 #[derive(Resource)]
 struct RoundOverTimer(Timer);
 
+/// Lines already added to the lifetime zen total this session. Zen has no
+/// finish line to bank at, so lines are handed over as they are cleared;
+/// this watermark is what keeps a restart from counting them twice.
+#[derive(Resource, Default)]
+struct ZenBanked(u32);
+
+/// Feed cleared lines into the lifetime zen total as they happen.
+fn bank_zen_lines(
+    mode: Res<GameMode>,
+    mut banked: ResMut<ZenBanked>,
+    mut progress: ResMut<Progress>,
+    boards: Query<&GameSession, With<PrimaryPlayer>>,
+) {
+    if *mode != GameMode::Zen {
+        return;
+    }
+    let Ok(session) = boards.single() else {
+        return;
+    };
+    let lines = session.game.lines;
+    if lines > banked.0 {
+        progress.add_zen_lines((lines - banked.0) as u64);
+        banked.0 = lines;
+    }
+}
+
+/// `add_zen_lines` only touches the disk on a level-up, so leaving zen
+/// part-way to the next level would otherwise drop those lines.
+fn save_zen_on_exit(mode: Res<GameMode>, progress: Res<Progress>) {
+    if *mode == GameMode::Zen {
+        crate::progress::save_progress(&progress);
+    }
+}
+
 pub struct SessionPlugin;
 
 impl Plugin for SessionPlugin {
@@ -319,9 +353,11 @@ impl Plugin for SessionPlugin {
                 Update,
                 countdown_tick.run_if(in_state(PlayState::Countdown)),
             )
+            .init_resource::<ZenBanked>()
+            .add_systems(OnExit(AppState::Playing), save_zen_on_exit)
             .add_systems(
                 Update,
-                (human_input, cpu_drive, tick_games)
+                (human_input, cpu_drive, tick_games, bank_zen_lines)
                     .chain()
                     .run_if(in_state(PlayState::Running)),
             )
@@ -348,6 +384,7 @@ fn spawn_session(mut commands: Commands, mode: Res<GameMode>, settings: Res<Game
     commands.remove_resource::<StageClear>();
     commands.remove_resource::<RaceResult>();
     commands.insert_resource(MatchState::new(*mode, &custom));
+    commands.insert_resource(ZenBanked::default());
 
     commands.spawn((
         GameSession {
@@ -831,27 +868,18 @@ fn tick_games(
 
     // Race goal detection — checked before top-out handling so a run that
     // finishes on its very last piece still counts as a finish.
-    if matches!(*mode, GameMode::Sprint | GameMode::Dig) {
+    if *mode == GameMode::Sprint {
         if let Some((_, _, player)) = query.iter().find(|(_, i, _)| i.0 == 0) {
             let game = &player.game;
-            let goal_met = !game.game_over
-                && match *mode {
-                    GameMode::Sprint => game.lines >= SPRINT_GOAL_LINES,
-                    _ => game.board.garbage_rows() == 0,
-                };
-            if goal_met {
+            if !game.game_over && game.lines >= SPRINT_GOAL_LINES {
                 match_state.agg.absorb(&game.stats);
                 let time = game.stats.time;
                 let ms = (time * 1000.0).round() as u64;
-                let (new_best, best_ms) = if *mode == GameMode::Sprint {
-                    (progress.record_sprint(ms), progress.best_sprint_ms)
-                } else {
-                    (progress.record_dig(ms), progress.best_dig_ms)
-                };
+                let new_best = progress.record_sprint(ms);
                 commands.insert_resource(RaceResult {
                     time,
                     new_best,
-                    best_ms: best_ms.unwrap_or(ms),
+                    best_ms: progress.best_sprint_ms.unwrap_or(ms),
                 });
                 commands.insert_resource(SessionResult::RaceDone);
                 next.set(PlayState::Finished);
@@ -875,7 +903,10 @@ fn tick_games(
     }
 
     match *mode {
-        GameMode::Single | GameMode::Sprint | GameMode::Dig => {
+        // Zen cannot reach this arm: `endless` keeps `game_over` false, so
+        // the `dead` list above is always empty. The arm stays exhaustive
+        // rather than special-casing it.
+        GameMode::Single | GameMode::Sprint | GameMode::Zen => {
             commands.insert_resource(SessionResult::SoloOver);
             next.set(PlayState::Finished);
         }

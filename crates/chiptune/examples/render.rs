@@ -57,6 +57,7 @@ fn main() {
                     "solo" | "calm" => Profile::SoloCalm,
                     "vs" | "versus" | "intense" => Profile::VsIntense,
                     "victory" | "win" => Profile::Victory,
+                    "zen" => Profile::Zen,
                     other => panic!("unknown profile {other}"),
                 };
                 i += 2;

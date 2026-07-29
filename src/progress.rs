@@ -66,9 +66,20 @@ pub struct Progress {
     /// Best sprint (40 lines) finish, in milliseconds.
     #[serde(default)]
     pub best_sprint_ms: Option<u64>,
-    /// Best dig (clear the garbage) finish, in milliseconds.
+    /// Lines cleared in zen across every session, ever. Zen has no score
+    /// to beat and no run to finish, so this total (and the level it
+    /// implies) is the whole of its progression.
     #[serde(default)]
-    pub best_dig_ms: Option<u64>,
+    pub zen_lines: u64,
+}
+
+/// Lines per zen level. The level is cosmetic — it never touches gravity
+/// — so it can climb forever without making the mode harder.
+pub const ZEN_LINES_PER_LEVEL: u64 = 10;
+
+/// Zen level for a lifetime line total (1-based).
+pub fn zen_level_for(lines: u64) -> u64 {
+    lines / ZEN_LINES_PER_LEVEL + 1
 }
 
 fn first_stage() -> u32 {
@@ -83,7 +94,7 @@ impl Default for Progress {
             zone_unlocked: 1,
             zone_grades: HashMap::new(),
             best_sprint_ms: None,
-            best_dig_ms: None,
+            zen_lines: 0,
         }
     }
 }
@@ -135,14 +146,33 @@ impl Progress {
         new_best
     }
 
-    /// Record a finished dig run; returns true on a new best time.
-    pub fn record_dig(&mut self, ms: u64) -> bool {
-        let new_best = self.best_dig_ms.map_or(true, |best| ms < best);
-        if new_best {
-            self.best_dig_ms = Some(ms);
+    pub fn zen_level(&self) -> u64 {
+        zen_level_for(self.zen_lines)
+    }
+
+    /// Lines cleared toward the next zen level.
+    pub fn zen_level_progress(&self) -> u64 {
+        self.zen_lines % ZEN_LINES_PER_LEVEL
+    }
+
+    /// Add cleared lines to the lifetime zen total. Returns true when
+    /// that crossed a level boundary.
+    ///
+    /// Zen has no finish line to save at, so the total is written to disk
+    /// on every level-up: often enough that quitting mid-run costs at
+    /// most a few lines, rare enough not to touch the disk on every
+    /// clear.
+    pub fn add_zen_lines(&mut self, lines: u64) -> bool {
+        if lines == 0 {
+            return false;
         }
-        save_progress(self);
-        new_best
+        let before = self.zen_level();
+        self.zen_lines += lines;
+        let leveled = self.zen_level() > before;
+        if leveled {
+            save_progress(self);
+        }
+        leveled
     }
 }
 
@@ -155,10 +185,23 @@ pub fn load_progress() -> Progress {
         return Progress::default();
     };
     match std::fs::read_to_string(&path) {
-        Ok(text) => ron::from_str(&text).unwrap_or_else(|err| {
-            warn!("failed to parse {path:?}: {err}; starting fresh");
-            Progress::default()
-        }),
+        Ok(text) => match ron::from_str(&text) {
+            Ok(progress) => progress,
+            Err(err) => {
+                // Starting fresh means the next save overwrites this file,
+                // and a campaign is not something to lose to a parse error
+                // nobody saw. Keep the unreadable original beside it so it
+                // can be salvaged by hand.
+                let backup = path.with_extension("ron.bak");
+                match std::fs::rename(&path, &backup) {
+                    Ok(()) => warn!("failed to parse {path:?}: {err}; kept it at {backup:?}"),
+                    Err(io) => {
+                        warn!("failed to parse {path:?}: {err}; could not back it up either: {io}")
+                    }
+                }
+                Progress::default()
+            }
+        },
         Err(_) => Progress::default(),
     }
 }
@@ -189,4 +232,54 @@ pub fn load_progress_with_env() -> Progress {
         progress.zone_unlocked = MAX_STAGE;
     }
     progress
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Files written before zen existed still list `best_dig_ms`. Serde
+    /// ignores unknown fields, but this mode's removal must not be the
+    /// thing that quietly resets someone's 30-stage campaign.
+    #[test]
+    fn a_pre_zen_progress_file_still_loads() {
+        let legacy = r#"(
+            unlocked: 14,
+            grades: {7: S, 8: A},
+            zone_unlocked: 3,
+            zone_grades: {1: B},
+            best_sprint_ms: Some(48210),
+            best_dig_ms: Some(61000),
+        )"#;
+        let p: Progress = ron::from_str(legacy).expect("legacy file must still parse");
+        assert_eq!(p.unlocked, 14);
+        assert_eq!(p.grades.get(&7), Some(&Grade::S));
+        assert_eq!(p.zone_unlocked, 3);
+        assert_eq!(p.best_sprint_ms, Some(48210));
+        // No zen history yet: a fresh counter, not a lost one.
+        assert_eq!(p.zen_lines, 0);
+        assert_eq!(p.zen_level(), 1);
+    }
+
+    #[test]
+    fn zen_levels_climb_every_ten_lines() {
+        assert_eq!(zen_level_for(0), 1);
+        assert_eq!(zen_level_for(9), 1);
+        assert_eq!(zen_level_for(10), 2);
+        assert_eq!(zen_level_for(1_234), 124);
+    }
+
+    #[test]
+    fn adding_lines_reports_only_real_level_ups() {
+        let mut p = Progress::default();
+        p.zen_lines = 8;
+        assert!(!p.add_zen_lines(1), "8 -> 9 stays on level 1");
+        assert!(p.add_zen_lines(1), "9 -> 10 is a level up");
+        assert_eq!(p.zen_level(), 2);
+        assert_eq!(p.zen_level_progress(), 0);
+        // A single clear that vaults several levels still reports once.
+        assert!(p.add_zen_lines(40));
+        assert_eq!(p.zen_level(), 6);
+        assert!(!p.add_zen_lines(0));
+    }
 }

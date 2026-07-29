@@ -132,10 +132,13 @@ enum HudText {
     Lines,
     Speed,
     Incoming,
-    /// Elapsed race time (sprint / dig).
+    /// Elapsed play time (sprint, zen).
     Time,
-    /// Race goal countdown: lines left (sprint) or garbage rows left (dig).
+    /// Sprint goal countdown: lines left.
     Left,
+    /// Zen's lifetime level, and how many wipes this run has taken.
+    ZenLevel,
+    ZenResets,
 }
 
 /// Fill sprite of the zone gauge hugging the board's right edge.
@@ -361,10 +364,20 @@ pub fn setup_board_visuals(
                 // the marathon columns for a timer and a goal countdown.
                 let hud_x = -w / 2.0 - cell * 2.8;
                 let entries: Vec<(&str, HudText)> = match *mode {
-                    GameMode::Sprint | GameMode::Dig => vec![
+                    GameMode::Sprint => vec![
                         (s.time, HudText::Time),
                         (s.left, HudText::Left),
                         (s.score, HudText::Score),
+                    ],
+                    // Zen has no level to climb and no clock to beat, so
+                    // the column shows what it does have: the lifetime
+                    // level, the lines feeding it, and the time spent.
+                    GameMode::Zen => vec![
+                        (s.zen_level, HudText::ZenLevel),
+                        (s.lines, HudText::Lines),
+                        (s.score, HudText::Score),
+                        (s.time, HudText::Time),
+                        (s.zen_resets, HudText::ZenResets),
                     ],
                     // The zone gauge label needs the bottom edge clear.
                     _ if zone_on => vec![
@@ -408,7 +421,7 @@ pub fn setup_board_visuals(
                 let name = match *mode {
                     GameMode::Single => s.marathon,
                     GameMode::Sprint => s.sprint,
-                    GameMode::Dig => s.dig,
+                    GameMode::Zen => s.zen,
                     GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } | GameMode::Custom => {
                         match (two_player, index.0 == 0) {
                             (true, true) => s.p1,
@@ -646,6 +659,7 @@ fn sync_previews(
 
 fn sync_hud(
     mode: Res<GameMode>,
+    progress: Res<crate::progress::Progress>,
     boards: Query<(&GameSession, &Children)>,
     mut texts: Query<(&HudText, &mut Text2d, &mut TextColor)>,
 ) {
@@ -699,6 +713,27 @@ fn sync_hud(
                 }
                 HudText::Time => {
                     let s = crate::session::format_race_time(game.stats.time);
+                    if **text != s {
+                        **text = s;
+                    }
+                }
+                HudText::ZenLevel => {
+                    // `bank_zen_lines` folds this run's clears into the
+                    // lifetime total as they happen, so this is already
+                    // up to date — adding `game.lines` would count them
+                    // twice.
+                    let s = progress.zen_level().to_string();
+                    if **text != s {
+                        **text = s;
+                    }
+                }
+                HudText::ZenResets => {
+                    let n = game.stats.board_resets;
+                    let s = if n == 0 {
+                        "-".to_string()
+                    } else {
+                        n.to_string()
+                    };
                     if **text != s {
                         **text = s;
                     }

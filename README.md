@@ -7,7 +7,12 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
 ## Features
 
 - **Solo modes** — Marathon (classic endless, guideline gravity curve),
-  Sprint (40-line race) and Dig (cheese race), with persistent personal bests
+  Sprint (40-line race, with a persistent personal best) and **ZEN**
+- **ZEN** — endless and unlosable: gravity never rises, and topping out wipes
+  the field and carries on instead of ending the run. Every line ever cleared
+  adds to a lifetime total, and the ZEN level it feeds only goes up. Its music
+  is the slowest the composer writes, and it brightens or clouds over with the
+  height of your stack rather than warning you about it.
 - **VS CPU mode** — a 30-stage ladder of computer opponents with distinct
   personalities (Balanced / Rusher / Thinker / Spinner), human-like blunder
   rates that fade out as stages climb, garbage attack & cancellation rules

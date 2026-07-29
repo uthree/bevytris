@@ -24,13 +24,13 @@ use rand::Rng as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
-    /// Open the solo mode picker (marathon / sprint / dig).
+    /// Open the solo mode picker (marathon / sprint / zen).
     SoloSelect,
     Marathon,
     /// 40-line race.
     Sprint,
-    /// Garbage-digging race.
-    Dig,
+    /// Endless, failure-free line clearing.
+    Zen,
     /// Open the stage picker.
     VsSelect,
     /// Start a VS match on this stage.
@@ -274,14 +274,14 @@ fn setup_title(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: R
     spawn_menu_footer(&mut commands, AppState::Title);
 }
 
-/// Solo mode picker: marathon / sprint / dig.
+/// Solo mode picker: marathon / sprint / zen.
 fn setup_solo_select(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: Res<Locale>) {
     let s = locale.s();
     cursor.0 = 0;
     let items = vec![
         (MenuAction::Marathon, s.marathon.to_string()),
         (MenuAction::Sprint, s.sprint.to_string()),
-        (MenuAction::Dig, s.dig.to_string()),
+        (MenuAction::Zen, s.zen.to_string()),
     ];
     commands
         .spawn((root_node(), DespawnOnExit(AppState::SoloSelect)))
@@ -342,7 +342,7 @@ fn spawn_menu_footer(commands: &mut Commands, state: AppState) {
 
 /// What the footer says about a focused item; None hides the line.
 fn action_description(action: MenuAction, progress: &Progress, s: &Strings) -> Option<String> {
-    use crate::session::{DIG_ROWS, SPRINT_GOAL_LINES};
+    use crate::session::SPRINT_GOAL_LINES;
     let best = |ms: Option<u64>| match ms {
         Some(ms) => format!(
             "    {} {}",
@@ -365,10 +365,15 @@ fn action_description(action: MenuAction, progress: &Progress, s: &Strings) -> O
             s.desc_sprint.replace("{n}", &SPRINT_GOAL_LINES.to_string()),
             best(progress.best_sprint_ms)
         ),
-        MenuAction::Dig => format!(
-            "{}{}",
-            s.desc_dig.replace("{n}", &DIG_ROWS.to_string()),
-            best(progress.best_dig_ms)
+        // Zen has no best time to chase; what it has is a level that only
+        // ever goes up, so the footer reports that instead.
+        MenuAction::Zen => format!(
+            "{}    {} {}  ({}/{})",
+            s.desc_zen,
+            s.zen_level,
+            progress.zen_level(),
+            progress.zen_level_progress(),
+            crate::progress::ZEN_LINES_PER_LEVEL,
         ),
         _ => return None,
     })
@@ -1632,8 +1637,8 @@ fn run_menu_action(
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
             p.next_app.set(AppState::Playing);
         }
-        MenuAction::Dig => {
-            *p.mode = GameMode::Dig;
+        MenuAction::Zen => {
+            *p.mode = GameMode::Zen;
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
             p.next_app.set(AppState::Playing);
         }
@@ -2023,7 +2028,7 @@ fn setup_result_overlay(
             t.pc,
             ms.agg.perfect_clears,
         ))
-    } else if matches!(*mode, GameMode::Sprint | GameMode::Dig) {
+    } else if *mode == GameMode::Sprint {
         players.single().ok().map(|s| {
             let g = &s.game;
             let pps = g.stats.pieces as f64 / g.stats.time.max(0.001);
