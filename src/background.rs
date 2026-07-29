@@ -28,7 +28,7 @@ use rand::Rng;
 use crate::audio::PlaySfx;
 use crate::emissive;
 use crate::music::{MusicEngine, ScoreFeed};
-use crate::session::{GameSession, HumanControlled};
+use crate::session::{GameSession, PrimaryPlayer};
 use crate::state::AppState;
 
 /// Pseudo-spectrum band count for the visualizer.
@@ -995,7 +995,7 @@ fn update_audio_pulse(
 /// radially from the screen center — minimal, monochrome, focused.
 fn update_zone_fx(
     time: Res<Time>,
-    sessions: Query<&GameSession, With<HumanControlled>>,
+    sessions: Query<&GameSession, With<PrimaryPlayer>>,
     mut fx: ResMut<ZoneFx>,
     mut commands: Commands,
     mut shards: Query<(Entity, &mut ZoneShard, &mut Transform, &mut Sprite)>,

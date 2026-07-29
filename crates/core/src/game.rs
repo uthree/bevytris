@@ -203,6 +203,19 @@ pub struct Game {
     /// Pending garbage batches: (rows, hole column).
     pub incoming: VecDeque<(u32, i8)>,
     garbage_rng: StdRng,
+    /// Chance in percent that each row after the first in an incoming
+    /// batch re-rolls its hole instead of sharing the previous row's.
+    /// 0 = one clean well per batch (the guideline default), 100 = every
+    /// row somewhere else, which turns attacks into cheese to dig.
+    pub garbage_messiness: u32,
+
+    /// False bans the hold slot outright: [`Game::hold`] refuses and the
+    /// frontend hides the box.
+    pub hold_enabled: bool,
+    /// How many previews the player is allowed to see. The internal
+    /// queue always stays full (the bag and the planner need it); this
+    /// only limits what the frontend draws and what the CPU may read.
+    pub visible_previews: usize,
 
     /// Margin time: seconds of play after which attack scales up (see
     /// [`Game::attack_multiplier`]). None disables the ramp (solo modes).
@@ -250,6 +263,9 @@ impl Game {
             soft_drop_factor: SOFT_DROP_FACTOR,
             incoming: VecDeque::new(),
             garbage_rng: StdRng::seed_from_u64(seed ^ 0x6761_7262_6167_65),
+            garbage_messiness: 0,
+            hold_enabled: true,
+            visible_previews: PREVIEW_COUNT,
             margin_time: None,
             last_attack_mult: 1.0,
             zone: None,
@@ -572,6 +588,12 @@ impl Game {
         if self.game_over {
             return;
         }
+        if !self.hold_enabled {
+            // Same feedback as a spent hold: the press was heard and
+            // refused, rather than silently swallowed.
+            self.events.push(GameEvent::HoldBlocked);
+            return;
+        }
         if self.hold_used {
             self.events.push(GameEvent::HoldBlocked);
             return;
@@ -837,12 +859,34 @@ impl Game {
 
     /// Queue garbage from the opponent. It rises after a future lock that
     /// does not clear lines.
+    ///
+    /// `garbage_messiness` decides how the batch is cut up: at 0 the whole
+    /// attack shares one hole column (a single well to clear it with), and
+    /// as it climbs the batch splits into shorter runs at different
+    /// columns. Each split lands somewhere other than the run it follows —
+    /// repeating the column would just extend the same well, which is the
+    /// thing messiness exists to break up.
     pub fn queue_garbage(&mut self, rows: u32) {
         if rows == 0 {
             return;
         }
-        let hole = self.garbage_rng.random_range(0..super::board::BOARD_WIDTH);
-        self.incoming.push_back((rows, hole));
+        let width = super::board::BOARD_WIDTH;
+        let mess = self.garbage_messiness.min(100);
+        let mut hole = self.garbage_rng.random_range(0..width);
+        let mut run = 1u32;
+        for _ in 1..rows {
+            if mess > 0 && self.garbage_rng.random_range(0..100u32) < mess {
+                self.incoming.push_back((run, hole));
+                run = 0;
+                let mut next = self.garbage_rng.random_range(0..width);
+                while next == hole {
+                    next = self.garbage_rng.random_range(0..width);
+                }
+                hole = next;
+            }
+            run += 1;
+        }
+        self.incoming.push_back((run, hole));
     }
 
     fn rise_garbage(&mut self) {
@@ -971,6 +1015,61 @@ mod tests {
         game.active = ActivePiece::spawn(kind);
         game.active = game.active.shifted(0, -1);
         game.last_rotation_kick = None;
+    }
+
+    #[test]
+    fn clean_garbage_shares_one_hole_column() {
+        let mut game = Game::new(7, 1);
+        game.garbage_messiness = 0;
+        game.queue_garbage(6);
+        assert_eq!(game.incoming.len(), 1, "{:?}", game.incoming);
+        assert_eq!(game.incoming[0].0, 6);
+        assert_eq!(game.incoming_total(), 6);
+    }
+
+    #[test]
+    fn messy_garbage_splits_into_runs_at_different_columns() {
+        let mut game = Game::new(7, 1);
+        game.garbage_messiness = 100;
+        game.queue_garbage(6);
+        // Every row re-rolls, so the batch is six one-row runs.
+        assert_eq!(game.incoming.len(), 6, "{:?}", game.incoming);
+        assert!(game.incoming.iter().all(|(rows, _)| *rows == 1));
+        assert_eq!(game.incoming_total(), 6);
+        // Consecutive runs never share a column: a repeat would just be a
+        // longer well, which is the opposite of messy.
+        for pair in game.incoming.iter().collect::<Vec<_>>().windows(2) {
+            assert_ne!(pair[0].1, pair[1].1);
+        }
+    }
+
+    #[test]
+    fn messiness_does_not_change_how_much_garbage_arrives() {
+        // Splitting is purely cosmetic for the danger meter and the rise
+        // budget: the same row count lands either way.
+        for mess in [0, 35, 70, 100] {
+            let mut game = Game::new(11, 1);
+            game.garbage_messiness = mess;
+            game.queue_garbage(7);
+            assert_eq!(game.incoming_total(), 7, "messiness {mess}");
+        }
+    }
+
+    #[test]
+    fn disabled_hold_refuses_and_keeps_the_piece() {
+        let mut game = Game::new(3, 1);
+        game.hold_enabled = false;
+        let active = game.active.kind;
+        game.take_events();
+        game.hold();
+        assert_eq!(game.hold, None);
+        assert_eq!(game.active.kind, active);
+        assert!(!game.hold_used);
+        assert!(
+            game.events
+                .iter()
+                .any(|e| matches!(e, GameEvent::HoldBlocked))
+        );
     }
 
     #[test]

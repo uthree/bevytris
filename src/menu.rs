@@ -8,14 +8,14 @@ use bevy::prelude::*;
 use bevy::ui::UiGlobalTransform;
 
 use crate::audio::{PlaySfx, Sfx};
-use crate::config::{Action, GameSettings, key_label, save_settings};
+use crate::config::{Action, GameSettings, Opponent, key_label, save_settings};
 use crate::core::ai::{AiProfile, MAX_STAGE};
 use crate::i18n::{Locale, Strings, action_label};
 use crate::input::{PadAction, PadInput};
 use crate::music::{Jukebox, MusicEngine};
 use crate::progress::Progress;
 use crate::session::{
-    GameSession, HumanControlled, LastRound, MatchState, RaceResult, SessionResult, StageClear,
+    GameSession, LastRound, MatchState, PrimaryPlayer, RaceResult, SessionResult, StageClear,
     format_race_time,
 };
 use crate::state::{AppState, GameMode, PlayState};
@@ -43,6 +43,8 @@ enum MenuAction {
     CustomSetup,
     /// Start a match under the current rule sheet.
     CustomStart,
+    /// CPU or a second local human on the right-hand board.
+    CustomOpponent,
     CustomCpuLevel,
     CustomStyle,
     CustomFirstTo,
@@ -52,11 +54,17 @@ enum MenuAction {
     CustomPlayerAtk,
     CustomCpuAtk,
     CustomGarbage,
+    /// How scattered the holes in incoming garbage are.
+    CustomMessiness,
+    CustomHold,
+    CustomPreviews,
     /// Open the listening room.
     Jukebox,
     Settings,
     Quit,
     Bind(Action),
+    /// Rebind player 2's key for an action (local versus).
+    Bind2(Action),
     /// Rebind the gamepad button for an action.
     BindPad(Action),
     AdjustDas,
@@ -100,6 +108,8 @@ struct MenuCursor(usize);
 struct Rebinding {
     action: Option<Action>,
     pad: bool,
+    /// Capturing into player 2's key set rather than player 1's.
+    player2: bool,
     just_started: bool,
 }
 
@@ -613,6 +623,7 @@ fn setup_settings(
     cursor.0 = 0;
     rebinding.action = None;
     rebinding.pad = false;
+    rebinding.player2 = false;
     rebinding.just_started = false;
     commands
         .spawn((root_node(), DespawnOnExit(AppState::Settings)))
@@ -651,6 +662,16 @@ fn setup_settings(
                         list.spawn(item_bundle(
                             index,
                             MenuAction::Bind(action),
+                            String::new(),
+                            420.0,
+                        ));
+                        index += 1;
+                    }
+                    list.spawn(section_heading(s.sec_keys2));
+                    for action in Action::PLAYER2 {
+                        list.spawn(item_bundle(
+                            index,
+                            MenuAction::Bind2(action),
                             String::new(),
                             420.0,
                         ));
@@ -757,7 +778,11 @@ fn setup_custom(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: 
                 .with_children(|list| {
                     let mut index = 0;
                     list.spawn(section_heading(s.sec_cm_cpu));
-                    for action in [MenuAction::CustomCpuLevel, MenuAction::CustomStyle] {
+                    for action in [
+                        MenuAction::CustomOpponent,
+                        MenuAction::CustomCpuLevel,
+                        MenuAction::CustomStyle,
+                    ] {
                         list.spawn(item_bundle(index, action, String::new(), 420.0));
                         index += 1;
                     }
@@ -767,6 +792,9 @@ fn setup_custom(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: 
                         MenuAction::CustomZone,
                         MenuAction::CustomMargin,
                         MenuAction::CustomSpeed,
+                        MenuAction::CustomHold,
+                        MenuAction::CustomPreviews,
+                        MenuAction::CustomMessiness,
                         MenuAction::CustomPlayerAtk,
                         MenuAction::CustomCpuAtk,
                         MenuAction::CustomGarbage,
@@ -1151,15 +1179,29 @@ fn settings_label(
     use crate::i18n::LangChoice;
     Some(match action {
         MenuAction::Bind(a) => {
-            let key = if rebinding.action == Some(a) && !rebinding.pad {
+            let key = if rebinding.action == Some(a) && !rebinding.pad && !rebinding.player2 {
                 s.press_key.to_string()
             } else {
                 format!("[{}]", key_label(settings.key_for(a)))
             };
             format!("{:<12} {}", action_label(s, a), key)
         }
+        MenuAction::Bind2(a) => {
+            let key = if rebinding.action == Some(a) && !rebinding.pad && rebinding.player2 {
+                s.press_key.to_string()
+            } else {
+                // A key both players share would move both boards at
+                // once, so say so rather than letting it be discovered
+                // mid-match.
+                let bound = settings.key2_for(a);
+                let shared = Action::ALL.iter().any(|p1| settings.key_for(*p1) == bound);
+                let mark = if shared { s.key_clash } else { "" };
+                format!("[{}]{}", key_label(bound), mark)
+            };
+            format!("{:<12} {}", action_label(s, a), key)
+        }
         MenuAction::BindPad(a) => {
-            let button = if rebinding.action == Some(a) && rebinding.pad {
+            let button = if rebinding.action == Some(a) && rebinding.pad && !rebinding.player2 {
                 s.press_button.to_string()
             } else {
                 format!("[{}]", crate::config::pad_button_label(settings.pad_for(a)))
@@ -1194,6 +1236,21 @@ fn settings_label(
             s.fullscreen,
             if settings.fullscreen { "ON" } else { "OFF" }
         ),
+        MenuAction::CustomOpponent => {
+            let value = match settings.custom.opponent {
+                Opponent::Cpu => s.cm_opp_cpu,
+                Opponent::Human => s.cm_opp_2p,
+            };
+            format!("{:<12} {}", s.cm_opponent, value)
+        }
+        // The CPU rows stay listed but read as N/A once a human is in the
+        // other seat, so it is obvious why they stopped mattering.
+        MenuAction::CustomCpuLevel if settings.custom.opponent == Opponent::Human => {
+            format!("{:<12} {}", s.cm_cpu_level, s.cm_na)
+        }
+        MenuAction::CustomStyle if settings.custom.opponent == Opponent::Human => {
+            format!("{:<12} {}", s.cm_style, s.cm_na)
+        }
         MenuAction::CustomCpuLevel => {
             format!(
                 "{:<12} {:02} / 30",
@@ -1237,13 +1294,36 @@ fn settings_label(
             format!("{:<12} {}", s.cm_speed, value)
         }
         MenuAction::CustomPlayerAtk => {
-            format!(
-                "{:<12} {}%",
-                s.cm_player_atk, settings.custom.player_attack_pct
-            )
+            let label = if settings.custom.opponent == Opponent::Human {
+                s.cm_p1_atk
+            } else {
+                s.cm_player_atk
+            };
+            format!("{:<12} {}%", label, settings.custom.player_attack_pct)
         }
         MenuAction::CustomCpuAtk => {
-            format!("{:<12} {}%", s.cm_cpu_atk, settings.custom.cpu_attack_pct)
+            let label = if settings.custom.opponent == Opponent::Human {
+                s.cm_p2_atk
+            } else {
+                s.cm_cpu_atk
+            };
+            format!("{:<12} {}%", label, settings.custom.cpu_attack_pct)
+        }
+        MenuAction::CustomHold => format!(
+            "{:<12} {}",
+            s.cm_hold,
+            if settings.custom.hold { "ON" } else { "OFF" }
+        ),
+        MenuAction::CustomPreviews => {
+            format!("{:<12} {}", s.cm_previews, settings.custom.previews)
+        }
+        MenuAction::CustomMessiness => {
+            let value = if settings.custom.messiness == 0 {
+                s.cm_mess_clean.to_string()
+            } else {
+                format!("{}%", settings.custom.messiness)
+            };
+            format!("{:<12} {}", s.cm_messiness, value)
         }
         MenuAction::CustomGarbage => {
             format!("{:<12} {}", s.cm_garbage, settings.custom.start_garbage)
@@ -1507,6 +1587,22 @@ fn run_menu_action(
                     (s.custom.start_garbage as i32 + adjust).clamp(0, 8) as u32;
                 true
             }
+            MenuAction::CustomOpponent => {
+                s.custom.opponent = s.custom.opponent.toggled();
+                true
+            }
+            MenuAction::CustomHold => {
+                s.custom.hold = !s.custom.hold;
+                true
+            }
+            MenuAction::CustomPreviews => {
+                s.custom.previews = (s.custom.previews as i32 + adjust).clamp(0, 5) as u32;
+                true
+            }
+            MenuAction::CustomMessiness => {
+                s.custom.messiness = (s.custom.messiness as i32 + adjust * 25).clamp(0, 100) as u32;
+                true
+            }
             _ => false,
         };
         if changed {
@@ -1582,6 +1678,16 @@ fn run_menu_action(
             save_settings(&p.settings);
             sfx.write(PlaySfx::quiet(Sfx::MenuMove));
         }
+        MenuAction::CustomOpponent => {
+            p.settings.custom.opponent = p.settings.custom.opponent.toggled();
+            save_settings(&p.settings);
+            sfx.write(PlaySfx::quiet(Sfx::MenuMove));
+        }
+        MenuAction::CustomHold => {
+            p.settings.custom.hold = !p.settings.custom.hold;
+            save_settings(&p.settings);
+            sfx.write(PlaySfx::quiet(Sfx::MenuMove));
+        }
         MenuAction::CustomStyle => {
             // Enter cycles forward, same as pressing right.
             p.settings.custom.cpu_style = p.settings.custom.cpu_style.cycled(1);
@@ -1603,12 +1709,21 @@ fn run_menu_action(
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
             p.rebinding.action = Some(action);
             p.rebinding.pad = false;
+            p.rebinding.player2 = false;
+            p.rebinding.just_started = true;
+        }
+        MenuAction::Bind2(action) => {
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            p.rebinding.action = Some(action);
+            p.rebinding.pad = false;
+            p.rebinding.player2 = true;
             p.rebinding.just_started = true;
         }
         MenuAction::BindPad(action) => {
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
             p.rebinding.action = Some(action);
             p.rebinding.pad = true;
+            p.rebinding.player2 = false;
             p.rebinding.just_started = true;
         }
         MenuAction::ToggleVsync => {
@@ -1714,7 +1829,11 @@ fn rebind_capture(
             return;
         }
         if crate::config::bindable_keys().contains(&input.key_code) {
-            settings.bind(action, input.key_code);
+            if rebinding.player2 {
+                settings.bind2(action, input.key_code);
+            } else {
+                settings.bind(action, input.key_code);
+            }
             save_settings(&settings);
             rebinding.action = None;
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
@@ -1775,14 +1894,24 @@ fn setup_pause_overlay(mut commands: Commands, settings: Res<GameSettings>, loca
 }
 
 /// "YOU {p} - {c} CPU    (FIRST TO {n})" in the current language.
-fn vs_score_line(s: &Strings, player: u32, cpu: u32, wins_needed: u32) -> String {
+fn vs_score_line(s: &Strings, two_player: bool, player: u32, cpu: u32, wins_needed: u32) -> String {
+    let template = if two_player {
+        s.vs_score_2p
+    } else {
+        s.vs_score
+    };
     format!(
         "{}    ({})",
-        s.vs_score
+        template
             .replace("{p}", &player.to_string())
             .replace("{c}", &cpu.to_string()),
         s.first_to.replace("{n}", &wins_needed.to_string())
     )
+}
+
+/// True when the right-hand board is a second person rather than the CPU.
+fn is_two_player(mode: &GameMode, settings: &GameSettings) -> bool {
+    *mode == GameMode::Custom && settings.custom.opponent == Opponent::Human
 }
 
 /// Intermission between rounds of a first-to-n match.
@@ -1790,20 +1919,30 @@ fn setup_round_overlay(
     mut commands: Commands,
     last: Option<Res<LastRound>>,
     match_state: Option<Res<MatchState>>,
+    mode: Res<GameMode>,
+    settings: Res<GameSettings>,
     locale: Res<Locale>,
 ) {
     let s = locale.s();
+    let two_player = is_two_player(&mode, &settings);
     let won = matches!(last.as_deref(), Some(LastRound { winner: 0 }));
-    let (headline, color) = if won {
-        (s.round_win, Color::srgb(1.0, 0.9, 0.3))
+    // With two people watching, "ROUND LOST" is meaningless — say who won.
+    let (headline, color) = if two_player {
+        (
+            s.round_win_by.replace("{p}", if won { s.p1 } else { s.p2 }),
+            Color::srgb(1.0, 0.9, 0.3),
+        )
+    } else if won {
+        (s.round_win.to_string(), Color::srgb(1.0, 0.9, 0.3))
     } else {
-        (s.round_lost, Color::srgb(0.9, 0.35, 0.35))
+        (s.round_lost.to_string(), Color::srgb(0.9, 0.35, 0.35))
     };
-    let score = match_state.map(|ms| vs_score_line(s, ms.player_wins, ms.cpu_wins, ms.wins_needed));
+    let score = match_state
+        .map(|ms| vs_score_line(s, two_player, ms.player_wins, ms.cpu_wins, ms.wins_needed));
     commands
         .spawn((overlay_root(), DespawnOnExit(PlayState::RoundOver)))
         .with_children(|parent| {
-            parent.spawn(overlay_text(headline, 58.0, color));
+            parent.spawn(overlay_text(&headline, 58.0, color));
             if let Some(score) = score {
                 parent.spawn(overlay_text(&score, 26.0, Color::srgb(0.9, 0.93, 1.0)));
             }
@@ -1811,6 +1950,7 @@ fn setup_round_overlay(
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn setup_result_overlay(
     mut commands: Commands,
     result: Option<Res<SessionResult>>,
@@ -1818,10 +1958,12 @@ fn setup_result_overlay(
     race_result: Option<Res<RaceResult>>,
     match_state: Option<Res<MatchState>>,
     mode: Res<GameMode>,
+    settings: Res<GameSettings>,
     locale: Res<Locale>,
-    players: Query<&GameSession, With<HumanControlled>>,
+    players: Query<&GameSession, With<PrimaryPlayer>>,
 ) {
     let t = locale.s();
+    let two_player = is_two_player(&mode, &settings);
     // Both VS campaigns share the stage flow; only the label differs.
     let stage_label = match *mode {
         GameMode::VsCpu { stage } => Some((t.stage_prefix, stage)),
@@ -1844,6 +1986,13 @@ fn setup_result_overlay(
             t.stage_failed
                 .replace("{stage}", &format!("{prefix} {s:02}")),
             Color::srgb(0.9, 0.3, 0.3),
+        ),
+        // Local versus: name the winner instead of addressing one of the
+        // two people at the keyboard as "you".
+        (Some(SessionResult::VsWin { winner }), None) if two_player => (
+            t.match_win_by
+                .replace("{p}", if *winner == 0 { t.p1 } else { t.p2 }),
+            Color::srgb(1.0, 0.9, 0.3),
         ),
         // Custom matches have no stage to clear: plain win/lose.
         (Some(SessionResult::VsWin { winner: 0 }), None) if vs_match => {

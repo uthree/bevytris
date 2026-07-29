@@ -39,7 +39,7 @@ use bevytris_chiptune::{NoteEvent, SAMPLE_RATE, SAMPLES_PER_FRAME};
 use crate::audio::{Bgm, spawn_bgm_toast};
 use crate::config::GameSettings;
 use crate::effects::DangerLevel;
-use crate::session::{GameSession, HumanControlled};
+use crate::session::{GameSession, PrimaryPlayer};
 use crate::state::{AppState, GameMode, PlayState};
 
 /// Everything the two threads say to each other.
@@ -457,7 +457,7 @@ fn drive_music(
     app_state: Res<State<AppState>>,
     jukebox: Res<Jukebox>,
     danger: Option<Res<DangerLevel>>,
-    sessions: Query<&GameSession, With<HumanControlled>>,
+    sessions: Query<&GameSession, With<PrimaryPlayer>>,
     mut engine: ResMut<MusicEngine>,
     mut feed: ResMut<ScoreFeed>,
 ) {

@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 
 use crate::config::GameSettings;
-use crate::session::{GameSession, HumanControlled};
+use crate::session::{GameSession, PrimaryPlayer};
 use crate::state::PlayState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +206,7 @@ fn build_sfx_bank(asset_server: &AssetServer) -> (SfxBank, MuffledSfx) {
 
 /// True while the human player's zone super move is running — the cue
 /// for the whole soundscape to go underwater.
-pub fn player_zone_active(sessions: &Query<&GameSession, With<HumanControlled>>) -> bool {
+pub fn player_zone_active(sessions: &Query<&GameSession, With<PrimaryPlayer>>) -> bool {
     sessions.iter().any(|s| s.game.zone_active())
 }
 
@@ -275,7 +275,7 @@ fn play_sfx(
     bank: Res<SfxBank>,
     muffled: Res<MuffledSfx>,
     settings: Res<GameSettings>,
-    sessions: Query<&GameSession, With<HumanControlled>>,
+    sessions: Query<&GameSession, With<PrimaryPlayer>>,
 ) {
     let base = settings.sfx_linear();
     // Inside the player's zone the world goes underwater: every effect
@@ -371,7 +371,7 @@ impl Default for BgmDuck {
 fn apply_bgm_volume(
     time: Res<Time>,
     settings: Res<GameSettings>,
-    sessions: Query<&GameSession, With<HumanControlled>>,
+    sessions: Query<&GameSession, With<PrimaryPlayer>>,
     mut duck: ResMut<BgmDuck>,
     mut sinks: Query<&mut AudioSink, With<Bgm>>,
 ) {

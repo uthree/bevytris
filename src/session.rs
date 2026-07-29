@@ -7,7 +7,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use crate::audio::{PlaySfx, Sfx};
-use crate::config::{Action, CustomMatchConfig, GameSettings};
+use crate::config::{Action, CustomMatchConfig, GameSettings, Opponent};
 use crate::core::ai::{self, AiProfile, Plan, Step};
 use crate::core::board::BOARD_WIDTH;
 use crate::core::game::{Game, GameEvent, Leveling, Stats, Zone};
@@ -91,6 +91,10 @@ fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
             if custom.start_garbage > 0 {
                 stack_cheese(&mut game, seed, custom.start_garbage);
             }
+            // Rules that apply equally to both boards.
+            game.garbage_messiness = custom.messiness;
+            game.hold_enabled = custom.hold;
+            game.visible_previews = custom.previews as usize;
         }
         GameMode::Single => {}
     }
@@ -127,6 +131,18 @@ pub struct BoardIndex(pub usize);
 
 #[derive(Component)]
 pub struct HumanControlled;
+
+/// Board 0 — the one the camera effects, the danger audio, the music
+/// intensity and the solo result screen all speak for. Always present and
+/// always unique, which `HumanControlled` stopped being once local versus
+/// put a second human on the right-hand board.
+#[derive(Component)]
+pub struct PrimaryPlayer;
+
+/// Which human is at the controls: 0 uses the main key set (and gamepad
+/// slot 0), 1 uses the player 2 set (and gamepad slot 1).
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerSeat(pub usize);
 
 /// Auto-shift state for the human player.
 #[derive(Component, Default)]
@@ -339,20 +355,44 @@ fn spawn_session(mut commands: Commands, mode: Res<GameMode>, settings: Res<Game
         },
         BoardIndex(0),
         HumanControlled,
+        PrimaryPlayer,
+        PlayerSeat(0),
         DasState::default(),
         DespawnOnExit(AppState::Playing),
         Transform::default(),
         Visibility::default(),
     ));
 
+    // A local-versus custom match puts a second human on board 1; every
+    // other versus mode puts the CPU there.
+    if *mode == GameMode::Custom && custom.opponent == Opponent::Human {
+        commands.spawn((
+            GameSession {
+                game: new_game(seed, *mode, &custom),
+            },
+            BoardIndex(1),
+            HumanControlled,
+            PlayerSeat(1),
+            DasState::default(),
+            DespawnOnExit(AppState::Playing),
+            Transform::default(),
+            Visibility::default(),
+        ));
+        return;
+    }
+
     let cpu_profile = match *mode {
         GameMode::VsCpu { stage } | GameMode::ZoneBattle { stage } => {
             Some(AiProfile::for_stage(stage))
         }
-        GameMode::Custom => Some(AiProfile::for_stage_styled(
-            custom.cpu_level,
-            custom.cpu_style.archetype(),
-        )),
+        GameMode::Custom => {
+            let mut profile =
+                AiProfile::for_stage_styled(custom.cpu_level, custom.cpu_style.archetype());
+            // A banned hold slot binds the CPU too, or it plans around a
+            // resource the rules just took away from both boards.
+            profile.uses_hold &= custom.hold;
+            Some(profile)
+        }
         _ => None,
     };
     if let Some(profile) = cpu_profile {
@@ -422,31 +462,83 @@ fn pause_toggle(
     }
 }
 
+/// Where one seat's inputs come from: its key set, plus either every
+/// connected pad (single-player: any controller just works) or one
+/// specific pad (local versus: player 2 must not steer player 1).
+struct Controls<'a> {
+    keys: &'a ButtonInput<KeyCode>,
+    pad: &'a PadInput,
+    settings: &'a GameSettings,
+    seat: usize,
+    /// None = read all pads merged.
+    pad_slot: Option<usize>,
+}
+
+impl Controls<'_> {
+    fn key(&self, action: Action) -> KeyCode {
+        if self.seat == 0 {
+            self.settings.key_for(action)
+        } else {
+            self.settings.key2_for(action)
+        }
+    }
+
+    fn pressed(&self, action: Action) -> bool {
+        self.keys.pressed(self.key(action))
+            || match self.pad_slot {
+                Some(slot) => self.pad.slot_pressed(slot, action),
+                None => self.pad.action_pressed(action),
+            }
+    }
+
+    fn just_pressed(&self, action: Action) -> bool {
+        self.keys.just_pressed(self.key(action))
+            || match self.pad_slot {
+                Some(slot) => self.pad.slot_just_pressed(slot, action),
+                None => self.pad.action_just_pressed(action),
+            }
+    }
+}
+
 fn human_input(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     pad: Res<PadInput>,
     settings: Res<GameSettings>,
-    mut query: Query<(&mut GameSession, &mut DasState), With<HumanControlled>>,
+    mut query: Query<(&PlayerSeat, &mut GameSession, &mut DasState), With<HumanControlled>>,
 ) {
-    let Ok((mut session, mut das)) = query.single_mut() else {
-        return;
-    };
-    let game = &mut session.game;
+    // With a second human on the board, each player is pinned to one pad;
+    // alone, any pad drives the only board there is.
+    let versus = query.iter().count() > 1;
+    for (seat, mut session, mut das) in &mut query {
+        let c = Controls {
+            keys: &keys,
+            pad: &pad,
+            settings: &settings,
+            seat: seat.0,
+            pad_slot: versus.then_some(seat.0),
+        };
+        drive_board(&time, &c, &settings, &mut session.game, &mut das);
+    }
+}
+
+fn drive_board(
+    time: &Time,
+    c: &Controls,
+    settings: &GameSettings,
+    game: &mut Game,
+    das: &mut DasState,
+) {
     if game.game_over {
         return;
     }
 
     // Keyboard and gamepad merge into one digital state; DAS/ARR then
     // treats both sources identically.
-    let left_just = keys.just_pressed(settings.key_for(Action::MoveLeft))
-        || pad.action_just_pressed(Action::MoveLeft);
-    let right_just = keys.just_pressed(settings.key_for(Action::MoveRight))
-        || pad.action_just_pressed(Action::MoveRight);
-    let left_down =
-        keys.pressed(settings.key_for(Action::MoveLeft)) || pad.action_pressed(Action::MoveLeft);
-    let right_down =
-        keys.pressed(settings.key_for(Action::MoveRight)) || pad.action_pressed(Action::MoveRight);
+    let left_just = c.just_pressed(Action::MoveLeft);
+    let right_just = c.just_pressed(Action::MoveRight);
+    let left_down = c.pressed(Action::MoveLeft);
+    let right_down = c.pressed(Action::MoveRight);
     let das_secs = settings.das_ms as f32 / 1000.0;
     let arr_secs = settings.arr_ms as f32 / 1000.0;
 
@@ -510,28 +602,20 @@ fn human_input(
 
     // --- Everything else ---------------------------------------------------
     game.soft_drop_factor = settings.sdf_factor();
-    game.set_soft_drop(
-        keys.pressed(settings.key_for(Action::SoftDrop)) || pad.action_pressed(Action::SoftDrop),
-    );
-    if keys.just_pressed(settings.key_for(Action::RotateCw))
-        || pad.action_just_pressed(Action::RotateCw)
-    {
+    game.set_soft_drop(c.pressed(Action::SoftDrop));
+    if c.just_pressed(Action::RotateCw) {
         game.rotate(true);
     }
-    if keys.just_pressed(settings.key_for(Action::RotateCcw))
-        || pad.action_just_pressed(Action::RotateCcw)
-    {
+    if c.just_pressed(Action::RotateCcw) {
         game.rotate(false);
     }
-    if keys.just_pressed(settings.key_for(Action::Hold)) || pad.action_just_pressed(Action::Hold) {
+    if c.just_pressed(Action::Hold) {
         game.hold();
     }
-    if keys.just_pressed(settings.key_for(Action::HardDrop))
-        || pad.action_just_pressed(Action::HardDrop)
-    {
+    if c.just_pressed(Action::HardDrop) {
         game.hard_drop();
     }
-    if keys.just_pressed(settings.key_for(Action::Zone)) || pad.action_just_pressed(Action::Zone) {
+    if c.just_pressed(Action::Zone) {
         game.activate_zone();
     }
 }
@@ -586,7 +670,14 @@ fn cpu_drive(time: Res<Time>, mut query: Query<(&mut GameSession, &mut CpuContro
         }
 
         if plan.is_none() {
-            let queue: Vec<_> = game.queue.iter().copied().collect();
+            // The CPU reads exactly the previews the rules put on screen,
+            // so a shortened NEXT queue handicaps it the same way.
+            let queue: Vec<_> = game
+                .queue
+                .iter()
+                .copied()
+                .take(game.visible_previews)
+                .collect();
             *plan = ai::plan(
                 &game.board,
                 game.active,

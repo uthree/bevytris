@@ -8,7 +8,7 @@ use crate::core::game::{ZONE_DURATION, gravity_seconds};
 use crate::core::piece::{PieceKind, Rot, cells};
 use crate::i18n::Locale;
 use crate::session::{
-    BoardIndex, Countdown, CpuControlled, GameSession, HumanControlled, MatchState,
+    BoardIndex, Countdown, CpuControlled, GameSession, MatchState, PrimaryPlayer,
 };
 use crate::state::{AppState, GameMode, PlayState};
 
@@ -180,13 +180,17 @@ pub fn setup_board_visuals(
     mode: Res<GameMode>,
     settings: Res<crate::config::GameSettings>,
     locale: Res<Locale>,
-    boards: Query<(Entity, &BoardIndex), With<GameSession>>,
+    boards: Query<(Entity, &BoardIndex, &GameSession)>,
 ) {
     let s = locale.s();
     let vs = matches!(
         *mode,
         GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } | GameMode::Custom
     );
+    // Local versus labels the boards 1P/2P: "YOU vs CPU" would be a lie
+    // about which side the second person is sitting on.
+    let two_player =
+        *mode == GameMode::Custom && settings.custom.opponent == crate::config::Opponent::Human;
     // The zone gauge shows wherever the zone mechanic is live.
     let zone_on = match *mode {
         GameMode::ZoneBattle { .. } => true,
@@ -195,7 +199,9 @@ pub fn setup_board_visuals(
     };
     let cell = if vs { 26.0 } else { 30.0 };
 
-    for (entity, index) in &boards {
+    for (entity, index, session) in &boards {
+        let hold_on = session.game.hold_enabled;
+        let previews = session.game.visible_previews;
         let x = if vs {
             if index.0 == 0 { -330.0 } else { 330.0 }
         } else {
@@ -246,43 +252,63 @@ pub fn setup_board_visuals(
                     }
                 }
 
-                // Hold box (upper left of the board).
+                // Hold box (upper left of the board). A match that bans
+                // hold draws no box at all — an empty one would read as a
+                // slot waiting to be filled.
                 let hold_x = -w / 2.0 - cell * 2.8;
                 let hold_y = h / 2.0 - cell * 1.2;
-                parent.spawn((
-                    Text2d::new(s.hold),
-                    TextFont {
-                        font_size: FontSize::Px(cell * 0.62),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.6, 0.7, 0.8)),
-                    Transform::from_xyz(hold_x, hold_y + cell * 1.7, 2.0),
-                ));
-                parent.spawn((
-                    Sprite::from_color(Color::srgba(0.0, 0.0, 0.0, 0.85), Vec2::splat(cell * 4.0)),
-                    Transform::from_xyz(hold_x, hold_y, 0.7),
-                ));
-                for i in 0..4 {
+                if hold_on {
                     parent.spawn((
-                        Sprite::from_color(Color::NONE, Vec2::splat(cell * 0.55 - 1.0)),
-                        Transform::from_xyz(hold_x, hold_y, 2.0),
-                        HoldSprite(i),
-                        PreviewAnchor(Vec2::new(hold_x, hold_y)),
+                        Text2d::new(s.hold),
+                        TextFont {
+                            font_size: FontSize::Px(cell * 0.62),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.6, 0.7, 0.8)),
+                        Transform::from_xyz(hold_x, hold_y + cell * 1.7, 2.0),
+                    ));
+                    parent.spawn((
+                        Sprite::from_color(
+                            Color::srgba(0.0, 0.0, 0.0, 0.85),
+                            Vec2::splat(cell * 4.0),
+                        ),
+                        Transform::from_xyz(hold_x, hold_y, 0.7),
+                    ));
+                    for i in 0..4 {
+                        parent.spawn((
+                            Sprite::from_color(Color::NONE, Vec2::splat(cell * 0.55 - 1.0)),
+                            Transform::from_xyz(hold_x, hold_y, 2.0),
+                            HoldSprite(i),
+                            PreviewAnchor(Vec2::new(hold_x, hold_y)),
+                        ));
+                    }
+                } else {
+                    parent.spawn((
+                        Text2d::new(s.hold_off),
+                        TextFont {
+                            font_size: FontSize::Px(cell * 0.5),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.45, 0.4, 0.45)),
+                        Transform::from_xyz(hold_x, hold_y + cell * 1.7, 2.0),
                     ));
                 }
 
-                // Next queue (right of the board).
+                // Next queue (right of the board), as long as the rules
+                // give the player any previews at all.
                 let next_x = w / 2.0 + cell * 2.8;
-                parent.spawn((
-                    Text2d::new(s.next),
-                    TextFont {
-                        font_size: FontSize::Px(cell * 0.62),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.6, 0.7, 0.8)),
-                    Transform::from_xyz(next_x, h / 2.0 + cell * 0.5, 2.0),
-                ));
-                for slot in 0..5 {
+                if previews > 0 {
+                    parent.spawn((
+                        Text2d::new(s.next),
+                        TextFont {
+                            font_size: FontSize::Px(cell * 0.62),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.6, 0.7, 0.8)),
+                        Transform::from_xyz(next_x, h / 2.0 + cell * 0.5, 2.0),
+                    ));
+                }
+                for slot in 0..previews {
                     let slot_y = h / 2.0 - cell * 1.2 - slot as f32 * cell * 2.4;
                     parent.spawn((
                         Sprite::from_color(
@@ -384,10 +410,11 @@ pub fn setup_board_visuals(
                     GameMode::Sprint => s.sprint,
                     GameMode::Dig => s.dig,
                     GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } | GameMode::Custom => {
-                        if index.0 == 0 {
-                            s.you
-                        } else {
-                            s.cpu
+                        match (two_player, index.0 == 0) {
+                            (true, true) => s.p1,
+                            (true, false) => s.p2,
+                            (false, true) => s.you,
+                            (false, false) => s.cpu,
                         }
                     }
                 };
@@ -437,7 +464,7 @@ fn sync_match_hud(
     locale: Res<Locale>,
     match_state: Option<Res<MatchState>>,
     cpus: Query<&CpuControlled>,
-    players: Query<&GameSession, With<HumanControlled>>,
+    players: Query<&GameSession, With<PrimaryPlayer>>,
     mut texts: Query<&mut Text2d, With<MatchHudText>>,
 ) {
     let Ok(mut text) = texts.single_mut() else {
@@ -467,8 +494,13 @@ fn sync_match_hud(
     } else {
         String::new()
     };
-    let score = s
-        .vs_score
+    // No CPU on the other board means the second seat is a person.
+    let template = if cpus.is_empty() {
+        s.vs_score_2p
+    } else {
+        s.vs_score
+    };
+    let score = template
         .replace("{p}", &ms.player_wins.to_string())
         .replace("{c}", &ms.cpu_wins.to_string());
     let first_to = s.first_to.replace("{n}", &ms.wins_needed.to_string());

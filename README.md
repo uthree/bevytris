@@ -21,9 +21,18 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
   super move: cancelling or digging garbage charges a gauge; firing it stops
   time, banks every cleared row at the bottom of the field and launches them
   all as one attack when the zone ends.
-- **CUSTOM MATCH** — build your own versus rules: CPU level (1-30) and
-  playstyle, first-to-N, zone gauges on/off, margin time, fixed or ramping
-  gravity, per-side attack handicaps (50-200%) and starting garbage.
+- **CUSTOM MATCH** — build your own versus rules: opponent (CPU or a second
+  player on the same keyboard), CPU level (1-30) and playstyle, first-to-N,
+  zone gauges on/off, margin time, fixed or ramping gravity, hold on/off,
+  preview count (0-5), garbage messiness, per-side attack handicaps
+  (50-200%) and starting garbage.
+- **Local two-player** — set CUSTOM MATCH's opponent to PLAYER 2 and both
+  boards become human. Player 2 gets its own key set (and the second
+  connected gamepad, if there is one); every custom rule applies to both
+  sides.
+- **Garbage messiness** — attacks normally arrive as one clean well to clear
+  through. Turning messiness up splits each attack into shorter runs at
+  different columns, so the same row count becomes cheese to dig instead.
 - **Serious CPU opponents** — the AI plans like MisaMino / Cold Clear:
   a pathfinding move generator (soft-drop tucks, SRS spins), beam search
   over the preview queue, and an evaluation that tracks back-to-back,
@@ -93,8 +102,15 @@ cargo test -p bevytris-core
 | Pause       | Esc         |
 | Fullscreen  | F11         |
 
+Player 2 (local versus only) defaults to the left hand of the keyboard —
+A/D to move, S soft drop, W / Q to rotate, Left Shift to hard drop, E hold,
+R zone. If those keys are already taken by player 1's own bindings, player 2
+starts on the numpad instead. Pause is shared: one key stops both boards.
+
 Menus: arrow keys + Enter (mouse also works). All gameplay keys can be rebound
-in **SETTINGS**; press Enter on a binding row, then press the new key.
+in **SETTINGS**; press Enter on a binding row, then press the new key. Player
+2's keys have their own section, and a key both players share is flagged
+there.
 
 Settings are stored as RON at the platform config directory, e.g.
 `~/Library/Application Support/bevytris/settings.ron` on macOS or
