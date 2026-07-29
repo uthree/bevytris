@@ -410,19 +410,27 @@ impl Game {
         }
         let lines = std::mem::take(&mut zone.lines);
         self.board.clear_zone_rows();
-        let mut attack = lines
-            + match lines {
-                0..=3 => 0,
-                4..=5 => 1,
-                6..=7 => 2,
-                8..=9 => 4,
-                _ => 6,
-            };
+        let mut attack = lines + zone_bonus(lines);
         attack = (attack as f32 * self.attack_multiplier()).floor() as u32;
         attack = self.cancel_incoming(attack);
         self.stats.attack_sent += attack;
         self.score += (150 * lines * lines * self.level) as u64;
         self.events.push(GameEvent::ZoneEnded { lines, attack });
+    }
+
+    /// Attack an active zone would fire if it ended right now: the banked
+    /// lines plus their bonus, margin-scaled, minus what the owner's own
+    /// queued garbage would cancel. Zero while no zone runs. This is the
+    /// threat the OPPONENT's danger warning should count while the zone
+    /// is still stacking up.
+    pub fn zone_projected_attack(&self) -> u32 {
+        let Some(zone) = &self.zone else { return 0 };
+        if zone.active.is_none() || zone.lines == 0 {
+            return 0;
+        }
+        let attack = zone.lines + zone_bonus(zone.lines);
+        let attack = (attack as f32 * self.attack_multiplier()).floor() as u32;
+        attack.saturating_sub(self.incoming_total())
     }
 
     fn note_descent(&mut self) {
@@ -826,6 +834,17 @@ impl Game {
         // Note: garbage only ever rises between a lock and the next spawn,
         // so there is never a live falling piece to push out of the way;
         // `spawn_active` performs the real block-out check right after.
+    }
+}
+
+/// Bonus attack rows a zone payout earns on top of its banked lines.
+fn zone_bonus(lines: u32) -> u32 {
+    match lines {
+        0..=3 => 0,
+        4..=5 => 1,
+        6..=7 => 2,
+        8..=9 => 4,
+        _ => 6,
     }
 }
 
@@ -1265,6 +1284,26 @@ mod tests {
             "zone rows must clear when the zone ends"
         );
         assert_eq!(game.zone.as_ref().unwrap().charge, 0.0, "gauge spent");
+    }
+
+    #[test]
+    fn zone_projected_attack_tracks_banked_lines() {
+        let mut game = Game::new(1, 1);
+        game.zone = Some(Zone { charge: 1.0, ..Default::default() });
+        assert_eq!(game.zone_projected_attack(), 0, "inactive zone: no threat");
+        assert!(game.activate_zone());
+        assert_eq!(game.zone_projected_attack(), 0, "nothing banked yet");
+        game.zone.as_mut().unwrap().lines = 6;
+        assert_eq!(game.zone_projected_attack(), 8, "6 banked + bonus 2");
+        // The owner's own queued garbage absorbs the payout first.
+        game.queue_garbage(3);
+        assert_eq!(game.zone_projected_attack(), 5);
+        // The projection matches what the zone actually fires.
+        game.tick(ZONE_DURATION + 0.1);
+        assert!(game
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::ZoneEnded { lines: 6, attack: 5 })));
     }
 
     #[test]

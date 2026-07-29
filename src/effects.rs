@@ -16,7 +16,7 @@ use crate::core::game::{ClearKind, GameEvent, GARBAGE_CAP_PER_PIECE};
 use crate::emissive;
 use crate::render::{BoardKick, BoardTheme, FrameGlow};
 use crate::session::{BoardEvent, BoardIndex, GameSession, SessionResult};
-use crate::state::{AppState, PlayState};
+use crate::state::{AppState, GameMode, PlayState};
 
 pub struct EffectsPlugin;
 
@@ -1444,9 +1444,28 @@ pub const DANGER_PULSE: f32 = 6.0;
 fn update_danger(
     time: Res<Time>,
     state: Res<State<PlayState>>,
+    mode: Res<GameMode>,
+    settings: Res<GameSettings>,
     mut danger: ResMut<DangerLevel>,
     mut boards: Query<(&GameSession, &BoardIndex, &mut FrameGlow)>,
 ) {
+    // An opponent mid-zone is a loaded gun: whatever their zone would
+    // fire if it ended right now counts toward this board's threat, with
+    // the same handicap scaling the real attack will get when it routes.
+    let mut zone_threat = [0u32; 2];
+    for (session, index, _) in boards.iter() {
+        let mut threat = session.game.zone_projected_attack();
+        if threat > 0 && *mode == GameMode::Custom {
+            let pct = if index.0 == 0 {
+                settings.custom.player_attack_pct
+            } else {
+                settings.custom.cpu_attack_pct
+            };
+            threat = (threat * pct + 50) / 100;
+        }
+        zone_threat[1 - index.0.min(1)] = threat;
+    }
+
     for (session, index, mut glow) in &mut boards {
         let stack = session
             .game
@@ -1455,12 +1474,11 @@ fn update_danger(
             .into_iter()
             .max()
             .unwrap_or(0) as f32;
-        // Queued garbage lands on top of the stack after the next
-        // non-clearing lock; only one piece's cap can rise at once, so
-        // anything past the cap is not an immediate threat yet.
-        let pending = session
-            .game
-            .incoming_total()
+        // Queued garbage (plus the opponent's pending zone payout) lands
+        // on top of the stack after the next non-clearing lock; only one
+        // piece's cap can rise at once, so anything past the cap is not
+        // an immediate threat yet.
+        let pending = (session.game.incoming_total() + zone_threat[index.0.min(1)])
             .min(GARBAGE_CAP_PER_PIECE) as f32;
         let height = stack + pending;
         // Inside the zone the banked lines pile up by design and garbage
