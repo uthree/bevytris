@@ -181,6 +181,10 @@ impl Plugin for MenuPlugin {
             .add_systems(
                 Update,
                 (settings_scroll_wheel, settings_keep_cursor_visible)
+                    // After the nav systems so a keypress scrolls on the same
+                    // frame it moves the cursor, not the frame after.
+                    .after(menu_keyboard_nav)
+                    .after(menu_mouse)
                     .run_if(in_state(AppState::Settings).or_else(in_state(AppState::CustomSetup))),
             );
     }
@@ -1217,18 +1221,27 @@ mod jukebox_tests {
     }
 }
 
+/// How far down the list can be scrolled, in the logical pixels
+/// [`ScrollPosition`] is measured in. Layout clamps what it *draws* to this
+/// range but leaves the component alone, so anything writing a scroll
+/// position has to clamp itself or the two silently drift apart.
+fn max_scroll_y(node: &ComputedNode) -> f32 {
+    let overflow = node.content_size.y - node.size().y + node.scrollbar_size.y;
+    (overflow * node.inverse_scale_factor()).max(0.0)
+}
+
 /// Mouse wheel scrolls the settings list.
 fn settings_scroll_wheel(
     mut wheels: MessageReader<MouseWheel>,
-    mut scrolls: Query<&mut ScrollPosition, With<SettingsScroll>>,
+    mut scrolls: Query<(&ComputedNode, &mut ScrollPosition), With<SettingsScroll>>,
 ) {
     for ev in wheels.read() {
         let dy = match ev.unit {
             MouseScrollUnit::Line => ev.y * 36.0,
             MouseScrollUnit::Pixel => ev.y,
         };
-        for mut pos in &mut scrolls {
-            pos.0.y -= dy;
+        for (node, mut pos) in &mut scrolls {
+            pos.0.y = (pos.0.y - dy).clamp(0.0, max_scroll_y(node));
         }
     }
 }
@@ -1258,11 +1271,18 @@ fn settings_keep_cursor_visible(
     let view_bottom = stf.affine().translation.y + snode.size().y * 0.5;
     let item_top = itf.affine().translation.y - inode.size().y * 0.5 - margin;
     let item_bottom = itf.affine().translation.y + inode.size().y * 0.5 + margin;
-    if item_top < view_top {
-        pos.0.y += (item_top - view_top) * inv;
+    let delta = if item_top < view_top {
+        item_top - view_top
     } else if item_bottom > view_bottom {
-        pos.0.y += (item_bottom - view_bottom) * inv;
-    }
+        item_bottom - view_bottom
+    } else {
+        return;
+    };
+    // The transforms above are where the rows were actually drawn, i.e. they
+    // already carry the *clamped* scroll offset. Start from that so the follow
+    // stays exact instead of building on a position layout never honoured.
+    let drawn = snode.scroll_position.y * inv;
+    pos.0.y = (drawn + delta * inv).clamp(0.0, max_scroll_y(snode));
 }
 
 fn settings_label(
@@ -1539,17 +1559,27 @@ fn menu_keyboard_nav(
 
 fn menu_mouse(
     items: Query<(Entity, &MenuItem, &Interaction), Changed<Interaction>>,
+    mut moves: MessageReader<CursorMoved>,
     mut cursor: ResMut<MenuCursor>,
     sfx: MessageWriter<PlaySfx>,
     activate: MenuActivateParams,
 ) {
+    // Hover is only allowed to move the cursor when the pointer itself moved.
+    // A scrolling list slides rows *under* a resting pointer, which counts as
+    // a fresh hover and would otherwise yank the keyboard cursor back to
+    // whatever row happened to arrive beneath the mouse.
+    let pointer_moved = moves.read().count() > 0;
     if activate.rebinding.action.is_some() {
         return;
     }
     let mut clicked: Option<MenuAction> = None;
     for (_, item, interaction) in &items {
         match interaction {
-            Interaction::Hovered => cursor.0 = item.index,
+            Interaction::Hovered => {
+                if pointer_moved {
+                    cursor.0 = item.index;
+                }
+            }
             Interaction::Pressed => {
                 cursor.0 = item.index;
                 clicked = Some(item.action);
