@@ -113,9 +113,14 @@ jobs:
               VSync & fullscreen (F11)
             - English / Japanese UI, auto-detected from the OS (switchable in settings)
             - HDR bloom, particles, shockwaves, board inertia, Misaki pixel font
-            - No music files: a built-in NES-style synthesizer and algorithmic composer
-              write the BGM live (calm in solo, fast and minor in versus, tempo rising
-              with the stack), with a piano-roll background scene showing the score
+            - No music files. A nine-voice NES-style synthesizer and an algorithmic
+              composer write the BGM live: bright and unhurried in solo, fast and minor
+              in versus, with the mode darkening and the drums thickening as the stack
+              climbs. Every piece rolls its own key, tempo, time signature (4/4, and
+              sometimes 3/4 or 6/8) and drum kit, ends with a final chorus a whole tone
+              up, and comes home through an outro so it loops
+            - MUSIC room: pick a seed and a preset and listen, with the piano roll filling
+              the screen. Set BEVYTRIS_MUSIC_SEED to replay a session note for note
             - SFX from CC0 samples plus procedurally synthesized bells and booms
 
             Full third-party credits in `assets/CREDITS.md`.
