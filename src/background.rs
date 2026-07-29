@@ -61,11 +61,15 @@ impl Default for AudioPulse {
     }
 }
 
-const SCENE_COUNT: usize = 4;
+const SCENE_COUNT: usize = 8;
 const FORMATION: usize = 0;
 const CYBER: usize = 1;
 const GALAXY: usize = 2;
 const VISUALIZER: usize = 3;
+const GARDEN: usize = 4;
+const FRACTAL: usize = 5;
+const SUNSET: usize = 6;
+const AUTOMATON: usize = 7;
 
 /// One color scheme shared by every scene.
 struct Palette {
@@ -79,6 +83,9 @@ struct Palette {
     /// Visualizer bar gradient ends.
     eq: (Color, Color),
     wave: Color,
+    /// Full-screen backdrop gradient (top, bottom) so the base color
+    /// isn't eternally navy.
+    bg: (Color, Color),
 }
 
 /// Preset palettes; every incoming scene draws a random one, so the
@@ -101,6 +108,7 @@ const PALETTES: [Palette; 5] = [
         ],
         eq: (Color::srgb(0.2, 0.9, 1.0), Color::srgb(1.0, 0.3, 0.9)),
         wave: Color::srgb(0.5, 0.95, 1.0),
+        bg: (Color::srgb(0.04, 0.03, 0.11), Color::srgb(0.02, 0.06, 0.11)),
     },
     // EMBER — warm oranges and reds.
     Palette {
@@ -119,6 +127,7 @@ const PALETTES: [Palette; 5] = [
         ],
         eq: (Color::srgb(1.0, 0.8, 0.3), Color::srgb(1.0, 0.25, 0.2)),
         wave: Color::srgb(1.0, 0.7, 0.4),
+        bg: (Color::srgb(0.10, 0.03, 0.05), Color::srgb(0.08, 0.04, 0.02)),
     },
     // MATRIX — all greens.
     Palette {
@@ -137,6 +146,7 @@ const PALETTES: [Palette; 5] = [
         ],
         eq: (Color::srgb(0.3, 1.0, 0.5), Color::srgb(0.15, 0.75, 0.6)),
         wave: Color::srgb(0.5, 1.0, 0.6),
+        bg: (Color::srgb(0.02, 0.07, 0.04), Color::srgb(0.01, 0.05, 0.05)),
     },
     // ICE — whites and pale blues.
     Palette {
@@ -155,6 +165,7 @@ const PALETTES: [Palette; 5] = [
         ],
         eq: (Color::srgb(0.9, 0.97, 1.0), Color::srgb(0.35, 0.6, 1.0)),
         wave: Color::srgb(0.8, 0.92, 1.0),
+        bg: (Color::srgb(0.04, 0.06, 0.12), Color::srgb(0.06, 0.09, 0.14)),
     },
     // VAPOR — pinks and purples.
     Palette {
@@ -173,6 +184,7 @@ const PALETTES: [Palette; 5] = [
         ],
         eq: (Color::srgb(0.7, 0.4, 1.0), Color::srgb(1.0, 0.45, 0.75)),
         wave: Color::srgb(1.0, 0.6, 0.85),
+        bg: (Color::srgb(0.09, 0.03, 0.11), Color::srgb(0.05, 0.04, 0.12)),
     },
 ];
 
@@ -246,6 +258,10 @@ impl Plugin for BackgroundPlugin {
             Ok("cyber") => (CYBER, true),
             Ok("galaxy") => (GALAXY, true),
             Ok("visualizer") => (VISUALIZER, true),
+            Ok("garden") => (GARDEN, true),
+            Ok("fractal") => (FRACTAL, true),
+            Ok("sunset") => (SUNSET, true),
+            Ok("automaton") => (AUTOMATON, true),
             _ => (rand::rng().random_range(0..SCENE_COUNT), false),
         };
         app.init_resource::<StarSurge>()
@@ -269,10 +285,15 @@ impl Plugin for BackgroundPlugin {
                     update_zone_fx,
                     update_scene_state,
                     animate_stars,
+                    animate_backdrops,
                     animate_formation,
                     animate_cyber,
                     animate_galaxy,
                     animate_visualizer,
+                    animate_garden,
+                    animate_fractal,
+                    animate_sunset,
+                    animate_automaton,
                 )
                     .chain(),
             );
@@ -337,6 +358,174 @@ struct EqBar {
 #[derive(Component)]
 struct WaveDot {
     idx: usize,
+}
+
+/// Palette-tinted full-screen gradient behind a scene's content, so the
+/// base color isn't the same navy in every scene.
+#[derive(Component)]
+struct SceneBackdrop {
+    scene: usize,
+    bottom: bool,
+}
+
+#[derive(Component)]
+struct GardenDot {
+    plant: usize,
+    root: Vec2,
+    rel: Vec2,
+    /// 0..1 order of appearance while the plant grows.
+    birth: f32,
+    /// 0..1 distance from the root; deeper parts sway more.
+    depth: f32,
+    /// 0 stem, 1 leaf, 2 flower.
+    kind: u8,
+}
+
+#[derive(Component)]
+struct CarpetCell {
+    /// Center in unit carpet space (-0.5..0.5).
+    pos: Vec2,
+    /// Edge length in unit space.
+    size: f32,
+    depth: u8,
+}
+
+#[derive(Component)]
+struct SkyBand(usize);
+
+#[derive(Component)]
+struct SunsetSun;
+
+#[derive(Component)]
+struct SunsetCloud {
+    speed: f32,
+}
+
+#[derive(Component)]
+struct MountainBar;
+
+#[derive(Component)]
+struct LifeCell {
+    idx: usize,
+    alpha: f32,
+}
+
+/// Conway's Game of Life state for the AUTOMATON scene.
+#[derive(Resource)]
+struct LifeGrid {
+    w: usize,
+    h: usize,
+    cells: Vec<bool>,
+    prev: Vec<bool>,
+    step_timer: f32,
+    reseed_timer: f32,
+}
+
+const LIFE_W: usize = 60;
+const LIFE_H: usize = 34;
+const LIFE_CELL: f32 = 22.0;
+
+/// Muted sunset sky gradient, top of the screen to the horizon.
+const SKY_COLORS: [(f32, f32, f32); 8] = [
+    (0.10, 0.05, 0.20),
+    (0.16, 0.07, 0.22),
+    (0.25, 0.09, 0.22),
+    (0.38, 0.12, 0.21),
+    (0.52, 0.16, 0.19),
+    (0.68, 0.24, 0.16),
+    (0.82, 0.34, 0.15),
+    (0.92, 0.48, 0.18),
+];
+
+struct GardenSeed {
+    plant: usize,
+    root: Vec2,
+    rel: Vec2,
+    birth: f32,
+    depth: f32,
+    kind: u8,
+}
+
+/// Grow a row of branching plants (stems as chains of dots, leaves on
+/// the way, a bloom at every tip).
+fn garden_seeds(rng: &mut impl Rng) -> Vec<GardenSeed> {
+    let mut out = Vec::new();
+    let roots = [-560.0, -420.0, -180.0, 150.0, 420.0, 560.0];
+    for (plant, &rx) in roots.iter().enumerate() {
+        let root = Vec2::new(rx + rng.random_range(-25.0..25.0), -372.0);
+        let main_len = rng.random_range(260.0..420.0);
+        let mut stack = vec![(
+            Vec2::ZERO,
+            std::f32::consts::FRAC_PI_2 + rng.random_range(-0.1..0.1),
+            main_len,
+            0u32,
+            0.0f32,
+        )];
+        while let Some((start, mut angle, len, level, dist0)) = stack.pop() {
+            let mut pos = start;
+            let steps = ((len / 11.0) as usize).max(2);
+            for s in 0..steps {
+                pos += Vec2::from_angle(angle) * 11.0;
+                angle += rng.random_range(-0.1..0.1);
+                let dist = dist0 + (s + 1) as f32 * 11.0;
+                let reach = (dist / (main_len * 1.5)).min(1.0);
+                out.push(GardenSeed {
+                    plant,
+                    root,
+                    rel: pos,
+                    birth: reach * 0.9,
+                    depth: reach,
+                    kind: 0,
+                });
+                if level >= 1 && rng.random_bool(0.25) {
+                    let side = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
+                    out.push(GardenSeed {
+                        plant,
+                        root,
+                        rel: pos + Vec2::from_angle(angle + side * 1.3) * 9.0,
+                        birth: (reach * 0.9 + 0.03).min(1.0),
+                        depth: reach,
+                        kind: 1,
+                    });
+                }
+                if level < 2 && len > 70.0 && rng.random_bool(0.14) {
+                    let side = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
+                    stack.push((
+                        pos,
+                        angle + side * rng.random_range(0.35..0.7),
+                        len * 0.55,
+                        level + 1,
+                        dist,
+                    ));
+                }
+            }
+            out.push(GardenSeed {
+                plant,
+                root,
+                rel: pos,
+                birth: ((dist0 + len) / (main_len * 1.5) * 0.92).min(0.98),
+                depth: 1.0,
+                kind: 2,
+            });
+        }
+    }
+    out
+}
+
+/// Sierpinski carpet cells: 8 blocks per level, recursively.
+fn carpet_cells(out: &mut Vec<(Vec2, f32, u8)>, center: Vec2, size: f32, depth: u8) {
+    for dy in -1..=1i32 {
+        for dx in -1..=1i32 {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let c = center + Vec2::new(dx as f32, dy as f32) * size / 3.0;
+            out.push((c, size / 3.0, depth));
+            if depth < 3 {
+                carpet_cells(out, c, size / 3.0, depth + 1);
+            }
+        }
+    }
 }
 
 const FORMATION_DOTS: usize = 240;
@@ -545,6 +734,172 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
                 ));
             }
         });
+
+    // --- GARDEN ----------------------------------------------------------
+    commands
+        .spawn((
+            SceneRoot(GARDEN),
+            Transform::from_xyz(0.0, 0.0, -21.0),
+            Visibility::default(),
+        ))
+        .with_children(|parent| {
+            for seed in garden_seeds(&mut rng) {
+                parent.spawn((
+                    Sprite::from_color(Color::NONE, Vec2::splat(4.0)),
+                    Transform::default(),
+                    GardenDot {
+                        plant: seed.plant,
+                        root: seed.root,
+                        rel: seed.rel,
+                        birth: seed.birth,
+                        depth: seed.depth,
+                        kind: seed.kind,
+                    },
+                ));
+            }
+        });
+
+    // --- FRACTAL ---------------------------------------------------------
+    let mut cells = Vec::with_capacity(584);
+    carpet_cells(&mut cells, Vec2::ZERO, 1.0, 1);
+    commands
+        .spawn((
+            SceneRoot(FRACTAL),
+            Transform::from_xyz(0.0, 0.0, -23.0),
+            Visibility::default(),
+        ))
+        .with_children(|parent| {
+            for (pos, size, depth) in cells {
+                parent.spawn((
+                    Sprite::from_color(Color::NONE, Vec2::splat(4.0)),
+                    Transform::default(),
+                    CarpetCell { pos, size, depth },
+                ));
+            }
+        });
+
+    // --- SUNSET ----------------------------------------------------------
+    commands
+        .spawn((
+            SceneRoot(SUNSET),
+            Transform::from_xyz(0.0, 0.0, -24.0),
+            Visibility::default(),
+        ))
+        .with_children(|parent| {
+            // Gradient sky bands, top to horizon.
+            for (i, &(r, g, b)) in SKY_COLORS.iter().enumerate() {
+                parent.spawn((
+                    Sprite::from_color(
+                        Color::srgba(r, g, b, 0.0),
+                        Vec2::new(1420.0, 96.0),
+                    ),
+                    Transform::from_xyz(0.0, 340.0 - (i as f32 + 0.5) * 92.0, -3.0),
+                    SkyBand(i),
+                ));
+            }
+            // The square sun, slowly setting behind the ridge.
+            parent.spawn((
+                Sprite::from_color(emissive(Color::srgb(1.0, 0.72, 0.32), 1.9), Vec2::splat(88.0)),
+                Transform::from_xyz(-170.0, 120.0, -2.5),
+                SunsetSun,
+            ));
+            // Drifting clouds.
+            for _ in 0..6 {
+                parent.spawn((
+                    Sprite::from_color(
+                        Color::srgba(1.0, 0.62, 0.5, 0.0),
+                        Vec2::new(rng.random_range(120.0..230.0), rng.random_range(10.0..18.0)),
+                    ),
+                    Transform::from_xyz(
+                        rng.random_range(-720.0..720.0),
+                        rng.random_range(60.0..320.0),
+                        -2.2,
+                    ),
+                    SunsetCloud {
+                        speed: rng.random_range(6.0..18.0),
+                    },
+                ));
+            }
+            // Two ridges of pixel mountains: bars anchored to the bottom.
+            for (layer, (color, base, amp, width, z)) in [
+                (Color::srgb(0.14, 0.07, 0.18), 140.0, 90.0, 46.0, -1.6),
+                (Color::srgb(0.05, 0.03, 0.09), 80.0, 60.0, 52.0, -0.9),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let count = (1480.0 / width) as usize + 1;
+                for i in 0..count {
+                    let fi = i as f32 + layer as f32 * 0.5;
+                    let h = base
+                        + amp * ((fi * 1.31).sin() + 0.6 * (fi * 0.47 + 1.3).sin()).abs();
+                    parent.spawn((
+                        Sprite::from_color(color.with_alpha(0.0), Vec2::new(width, h)),
+                        Transform::from_xyz(
+                            -740.0 + (i as f32 + 0.5) * width,
+                            -370.0 + h / 2.0,
+                            z,
+                        ),
+                        MountainBar,
+                    ));
+                }
+            }
+        });
+
+    // --- AUTOMATON -------------------------------------------------------
+    let mut life_cells = vec![false; LIFE_W * LIFE_H];
+    for cell in life_cells.iter_mut() {
+        *cell = rng.random_bool(0.18);
+    }
+    commands.insert_resource(LifeGrid {
+        w: LIFE_W,
+        h: LIFE_H,
+        prev: life_cells.clone(),
+        cells: life_cells,
+        step_timer: 0.3,
+        reseed_timer: 18.0,
+    });
+    commands
+        .spawn((
+            SceneRoot(AUTOMATON),
+            Transform::from_xyz(0.0, 0.0, -25.5),
+            Visibility::default(),
+        ))
+        .with_children(|parent| {
+            for idx in 0..LIFE_W * LIFE_H {
+                let x = (idx % LIFE_W) as f32;
+                let y = (idx / LIFE_W) as f32;
+                parent.spawn((
+                    Sprite::from_color(Color::NONE, Vec2::splat(LIFE_CELL - 3.0)),
+                    Transform::from_xyz(
+                        (x + 0.5) * LIFE_CELL - LIFE_W as f32 * LIFE_CELL / 2.0,
+                        (y + 0.5) * LIFE_CELL - LIFE_H as f32 * LIFE_CELL / 2.0,
+                        0.0,
+                    ),
+                    LifeCell { idx, alpha: 0.0 },
+                ));
+            }
+        });
+
+    // Palette-tinted backdrop gradients (sunset paints its own sky).
+    for scene in [FORMATION, CYBER, GALAXY, VISUALIZER, GARDEN, FRACTAL, AUTOMATON] {
+        commands.spawn((
+            Sprite::from_color(Color::NONE, Vec2::new(1440.0, 800.0)),
+            Transform::from_xyz(0.0, 0.0, -29.0),
+            SceneBackdrop {
+                scene,
+                bottom: false,
+            },
+        ));
+        commands.spawn((
+            Sprite::from_color(Color::NONE, Vec2::new(1440.0, 400.0)),
+            Transform::from_xyz(0.0, -200.0, -28.9),
+            SceneBackdrop {
+                scene,
+                bottom: true,
+            },
+        ));
+    }
 
     commands.insert_resource(ShootingTimer(Timer::from_seconds(5.0, TimerMode::Once)));
 }
@@ -955,6 +1310,267 @@ fn animate_galaxy(
 // ---------------------------------------------------------------------------
 // VISUALIZER: EQ bars + waveform
 // ---------------------------------------------------------------------------
+
+/// Palette-tinted gradients behind each scene's content.
+fn animate_backdrops(
+    weights: Res<SceneWeights>,
+    palettes: Res<ScenePalettes>,
+    mut backdrops: Query<(&SceneBackdrop, &mut Sprite)>,
+) {
+    for (backdrop, mut sprite) in &mut backdrops {
+        let weight = weights.scenes[backdrop.scene];
+        let palette = palettes.of(backdrop.scene);
+        let color = if backdrop.bottom {
+            palette.bg.1
+        } else {
+            palette.bg.0
+        };
+        sprite.color = color.with_alpha(weight);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GARDEN: plants growing, swaying and blooming
+// ---------------------------------------------------------------------------
+
+fn animate_garden(
+    time: Res<Time>,
+    pulse: Res<AudioPulse>,
+    weights: Res<SceneWeights>,
+    palettes: Res<ScenePalettes>,
+    mut dots: Query<(&GardenDot, &mut Transform, &mut Sprite)>,
+) {
+    let weight = weights.scenes[GARDEN];
+    if weight <= 0.001 {
+        return;
+    }
+    let t = time.elapsed_secs();
+    let palette = palettes.of(GARDEN);
+    // Grow for half the cycle, hold in bloom, wither, regrow.
+    let cycle = (t / 30.0).fract();
+    let grow = (cycle / 0.5).min(1.0);
+    let fade = if cycle > 0.86 {
+        1.0 - (cycle - 0.86) / 0.14
+    } else {
+        1.0
+    };
+
+    for (dot, mut tf, mut sprite) in &mut dots {
+        if dot.birth >= grow {
+            sprite.color.set_alpha(0.0);
+            continue;
+        }
+        // Wind: the whole plant leans, deeper parts lean further.
+        let sway = (t * 0.9 + dot.root.x * 0.012).sin() * (0.045 + 0.05 * pulse.slow) * dot.depth;
+        let rel = Vec2::from_angle(sway).rotate(dot.rel);
+        let pos = dot.root + rel;
+        tf.translation.x = pos.x;
+        tf.translation.y = pos.y;
+        tf.translation.z = dot.kind as f32 * 0.1;
+
+        let pop = ((grow - dot.birth) / 0.06).clamp(0.0, 1.0);
+        let (color, size, boost, base_alpha) = match dot.kind {
+            0 => (
+                Color::srgb(0.25, 0.55, 0.3).mix(&Color::srgb(0.4, 0.8, 0.4), dot.depth),
+                4.0,
+                1.2,
+                0.7,
+            ),
+            1 => (Color::srgb(0.45, 0.9, 0.45), 5.5, 1.3, 0.75),
+            _ => (palette.formation[dot.plant % 4], 7.5, 1.9, 0.95),
+        };
+        let size = if dot.kind == 2 {
+            size * (1.0 + 0.12 * (t * 2.6 + dot.rel.x).sin())
+        } else {
+            size
+        };
+        sprite.custom_size = Some(Vec2::splat(size));
+        sprite.color = emissive(color, boost)
+            .with_alpha(weight * fade * base_alpha * (0.4 + 0.6 * pop));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FRACTAL: Sierpinski carpet, endlessly zooming
+// ---------------------------------------------------------------------------
+
+fn animate_fractal(
+    time: Res<Time>,
+    pulse: Res<AudioPulse>,
+    weights: Res<SceneWeights>,
+    palettes: Res<ScenePalettes>,
+    // Integrated zoom/rotation (see animate_formation's spin note).
+    mut zoom: Local<f32>,
+    mut rot: Local<f32>,
+    mut cells: Query<(&CarpetCell, &mut Transform, &mut Sprite)>,
+) {
+    let weight = weights.scenes[FRACTAL];
+    if weight <= 0.001 {
+        return;
+    }
+    let dt = time.delta_secs();
+    let palette = palettes.of(FRACTAL);
+    *zoom += dt * (0.045 + 0.03 * pulse.slow);
+    *rot += dt * 0.04;
+    // The carpet is self-similar at 3x: zooming by 3 lands on itself,
+    // so the phase wraps seamlessly.
+    let scale = 760.0 * 3f32.powf(zoom.fract());
+    let rotv = Vec2::from_angle(*rot);
+
+    for (cell, mut tf, mut sprite) in &mut cells {
+        let pos = rotv.rotate(cell.pos) * scale;
+        tf.translation.x = pos.x;
+        tf.translation.y = pos.y;
+        tf.translation.z = cell.depth as f32 * 0.01;
+        let px = cell.size * scale;
+        sprite.custom_size = Some(Vec2::splat(px * 0.86));
+        // Fade blocks that outgrew the frame or shrank into grain; keep
+        // the whole thing translucent — it's a backdrop, not a wall.
+        let big_fade = ((620.0 - px) / 260.0).clamp(0.0, 1.0);
+        let small_fade = ((px - 2.0) / 6.0).clamp(0.0, 1.0);
+        let f = cell.depth as f32 / 3.0;
+        let color = palette.eq.0.mix(&palette.eq.1, f);
+        sprite.color = emissive(color, 1.1).with_alpha(
+            weight * 0.19 * big_fade * small_fade * (0.7 + 0.3 * pulse.slow.min(1.0)),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SUNSET: gradient sky, setting sun, ridges and clouds
+// ---------------------------------------------------------------------------
+
+fn animate_sunset(
+    time: Res<Time>,
+    pulse: Res<AudioPulse>,
+    weights: Res<SceneWeights>,
+    mut bands: Query<
+        (&SkyBand, &mut Sprite),
+        (Without<SunsetSun>, Without<SunsetCloud>, Without<MountainBar>),
+    >,
+    mut sun: Query<
+        (&mut Transform, &mut Sprite),
+        (With<SunsetSun>, Without<SkyBand>, Without<SunsetCloud>, Without<MountainBar>),
+    >,
+    mut clouds: Query<
+        (&SunsetCloud, &mut Transform, &mut Sprite),
+        (Without<SunsetSun>, Without<SkyBand>, Without<MountainBar>),
+    >,
+    mut mountains: Query<
+        &mut Sprite,
+        (With<MountainBar>, Without<SunsetSun>, Without<SkyBand>, Without<SunsetCloud>),
+    >,
+) {
+    let weight = weights.scenes[SUNSET];
+    if weight <= 0.001 {
+        return;
+    }
+    let t = time.elapsed_secs();
+    let dt = time.delta_secs();
+    let warm = 0.85 + 0.12 * pulse.slow.min(1.0);
+    for (band, mut sprite) in &mut bands {
+        let (r, g, b) = SKY_COLORS[band.0];
+        sprite.color = Color::srgba(r * warm, g * warm, b * warm, weight * 0.9);
+    }
+    // The sun takes a long minute to sink behind the ridge.
+    if let Ok((mut tf, mut sprite)) = sun.single_mut() {
+        let cycle = (t / 70.0).fract();
+        tf.translation.y = 300.0 - 540.0 * cycle;
+        sprite.color = emissive(Color::srgb(1.0, 0.72, 0.32), 1.6 + 0.5 * pulse.slow)
+            .with_alpha(weight);
+    }
+    for (cloud, mut tf, mut sprite) in &mut clouds {
+        tf.translation.x += cloud.speed * (0.6 + 0.8 * pulse.slow) * dt;
+        if tf.translation.x > 780.0 {
+            tf.translation.x = -780.0;
+        }
+        sprite.color.set_alpha(weight * 0.3);
+    }
+    for mut sprite in &mut mountains {
+        sprite.color.set_alpha(weight);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AUTOMATON: Conway's Game of Life
+// ---------------------------------------------------------------------------
+
+fn animate_automaton(
+    time: Res<Time>,
+    pulse: Res<AudioPulse>,
+    weights: Res<SceneWeights>,
+    palettes: Res<ScenePalettes>,
+    mut grid: ResMut<LifeGrid>,
+    mut cells: Query<(&mut LifeCell, &mut Sprite)>,
+) {
+    let weight = weights.scenes[AUTOMATON];
+    if weight <= 0.001 {
+        return;
+    }
+    let dt = time.delta_secs();
+    let palette = palettes.of(AUTOMATON);
+
+    grid.step_timer -= dt;
+    grid.reseed_timer -= dt;
+    let stepped = grid.step_timer <= 0.0;
+    if stepped {
+        // Faster generations while the action is loud.
+        grid.step_timer = 0.30 - 0.13 * pulse.slow.min(1.0);
+        let (w, h) = (grid.w, grid.h);
+        let grid = &mut *grid; // split field borrows through the ResMut
+        grid.prev.copy_from_slice(&grid.cells);
+        let mut population = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                let mut neighbors = 0;
+                for dy in [h - 1, 0, 1] {
+                    for dx in [w - 1, 0, 1] {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        if grid.prev[(y + dy) % h * w + (x + dx) % w] {
+                            neighbors += 1;
+                        }
+                    }
+                }
+                let alive = matches!(
+                    (grid.prev[y * w + x], neighbors),
+                    (true, 2) | (true, 3) | (false, 3)
+                );
+                grid.cells[y * w + x] = alive;
+                population += alive as usize;
+            }
+        }
+        // Dying board (or just time): drop in a few random soups so the
+        // dish never goes still.
+        if population < w * h / 50 || grid.reseed_timer <= 0.0 {
+            grid.reseed_timer = 18.0;
+            let mut rng = rand::rng();
+            for _ in 0..3 {
+                let cx = rng.random_range(0..w);
+                let cy = rng.random_range(0..h);
+                for dy in 0..5 {
+                    for dx in 0..5 {
+                        if rng.random_bool(0.5) {
+                            let i = (cy + dy) % h * w + (cx + dx) % w;
+                            grid.cells[i] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (mut cell, mut sprite) in &mut cells {
+        let alive = grid.cells[cell.idx];
+        if stepped && alive && !grid.prev[cell.idx] {
+            cell.alpha = 0.95; // newborn flash
+        }
+        let target = if alive { 0.5 } else { 0.0 };
+        cell.alpha += (target - cell.alpha) * (9.0 * dt).min(1.0);
+        sprite.color = emissive(palette.glyph, 1.4).with_alpha(cell.alpha * weight);
+    }
+}
 
 fn animate_visualizer(
     time: Res<Time>,
