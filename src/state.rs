@@ -17,6 +17,10 @@ pub enum AppState {
     CustomSetup,
     /// Listening room: pick a seed and a preset, watch the piano roll.
     Jukebox,
+    /// Who you are playing as. Sits between "a mode was confirmed" and the
+    /// match itself, so every start goes through it — but restarts do not
+    /// (they bounce through `Restarting`, which skips this).
+    CharacterSelect,
     Playing,
     /// One-frame bounce state used to restart a match. A Playing→Playing
     /// identity transition would leave the `PlayState` sub-state untouched

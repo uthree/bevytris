@@ -346,7 +346,15 @@ impl Plugin for SessionPlugin {
             .init_resource::<GameMode>()
             .add_systems(
                 OnEnter(AppState::Playing),
-                (spawn_session, crate::render::setup_board_visuals).chain(),
+                // Ordering is load-bearing twice over: the visuals need the
+                // boards, and the portraits need the `BoardTheme` the
+                // visuals insert.
+                (
+                    spawn_session,
+                    crate::render::setup_board_visuals,
+                    crate::character::spawn_portraits,
+                )
+                    .chain(),
             )
             .add_systems(OnEnter(PlayState::Countdown), start_countdown)
             .add_systems(

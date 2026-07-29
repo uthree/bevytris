@@ -59,6 +59,11 @@ enum MenuAction {
     CustomMessiness,
     CustomHold,
     CustomPreviews,
+    /// Play as this character (index into the roster).
+    Character(usize),
+    /// Start the match with nobody: what the picker offers when no
+    /// character packs are installed.
+    CharacterNone,
     /// Open the listening room.
     Jukebox,
     Settings,
@@ -93,6 +98,10 @@ struct MenuItemLabel;
 #[derive(Component)]
 struct StageFooter;
 
+/// Footer line on the character picker describing the focused character.
+#[derive(Component)]
+struct CharacterFooter;
+
 /// Bottom-of-screen line describing the focused menu item (title / solo
 /// picker).
 #[derive(Component)]
@@ -100,6 +109,13 @@ struct MenuFooter;
 
 #[derive(Resource, Default)]
 struct MenuCursor(usize);
+
+/// Where the character picker was opened from, so escaping out of it goes
+/// back to the screen the player was actually on rather than to the title.
+/// `GameMode` already carries *what* is about to start; this is the only
+/// other thing the detour needs to remember.
+#[derive(Resource, Default)]
+struct PickerReturn(AppState);
 
 /// Which action is waiting for a key press (settings screen).
 /// `pad` selects what gets captured: a keyboard key or a gamepad button.
@@ -120,6 +136,7 @@ impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MenuCursor>()
             .init_resource::<Rebinding>()
+            .init_resource::<PickerReturn>()
             .add_systems(OnEnter(AppState::Title), setup_title)
             .add_systems(
                 OnEnter(AppState::Restarting),
@@ -130,6 +147,7 @@ impl Plugin for MenuPlugin {
             .add_systems(OnEnter(AppState::ZoneSelect), setup_zone_select)
             .add_systems(OnEnter(AppState::StageSelect), setup_stage_select)
             .add_systems(OnEnter(AppState::CustomSetup), setup_custom)
+            .add_systems(OnEnter(AppState::CharacterSelect), setup_character_select)
             .init_resource::<JukeboxCursor>()
             .add_systems(OnEnter(AppState::Jukebox), setup_jukebox)
             .add_systems(
@@ -152,6 +170,7 @@ impl Plugin for MenuPlugin {
                     refresh_stage_footer.run_if(
                         in_state(AppState::StageSelect).or_else(in_state(AppState::ZoneSelect)),
                     ),
+                    refresh_character_footer.run_if(in_state(AppState::CharacterSelect)),
                     refresh_menu_footer
                         .run_if(in_state(AppState::Title).or_else(in_state(AppState::SoloSelect))),
                 )
@@ -161,7 +180,8 @@ impl Plugin for MenuPlugin {
                             .or_else(in_state(AppState::SoloSelect))
                             .or_else(in_state(AppState::ZoneSelect))
                             .or_else(in_state(AppState::StageSelect))
-                            .or_else(in_state(AppState::CustomSetup)),
+                            .or_else(in_state(AppState::CustomSetup))
+                            .or_else(in_state(AppState::CharacterSelect)),
                     ),
             )
             .add_systems(
@@ -442,6 +462,201 @@ fn setup_zone_select(
         &progress.zone_grades,
         MenuAction::ZoneStage,
     );
+}
+
+const CHARACTER_COLUMNS: usize = 4;
+
+/// Who you are playing as. Every start passes through here; restarts do
+/// not (they bounce through `Restarting`, which never visits this screen),
+/// so choosing a character is a decision per *match*, not per attempt.
+fn setup_character_select(
+    mut commands: Commands,
+    mut cursor: ResMut<MenuCursor>,
+    roster: Res<crate::character::CharacterRoster>,
+    issues: Res<crate::character::CharacterIssues>,
+    settings: Res<GameSettings>,
+    locale: Res<Locale>,
+) {
+    let s = locale.s();
+    // Open on whoever they played last.
+    cursor.0 = roster
+        .0
+        .iter()
+        .position(|c| c.id == settings.character)
+        .unwrap_or(0);
+    commands
+        .spawn((root_node(), DespawnOnExit(AppState::CharacterSelect)))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new(s.select_character),
+                TextFont {
+                    font_size: FontSize::Px(40.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.3, 0.85, 1.0)),
+                Node {
+                    margin: UiRect::bottom(px(14)),
+                    ..default()
+                },
+            ));
+            if roster.0.is_empty() {
+                // Nothing installed is a legitimate state — the game ships
+                // with no characters — so say what to do about it rather
+                // than showing an empty box.
+                parent.spawn((
+                    Text::new(s.no_characters),
+                    TextFont {
+                        font_size: FontSize::Px(18.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.8, 0.7, 0.4)),
+                    Node {
+                        margin: UiRect::bottom(px(10)),
+                        ..default()
+                    },
+                ));
+                // Characters are an optional extra, so a roster-less
+                // install must still be able to start the match — this
+                // screen is a detour, never a gate.
+                parent.spawn(item_bundle(
+                    0,
+                    MenuAction::CharacterNone,
+                    s.cm_start.to_string(),
+                    300.0,
+                ));
+            } else {
+                parent
+                    .spawn(Node {
+                        width: px(CHARACTER_COLUMNS as f32 * 168.0),
+                        flex_wrap: FlexWrap::Wrap,
+                        justify_content: JustifyContent::Center,
+                        row_gap: px(8),
+                        column_gap: px(8),
+                        ..default()
+                    })
+                    .with_children(|grid| {
+                        for (i, character) in roster.0.iter().enumerate() {
+                            // The label is baked in at spawn time, the way
+                            // the stage grid does it: the settings-row
+                            // pattern of filling labels in later would
+                            // render a blank tile for an action that
+                            // `settings_label` does not know about.
+                            let label = if character.issues.is_empty() {
+                                character.ascii_name.clone()
+                            } else {
+                                format!("{} !", character.ascii_name)
+                            };
+                            grid.spawn((
+                                Button,
+                                MenuItem {
+                                    index: i,
+                                    action: MenuAction::Character(i),
+                                },
+                                Node {
+                                    width: px(160),
+                                    height: px(52),
+                                    align_items: AlignItems::Center,
+                                    justify_content: JustifyContent::Center,
+                                    border: UiRect::all(px(2)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.08, 0.1, 0.16, 0.85)),
+                                BorderColor::all(Color::NONE),
+                                children![(
+                                    Text::new(label),
+                                    MenuItemLabel,
+                                    TextFont {
+                                        font_size: FontSize::Px(16.0),
+                                        ..default()
+                                    },
+                                    TextColor(if character.issues.is_empty() {
+                                        Color::srgb(0.9, 0.93, 1.0)
+                                    } else {
+                                        Color::srgb(1.0, 0.72, 0.35)
+                                    }),
+                                )],
+                            ));
+                        }
+                    });
+            }
+            parent.spawn((
+                Text::new(""),
+                CharacterFooter,
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.8, 0.85, 0.95)),
+                Node {
+                    margin: UiRect::top(px(18)),
+                    ..default()
+                },
+            ));
+            parent.spawn((
+                Text::new(if roster.0.is_empty() {
+                    s.characters_hint
+                } else {
+                    s.grid_hint
+                }),
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.45, 0.5, 0.6)),
+                Node {
+                    margin: UiRect::top(px(8)),
+                    ..default()
+                },
+            ));
+            if !issues.0.is_empty() {
+                parent.spawn((
+                    Text::new(
+                        s.character_problems
+                            .replace("{n}", &issues.0.len().to_string()),
+                    ),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(1.0, 0.55, 0.2)),
+                    Node {
+                        margin: UiRect::top(px(10)),
+                        ..default()
+                    },
+                ));
+            }
+        });
+}
+
+/// Flavour text for the focused character.
+fn refresh_character_footer(
+    cursor: Res<MenuCursor>,
+    roster: Res<crate::character::CharacterRoster>,
+    mut texts: Query<&mut Text, With<CharacterFooter>>,
+) {
+    let Ok(mut text) = texts.single_mut() else {
+        return;
+    };
+    let line = match roster.get(cursor.0) {
+        Some(c) => {
+            let mut line = c.display_name.clone();
+            if !c.flavor.is_empty() {
+                line.push_str(" — ");
+                line.push_str(&c.flavor);
+            }
+            // Credit whoever made the pack, since anyone can make one.
+            if !c.author.is_empty() {
+                line.push_str(" (");
+                line.push_str(&c.author);
+                line.push(')');
+            }
+            line
+        }
+        None => String::new(),
+    };
+    if **text != line {
+        **text = line;
+    }
 }
 
 /// Shared 30-stage picker grid used by both VS campaigns.
@@ -1445,6 +1660,7 @@ fn settings_label(
         }
         MenuAction::CustomStart => s.cm_start.to_string(),
         MenuAction::Back => s.back.to_string(),
+        MenuAction::CharacterNone => s.cm_start.to_string(),
         _ => return None,
     })
 }
@@ -1493,13 +1709,16 @@ fn menu_keyboard_nav(
     if count == 0 {
         return;
     }
-    // The stage pickers are grids: vertical steps jump a whole row and
-    // left/right move the cursor instead of adjusting values.
-    let grid = matches!(
-        *activate.app_state.get(),
-        AppState::StageSelect | AppState::ZoneSelect
-    );
-    let step = if grid { STAGE_COLUMNS } else { 1 };
+    // The pickers are grids: vertical steps jump a whole row and left/right
+    // move the cursor instead of adjusting values. Deriving `grid` from the
+    // step is what keeps left/right from being read as a value adjustment on
+    // any screen that gains a grid later.
+    let step = match *activate.app_state.get() {
+        AppState::StageSelect | AppState::ZoneSelect => STAGE_COLUMNS,
+        AppState::CharacterSelect => CHARACTER_COLUMNS,
+        _ => 1,
+    };
+    let grid = step > 1;
 
     let down = keys.just_pressed(KeyCode::ArrowDown)
         || keys.just_pressed(KeyCode::KeyS)
@@ -1602,6 +1821,20 @@ struct MenuActivateParams<'w> {
     exit: MessageWriter<'w, AppExit>,
     app_state: Res<'w, State<AppState>>,
     progress: Res<'w, Progress>,
+    picker_return: ResMut<'w, PickerReturn>,
+    roster: Res<'w, crate::character::CharacterRoster>,
+    characters: ResMut<'w, crate::character::MatchCharacters>,
+}
+
+/// Head for the character picker, remembering where to come back to.
+///
+/// The pending pick is cleared here rather than in the picker's `OnEnter`
+/// so that a match started without ever visiting this screen (a restart, or
+/// `BEVYTRIS_SCREEN=playing`) keeps whatever was already chosen.
+fn open_picker(p: &mut MenuActivateParams, from: AppState) {
+    p.picker_return.0 = from;
+    p.characters.sides = [None, None];
+    p.next_app.set(AppState::CharacterSelect);
 }
 
 fn run_menu_action(
@@ -1613,6 +1846,13 @@ fn run_menu_action(
     mut sfx: MessageWriter<PlaySfx>,
 ) {
     if back {
+        // The picker is a detour on the way into a match, so escaping it
+        // returns to whichever screen sent us here.
+        if *p.app_state.get() == AppState::CharacterSelect {
+            sfx.write(PlaySfx::new(Sfx::MenuBack));
+            p.next_app.set(p.picker_return.0);
+            return;
+        }
         if matches!(
             *p.app_state.get(),
             AppState::Settings
@@ -1750,17 +1990,17 @@ fn run_menu_action(
         MenuAction::Marathon => {
             *p.mode = GameMode::Single;
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
-            p.next_app.set(AppState::Playing);
+            open_picker(&mut p, AppState::SoloSelect);
         }
         MenuAction::Sprint => {
             *p.mode = GameMode::Sprint;
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
-            p.next_app.set(AppState::Playing);
+            open_picker(&mut p, AppState::SoloSelect);
         }
         MenuAction::Zen => {
             *p.mode = GameMode::Zen;
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
-            p.next_app.set(AppState::Playing);
+            open_picker(&mut p, AppState::SoloSelect);
         }
         MenuAction::VsSelect => {
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
@@ -1770,7 +2010,7 @@ fn run_menu_action(
             if p.progress.is_unlocked(stage) {
                 *p.mode = GameMode::VsCpu { stage };
                 sfx.write(PlaySfx::new(Sfx::MenuSelect));
-                p.next_app.set(AppState::Playing);
+                open_picker(&mut p, AppState::StageSelect);
             } else {
                 sfx.write(PlaySfx::new(Sfx::RotateFail));
             }
@@ -1783,7 +2023,7 @@ fn run_menu_action(
             if p.progress.is_zone_unlocked(stage) {
                 *p.mode = GameMode::ZoneBattle { stage };
                 sfx.write(PlaySfx::new(Sfx::MenuSelect));
-                p.next_app.set(AppState::Playing);
+                open_picker(&mut p, AppState::ZoneSelect);
             } else {
                 sfx.write(PlaySfx::new(Sfx::RotateFail));
             }
@@ -1795,7 +2035,7 @@ fn run_menu_action(
         MenuAction::CustomStart => {
             *p.mode = GameMode::Custom;
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
-            p.next_app.set(AppState::Playing);
+            open_picker(&mut p, AppState::CustomSetup);
         }
         MenuAction::CustomZone => {
             // Enter toggles too (same as left/right).
@@ -1818,6 +2058,27 @@ fn run_menu_action(
             p.settings.custom.cpu_style = p.settings.custom.cpu_style.cycled(1);
             save_settings(&p.settings);
             sfx.write(PlaySfx::quiet(Sfx::MenuMove));
+        }
+        MenuAction::CharacterNone => {
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            p.characters.sides = [None, None];
+            p.next_app.set(AppState::Playing);
+        }
+        MenuAction::Character(index) => {
+            if p.roster.get(index).is_none() {
+                sfx.write(PlaySfx::new(Sfx::RotateFail));
+                return;
+            }
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            // The opponent is left unset: `resolve_match_characters` fills
+            // it in deterministically from the mode on the way into the
+            // match, so a restart keeps the same pairing.
+            p.characters.sides = [Some(index), None];
+            if let Some(character) = p.roster.get(index) {
+                p.settings.character = character.id.clone();
+                save_settings(&p.settings);
+            }
+            p.next_app.set(AppState::Playing);
         }
         MenuAction::Jukebox => {
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
@@ -2284,5 +2545,153 @@ fn overlay_input(
     {
         sfx.write(PlaySfx::new(Sfx::MenuBack));
         next_app.set(AppState::Title);
+    }
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+    use crate::character::{CharacterRoster, MatchCharacters};
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::state::app::StatesPlugin;
+
+    /// A world with everything `run_menu_action` reads, sitting on `screen`.
+    fn world_on(screen: AppState) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin));
+        app.insert_state(screen);
+        app.add_message::<PlaySfx>();
+        app.add_message::<AppExit>();
+        app.init_resource::<GameMode>()
+            .init_resource::<Rebinding>()
+            .init_resource::<PickerReturn>()
+            .init_resource::<MatchCharacters>()
+            .init_resource::<Progress>()
+            .insert_resource(GameSettings::default())
+            .insert_resource(CharacterRoster(Vec::new()));
+        app
+    }
+
+    /// Fire one menu action through the real `run_menu_action`.
+    fn confirm(app: &mut App, action: MenuAction) {
+        app.world_mut()
+            .run_system_once(
+                move |p: MenuActivateParams, sfx: MessageWriter<PlaySfx>| {
+                    run_menu_action(Some(action), true, 0, false, p, sfx);
+                },
+            )
+            .expect("the action system ran");
+    }
+
+    fn escape(app: &mut App) {
+        app.world_mut()
+            .run_system_once(|p: MenuActivateParams, sfx: MessageWriter<PlaySfx>| {
+                run_menu_action(None, false, 0, true, p, sfx);
+            })
+            .expect("the back system ran");
+    }
+
+    fn pending(app: &App) -> Option<AppState> {
+        match app.world().resource::<NextState<AppState>>() {
+            NextState::Pending(state) => Some(*state),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn every_mode_asks_who_you_are_first() {
+        // The whole point of the screen: no mode may reach the match
+        // without passing through it.
+        for (screen, action, mode) in [
+            (AppState::SoloSelect, MenuAction::Marathon, GameMode::Single),
+            (AppState::SoloSelect, MenuAction::Sprint, GameMode::Sprint),
+            (AppState::SoloSelect, MenuAction::Zen, GameMode::Zen),
+            (
+                AppState::StageSelect,
+                MenuAction::Stage(1),
+                GameMode::VsCpu { stage: 1 },
+            ),
+            (
+                AppState::ZoneSelect,
+                MenuAction::ZoneStage(1),
+                GameMode::ZoneBattle { stage: 1 },
+            ),
+            (
+                AppState::CustomSetup,
+                MenuAction::CustomStart,
+                GameMode::Custom,
+            ),
+        ] {
+            let mut app = world_on(screen);
+            confirm(&mut app, action);
+            assert_eq!(
+                pending(&app),
+                Some(AppState::CharacterSelect),
+                "{action:?} should detour through the picker"
+            );
+            // And the mode it is about to start is already decided.
+            assert_eq!(*app.world().resource::<GameMode>(), mode);
+            // ESC from the picker goes back where it came from.
+            let mut app = escape_from_picker(app);
+            assert_eq!(pending(&app), Some(screen), "ESC should return to {screen:?}");
+            app.update();
+        }
+    }
+
+    /// Move the app into the picker and press ESC there.
+    fn escape_from_picker(mut app: App) -> App {
+        let next = pending(&app).expect("a transition was queued");
+        app.insert_state(next);
+        escape(&mut app);
+        app
+    }
+
+    #[test]
+    fn a_locked_stage_never_reaches_the_picker() {
+        // The unlock gate has to stay in front of the detour, or the
+        // picker becomes a way around it.
+        let mut app = world_on(AppState::StageSelect);
+        confirm(&mut app, MenuAction::Stage(MAX_STAGE));
+        assert_eq!(pending(&app), None, "a locked stage started anyway");
+    }
+
+    #[test]
+    fn an_empty_roster_can_still_start_the_match() {
+        // Characters are an extra; a build with none installed must not be
+        // unable to play.
+        let mut app = world_on(AppState::CharacterSelect);
+        confirm(&mut app, MenuAction::CharacterNone);
+        assert_eq!(pending(&app), Some(AppState::Playing));
+        assert_eq!(
+            app.world().resource::<MatchCharacters>().sides,
+            [None, None]
+        );
+    }
+
+    #[test]
+    fn picking_a_character_starts_the_match_and_is_remembered() {
+        let mut app = world_on(AppState::CharacterSelect);
+        app.insert_resource(CharacterRoster(crate::character::test_roster(&[
+            "alice", "bob",
+        ])));
+        confirm(&mut app, MenuAction::Character(1));
+        assert_eq!(pending(&app), Some(AppState::Playing));
+        assert_eq!(
+            app.world().resource::<MatchCharacters>().sides[0],
+            Some(1),
+            "the pick has to survive into the match"
+        );
+        // The opponent is left for the match to resolve deterministically.
+        assert_eq!(app.world().resource::<MatchCharacters>().sides[1], None);
+        assert_eq!(app.world().resource::<GameSettings>().character, "bob");
+    }
+
+    #[test]
+    fn a_tile_that_is_not_there_does_nothing() {
+        // The roster is scanned once at startup, so this should be
+        // impossible — which is exactly why it must not panic.
+        let mut app = world_on(AppState::CharacterSelect);
+        confirm(&mut app, MenuAction::Character(7));
+        assert_eq!(pending(&app), None);
     }
 }

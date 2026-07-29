@@ -692,6 +692,10 @@ mod tests {
                 StageSelect,
                 ZoneSelect,
                 CustomSetup,
+                // The character picker sits between a menu and a match; it
+                // keeps the menu's music, so the tune the match rolls
+                // starts with the match.
+                CharacterSelect,
             ] {
                 assert_eq!(
                     profile_for(app, None, mode, Profile::VsIntense),

@@ -399,6 +399,11 @@ struct SettingsFile {
     language: crate::i18n::LangChoice,
     #[serde(default)]
     custom: CustomMatchConfig,
+    /// Folder name of the character the player picked last. Only a
+    /// starting point for the picker's cursor — the match itself always
+    /// takes what the picker set.
+    #[serde(default)]
+    character: String,
 }
 
 fn default_sdf() -> u32 {
@@ -439,6 +444,11 @@ pub struct GameSettings {
     pub language: crate::i18n::LangChoice,
     /// Last-used custom match rule sheet.
     pub custom: CustomMatchConfig,
+    /// Folder name of the last character the player chose, so the picker
+    /// opens on them. Empty until they pick one, and not authoritative:
+    /// a character that has since been deleted just means the picker
+    /// opens on the first one instead.
+    pub character: String,
 }
 
 impl Default for GameSettings {
@@ -467,6 +477,7 @@ impl Default for GameSettings {
             fullscreen: false,
             language: crate::i18n::LangChoice::Auto,
             custom: CustomMatchConfig::default(),
+            character: String::new(),
         }
     }
 }
@@ -649,6 +660,7 @@ impl GameSettings {
             fullscreen: self.fullscreen,
             language: self.language,
             custom: self.custom,
+            character: self.character.clone(),
         }
     }
 
@@ -743,6 +755,11 @@ impl GameSettings {
         settings.fullscreen = file.fullscreen;
         settings.language = file.language;
         settings.custom = file.custom.sanitized();
+        // A folder name from disk is untrusted the same way the character
+        // packs themselves are: keep it only if it still looks like an id.
+        if crate::character::valid_id(&file.character) {
+            settings.character = file.character;
+        }
         settings
     }
 }

@@ -11,6 +11,7 @@ use bevy::window::{MonitorSelection, PresentMode, WindowMode, WindowResizeConstr
 
 mod audio;
 mod background;
+mod character;
 mod config;
 mod effects;
 mod i18n;
@@ -63,7 +64,7 @@ fn main() -> AppExit {
     .insert_resource(i18n::Locale(settings.language.resolve()))
     .insert_resource(settings)
     // Dev helpers: BEVYTRIS_SCREEN=settings|solo|stages|zones|custom|
-    // music|playing skips the title menu, BEVYTRIS_MODE=sprint|zen|zone|
+    // music|characters|playing skips the title menu, BEVYTRIS_MODE=sprint|zen|zone|
     // custom|vs-stage-N|vs-easy|vs-normal|vs-hard preselects the game
     // mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages,
     // BEVYTRIS_ZONE_CHARGE=1 starts zone gauges full, and
@@ -76,6 +77,7 @@ fn main() -> AppExit {
         Ok("zones") => AppState::ZoneSelect,
         Ok("custom") => AppState::CustomSetup,
         Ok("music") | Ok("jukebox") => AppState::Jukebox,
+        Ok("characters") | Ok("chars") => AppState::CharacterSelect,
         Ok("playing") => AppState::Playing,
         _ => AppState::Title,
     })
@@ -104,6 +106,7 @@ fn main() -> AppExit {
         render::RenderPlugin,
         background::BackgroundPlugin,
         effects::EffectsPlugin,
+        character::CharacterPlugin,
         menu::MenuPlugin,
     ))
     .add_systems(PreStartup, use_misaki_font)

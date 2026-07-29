@@ -15,6 +15,10 @@ sys-locale = "0.3"
 rand = "0.9"
 ron = "0.12.2"
 serde = { version = "1.0.229", features = ["derive"] }
+# Settings and progress are RON (a Rust-shaped format for files we write
+# ourselves); character packs are JSON because they are written by hand, by
+# other people, in whatever editor they already have open.
+serde_json = "1.0.151"
 
 # Faster incremental builds: optimize dependencies (incl. bevy) even in dev,
 # keep our own crate lightly optimized for quick rebuilds.

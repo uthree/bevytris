@@ -1803,6 +1803,7 @@ dependencies = [
  "rand 0.9.5",
  "ron",
  "serde",
+ "serde_json",
  "sys-locale",
 ]
 

@@ -147,6 +147,14 @@ pub struct Strings {
     /// Zen HUD label: how many times this run has been wiped.
     pub zen_resets: &'static str,
     pub select_stage: &'static str,
+    /// Character picker: screen title, and what to do when the roster is
+    /// empty. A character's own name and flavour text come from its
+    /// `metadata.json` and are deliberately not translated here — they
+    /// belong to whoever authored the pack.
+    pub select_character: &'static str,
+    pub no_characters: &'static str,
+    pub characters_hint: &'static str,
+    pub character_problems: &'static str,
     pub title_hint: &'static str,
     pub list_hint: &'static str,
     pub grid_hint: &'static str,
@@ -319,6 +327,10 @@ pub const EN: Strings = Strings {
     zen_level: "ZEN LV",
     zen_resets: "RESETS",
     select_stage: "SELECT STAGE",
+    select_character: "SELECT CHARACTER",
+    no_characters: "NO CHARACTERS INSTALLED",
+    characters_hint: "Drop a folder into assets/characters to add one    ENTER: continue    ESC: back",
+    character_problems: "{n} CHARACTER PROBLEM(S) - SEE THE CONSOLE LOG",
     title_hint: "Up/Down: select    ENTER: confirm",
     list_hint: "Up/Down: select    ENTER: start    ESC: back",
     grid_hint: "Arrows: select    ENTER: start    ESC: back",
@@ -466,6 +478,10 @@ pub const JA: Strings = Strings {
     zen_level: "ZEN LV",
     zen_resets: "リセット",
     select_stage: "ステージ選択",
+    select_character: "キャラクター選択",
+    no_characters: "キャラクターが入っていません",
+    characters_hint: "assets/characters にフォルダを置くと追加できます    ENTER: 続行    ESC: 戻る",
+    character_problems: "キャラクターに{n}件の問題あり - コンソールログを確認",
     title_hint: "↑↓: 選択    ENTER: 決定",
     list_hint: "↑↓: 選択    ENTER: 開始    ESC: 戻る",
     grid_hint: "矢印: 選択    ENTER: 開始    ESC: 戻る",
