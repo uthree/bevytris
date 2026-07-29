@@ -958,7 +958,9 @@ impl Composer {
         }
     }
 
-    fn plan_bar(&mut self, ctx: &Context, out: &mut Vec<NoteEvent>) {
+    /// Compose one bar, starting where the last one ended. Events are
+    /// appended in time order with absolute-sample timestamps.
+    pub fn plan_bar(&mut self, ctx: &Context, out: &mut Vec<NoteEvent>) {
         self.transpose = ctx.transpose;
         let phrase_start = self.bar % BARS_PER_SECTION == 0;
         if phrase_start {

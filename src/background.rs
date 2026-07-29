@@ -962,7 +962,7 @@ fn update_audio_pulse(
     }
     // The synthesizer publishes its own envelope, so the background now
     // reacts to the music itself and not just to a proxy.
-    let music = engine.shared.energy().min(1.0);
+    let music = engine.link.energy().min(1.0);
     pulse.energy = (pulse.energy.max(0.35 * music) + hit).min(1.6);
     // Fast decay toward a gentle idle breath, so quiet menus still move.
     let idle = 0.12 + 0.05 * (t * 0.8).sin().abs();

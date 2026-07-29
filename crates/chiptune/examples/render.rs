@@ -9,9 +9,9 @@
 //! how the tempo ladder and the layer schedule get auditioned without
 //! playing the game badly on purpose.
 
-use bevytris_chiptune::compose::{Composer, Context, Kit, Meter, Profile};
-use bevytris_chiptune::synth::Synth;
-use bevytris_chiptune::{NoteEvent, SAMPLE_RATE, wav};
+use bevytris_chiptune::compose::{Context, Kit, Meter, Profile};
+use bevytris_chiptune::director::Director;
+use bevytris_chiptune::{SAMPLE_RATE, wav};
 
 fn main() {
     let mut seed: u64 = 42;
@@ -34,7 +34,9 @@ fn main() {
         };
         match args[i].as_str() {
             "--seed" => {
-                seed = next(i).parse().expect("seed must be a number");
+                let raw = next(i);
+                seed = bevytris_chiptune::parse_seed(&raw)
+                    .unwrap_or_else(|| panic!("seed {raw} is not a number"));
                 i += 2;
             }
             "--secs" => {
@@ -90,28 +92,26 @@ fn main() {
 
     // Stereo frames; the buffer below is interleaved.
     let total = (secs * SAMPLE_RATE as f32) as usize;
-    let mut synth = Synth::new();
-    let mut composer = Composer::new(seed);
-    composer.set_profile(profile, if ramp { 0.0 } else { intensity });
-    if let Some(m) = meter {
-        composer.force_meter(m);
-    }
-    if let Some(k) = kit {
-        composer.force_kit(k);
-    }
+    let mut director = Director::new(seed);
+    director.set_context(Context {
+        profile,
+        intensity: if ramp { 0.0 } else { intensity },
+        elapsed: 0.0,
+        ..Default::default()
+    });
+    director.force_meter(meter);
+    director.force_kit(kit);
 
-    let mut pending: Vec<NoteEvent> = Vec::new();
-    let mut cursor = 0usize;
     let mut samples = vec![0.0f32; total * 2];
-    let lookahead = SAMPLE_RATE as u64 * 4;
+    let mut notes = Vec::new();
 
-    // Chunked so the composer sees a moving playhead, exactly as it does
-    // in game.
+    // Chunked only so the context can move; the engine is the same one
+    // the game runs, called the same way.
     let chunk = SAMPLE_RATE as usize / 30;
     let mut pos = 0usize;
     while pos < total {
         let t = pos as f32 / SAMPLE_RATE as f32;
-        let ctx = Context {
+        director.set_context(Context {
             profile,
             intensity: if ramp {
                 (t / secs).clamp(0.0, 1.0)
@@ -121,27 +121,16 @@ fn main() {
             transpose: 0,
             zone: zone_at.is_some_and(|z| t >= z && t < z + 8.0),
             elapsed: t,
-        };
-        synth.set_muffled(ctx.zone);
-        composer.advance(pos as u64, lookahead, &ctx, &mut pending);
-
+        });
         let end = (pos + chunk).min(total);
-        for frame in pos..end {
-            let now = synth.pos();
-            while cursor < pending.len() && pending[cursor].at <= now {
-                synth.note_on(&pending[cursor]);
-                cursor += 1;
-            }
-            let (l, r) = synth.next_frame();
-            samples[frame * 2] = l;
-            samples[frame * 2 + 1] = r;
-        }
+        director.fill(&mut samples[pos * 2..end * 2]);
+        director.drain_new_notes(&mut notes);
         pos = end;
     }
 
     let peak = samples.iter().fold(0.0f32, |a, b| a.max(b.abs()));
     let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
-    let info = composer.info();
+    let info = director.info();
     // How far the mix leans left or right overall — a sanity check that
     // the panning is doing something without being lopsided.
     let (mut l, mut r) = (0.0f32, 0.0f32);
@@ -153,7 +142,7 @@ fn main() {
         "{} · {} kit | {} notes | peak {:.3} ({:.1} dBFS) | rms {:.3} ({:.1} dBFS) | balance {:+.1}%",
         info.label(),
         info.kit.name(),
-        pending.len(),
+        notes.len(),
         peak,
         20.0 * peak.max(1e-9).log10(),
         rms,

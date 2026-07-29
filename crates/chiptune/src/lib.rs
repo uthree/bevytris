@@ -16,6 +16,7 @@
 //! without loosening any of the rules.
 
 pub mod compose;
+pub mod director;
 pub mod rng;
 pub mod synth;
 pub mod theory;
@@ -29,6 +30,17 @@ pub const FRAME_RATE: u32 = 60;
 pub const SAMPLES_PER_FRAME: u32 = SAMPLE_RATE / FRAME_RATE;
 /// Sixteenth notes per 4/4 bar — the sequencer's resolution.
 pub const STEPS_PER_BAR: u32 = 16;
+
+/// Parse a seed the way both entry points accept it: decimal, or hex
+/// with or without a `0x` prefix. The corner toast prints the low bits
+/// in hex, so pasting that back has to work.
+pub fn parse_seed(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        return u64::from_str_radix(hex, 16).ok();
+    }
+    raw.parse().ok().or_else(|| u64::from_str_radix(raw, 16).ok())
+}
 
 /// The eight hardware voices, in mix order.
 ///
@@ -584,6 +596,20 @@ mod tests {
         let mac = m(&[15, 7], None);
         assert_eq!(mac.at(1), Some(7));
         assert_eq!(mac.at(2), None);
+    }
+
+    #[test]
+    fn seeds_parse_the_way_they_are_printed() {
+        assert_eq!(parse_seed("42"), Some(42));
+        assert_eq!(parse_seed("0xc0ffee"), Some(0xc0ffee));
+        assert_eq!(parse_seed("0XC0FFEE"), Some(0xc0ffee));
+        // The toast prints bare hex, so that has to round-trip too — and
+        // a bare decimal string is read as decimal, which is the only
+        // ambiguity and the more useful reading.
+        assert_eq!(parse_seed("c0ffee"), Some(0xc0ffee));
+        assert_eq!(parse_seed(" 42 "), Some(42));
+        assert_eq!(parse_seed("nonsense"), None);
+        assert_eq!(parse_seed(""), None);
     }
 
     #[test]

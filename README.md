@@ -108,13 +108,25 @@ Settings are stored as RON at the platform config directory, e.g.
   Dellacherie-style evaluation extended with attack and T-spin terms).
   Fully unit-tested; `cargo run -p bevytris-core --example selfplay
   --release` benchmarks the AI ladder headlessly.
-- `crates/chiptune` — the music engine, also engine-independent: an
-  eight-voice NES-style synthesizer (three PolyBLEP pulses, a VRC6-style
-  sawtooth, a 32-step wavetable, the 15-bit LFSR noise twice over, the
-  console's own nonlinear mixer, stereo panning) plus an algorithmic
-  composer. `cargo run -p bevytris-chiptune --release --example render --
+- `crates/chiptune` — the music engine, also engine-independent: a
+  nine-voice synthesizer (three PolyBLEP pulses, a VRC6-style sawtooth, a
+  32-step wavetable, the 15-bit LFSR noise twice over, a channel of
+  samples synthesized at startup, the NES's own nonlinear mixer, stereo
+  panning) plus an algorithmic composer. The whole thing is one object:
+  hand `Director` the gameplay parameters, ask it for samples.
+  `cargo run -p bevytris-chiptune --release --example render --
   --profile vs --seed 42 --secs 60 --ramp` writes a WAV without launching
-  the game.
+  the game, running exactly the code the game runs.
+
+### Reproducing a piece of music
+
+Every session's music comes from one seed, printed in the log at startup
+and shown in the corner toast (`♪ A minor · 6/8 · 148 BPM · #c0ffee`).
+Set `BEVYTRIS_MUSIC_SEED=0xc0ffee` to replay it note for note, or pass
+the same value to `--seed` to render it offline. `BEVYTRIS_MUSIC_DEBUG=1`
+puts a live readout on screen — profile, bar, key, mode, meter, kit,
+which layers are audible, playhead, intensity — and logs every change of
+piece.
 - `src/` — the Bevy app: rendering, input (DAS/ARR), menus, settings
   persistence, particles/shake/banner effects, audio playback (CC0 sample
   banks, with runtime pitch-shifting for combo chimes) and the streaming
