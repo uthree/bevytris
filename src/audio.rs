@@ -245,14 +245,25 @@ pub struct PlaySfx {
     pub sfx: Sfx,
     /// Extra gain for distance/importance scaling (1.0 = normal).
     pub gain: f32,
+    /// Exempt from the zone lowpass: the player's own board stays crisp
+    /// while the rest of the world goes underwater.
+    pub crisp: bool,
 }
 
 impl PlaySfx {
     pub fn new(sfx: Sfx) -> Self {
-        Self { sfx, gain: 1.0 }
+        Self {
+            sfx,
+            gain: 1.0,
+            crisp: false,
+        }
     }
     pub fn quiet(sfx: Sfx) -> Self {
-        Self { sfx, gain: 0.4 }
+        Self {
+            sfx,
+            gain: 0.4,
+            crisp: false,
+        }
     }
 }
 
@@ -321,7 +332,7 @@ fn play_sfx(
     let muffle = player_zone_active(&sessions);
     for msg in reader.read() {
         let (mut handle, gain, speed) = bank.params(msg.sfx);
-        if muffle {
+        if muffle && !msg.crisp {
             if let Some(wet) = muffled.0.get(&handle.id()) {
                 handle = wet.clone();
             }

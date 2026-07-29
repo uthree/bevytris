@@ -635,16 +635,19 @@ fn map_events_to_effects(
         let Ok((board_tf, theme, index, session)) = boards.get(msg.board) else {
             continue;
         };
-        // The CPU's sounds are quieter so the player's actions stay crisp.
-        let gain = if index.0 == 0 { 1.0 } else { 0.4 };
+        // The CPU's sounds are quieter so the player's actions stay crisp —
+        // and during the zone, only the player's own board escapes the
+        // lowpass muffle.
+        let own_input = index.0 == 0;
+        let gain = if own_input { 1.0 } else { 0.4 };
         let center = Vec2::new(board_tf.translation.x, board_tf.translation.y);
         let mut play = |s: Sfx, g: f32| {
-            sfx.write(PlaySfx { sfx: s, gain: g });
+            sfx.write(PlaySfx {
+                sfx: s,
+                gain: g,
+                crisp: own_input,
+            });
         };
-
-        // Input feedback is for the player's own board only — the CPU issues
-        // inputs far too fast for per-input feedback to read well.
-        let own_input = index.0 == 0;
         match &msg.event {
             GameEvent::Moved { dx } => {
                 play(Sfx::Move, 0.5 * gain);
@@ -1278,7 +1281,11 @@ fn finish_fanfare(
         }
         SessionResult::SoloOver => {
             // Marathon over: a weighty thud under the TopOut effects.
-            sfx.write(PlaySfx { sfx: Sfx::Defeat, gain: 0.8 });
+            sfx.write(PlaySfx {
+                sfx: Sfx::Defeat,
+                gain: 0.8,
+                crisp: false,
+            });
         }
     }
 }
@@ -1328,6 +1335,7 @@ fn run_celebration(
     sfx.write(PlaySfx {
         sfx: Sfx::Combo(rng.random_range(2..9)),
         gain: 0.3,
+        crisp: false,
     });
     shake.add(0.07);
     surge.0 = surge.0.max(2.5);

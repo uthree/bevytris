@@ -825,7 +825,11 @@ fn round_over_enter(
         sfx.write(if last.winner == 0 {
             PlaySfx::new(Sfx::LevelUp)
         } else {
-            PlaySfx { sfx: Sfx::GameOver, gain: 0.55 }
+            PlaySfx {
+                sfx: Sfx::GameOver,
+                gain: 0.55,
+                crisp: false,
+            }
         });
     }
 }
