@@ -52,6 +52,8 @@ enum MenuAction {
     Settings,
     Quit,
     Bind(Action),
+    /// Rebind the gamepad button for an action.
+    BindPad(Action),
     AdjustDas,
     AdjustArr,
     AdjustSdf,
@@ -86,11 +88,13 @@ struct MenuFooter;
 struct MenuCursor(usize);
 
 /// Which action is waiting for a key press (settings screen).
+/// `pad` selects what gets captured: a keyboard key or a gamepad button.
 /// `just_started` guards the frame the rebind began, so the confirming
-/// Enter press / mouse click is never captured as the new binding.
+/// Enter press / A press / mouse click is never captured as the binding.
 #[derive(Resource, Default)]
 struct Rebinding {
     action: Option<Action>,
+    pad: bool,
     just_started: bool,
 }
 
@@ -597,6 +601,7 @@ fn setup_settings(
     let s = locale.s();
     cursor.0 = 0;
     rebinding.action = None;
+    rebinding.pad = false;
     rebinding.just_started = false;
     commands
         .spawn((root_node(), DespawnOnExit(AppState::Settings)))
@@ -635,6 +640,16 @@ fn setup_settings(
                         list.spawn(item_bundle(
                             index,
                             MenuAction::Bind(action),
+                            String::new(),
+                            420.0,
+                        ));
+                        index += 1;
+                    }
+                    list.spawn(section_heading(s.sec_pad));
+                    for action in Action::ALL {
+                        list.spawn(item_bundle(
+                            index,
+                            MenuAction::BindPad(action),
                             String::new(),
                             420.0,
                         ));
@@ -824,12 +839,20 @@ fn settings_label(
     use crate::i18n::LangChoice;
     Some(match action {
         MenuAction::Bind(a) => {
-            let key = if rebinding.action == Some(a) {
+            let key = if rebinding.action == Some(a) && !rebinding.pad {
                 s.press_key.to_string()
             } else {
                 format!("[{}]", key_label(settings.key_for(a)))
             };
             format!("{:<12} {}", action_label(s, a), key)
+        }
+        MenuAction::BindPad(a) => {
+            let button = if rebinding.action == Some(a) && rebinding.pad {
+                s.press_button.to_string()
+            } else {
+                format!("[{}]", crate::config::pad_button_label(settings.pad_for(a)))
+            };
+            format!("{:<12} {}", action_label(s, a), button)
         }
         MenuAction::AdjustDas => format!("{:<12} {} ms", "DAS", settings.das_ms),
         MenuAction::AdjustArr => format!("{:<12} {} ms", "ARR", settings.arr_ms),
@@ -1255,6 +1278,13 @@ fn run_menu_action(
         MenuAction::Bind(action) => {
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
             p.rebinding.action = Some(action);
+            p.rebinding.pad = false;
+            p.rebinding.just_started = true;
+        }
+        MenuAction::BindPad(action) => {
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            p.rebinding.action = Some(action);
+            p.rebinding.pad = true;
             p.rebinding.just_started = true;
         }
         MenuAction::ToggleVsync => {
@@ -1314,8 +1344,36 @@ fn rebind_capture(
         keyboard.clear();
         return;
     };
-    // Rebinding targets the keyboard only; pad B backs out of the prompt
-    // so a pad-only player is never stuck in it.
+
+    if rebinding.pad {
+        // Pad rebinding: the next gamepad button becomes the binding —
+        // ANY bindable button, including B, so cancelling is keyboard
+        // ESC only.
+        let mut escape = false;
+        for input in keyboard.read() {
+            if input.state == ButtonState::Pressed
+                && !input.repeat
+                && input.key_code == KeyCode::Escape
+            {
+                escape = true;
+            }
+        }
+        if escape {
+            rebinding.action = None;
+            sfx.write(PlaySfx::new(Sfx::MenuBack));
+            return;
+        }
+        if let Some(button) = pad.raw_just_pressed() {
+            settings.bind_pad(action, button);
+            save_settings(&settings);
+            rebinding.action = None;
+            sfx.write(PlaySfx::new(Sfx::MenuSelect));
+        }
+        return;
+    }
+
+    // Keyboard rebinding; pad B backs out of the prompt so a pad-only
+    // player is never stuck in it.
     if pad.just_pressed(PadAction::Back) {
         rebinding.action = None;
         sfx.write(PlaySfx::new(Sfx::MenuBack));

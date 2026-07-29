@@ -11,7 +11,7 @@ use crate::config::{Action, CustomMatchConfig, GameSettings};
 use crate::core::ai::{self, AiProfile, Plan, Step};
 use crate::core::board::BOARD_WIDTH;
 use crate::core::game::{Game, GameEvent, Leveling, Stats, Zone};
-use crate::input::{PadAction, PadInput};
+use crate::input::PadInput;
 use crate::progress::{Grade, Progress};
 use crate::state::{AppState, GameMode, PlayState};
 
@@ -390,7 +390,8 @@ fn pause_toggle(
     mut next: ResMut<NextState<PlayState>>,
     mut sfx: MessageWriter<PlaySfx>,
 ) {
-    if keys.just_pressed(settings.key_for(Action::Pause)) || pad.just_pressed(PadAction::Pause) {
+    if keys.just_pressed(settings.key_for(Action::Pause)) || pad.action_just_pressed(Action::Pause)
+    {
         match state.get() {
             PlayState::Running => {
                 next.set(PlayState::Paused);
@@ -422,14 +423,14 @@ fn human_input(
 
     // Keyboard and gamepad merge into one digital state; DAS/ARR then
     // treats both sources identically.
-    let left_just =
-        keys.just_pressed(settings.key_for(Action::MoveLeft)) || pad.just_pressed(PadAction::Left);
+    let left_just = keys.just_pressed(settings.key_for(Action::MoveLeft))
+        || pad.action_just_pressed(Action::MoveLeft);
     let right_just = keys.just_pressed(settings.key_for(Action::MoveRight))
-        || pad.just_pressed(PadAction::Right);
+        || pad.action_just_pressed(Action::MoveRight);
     let left_down =
-        keys.pressed(settings.key_for(Action::MoveLeft)) || pad.pressed(PadAction::Left);
-    let right_down =
-        keys.pressed(settings.key_for(Action::MoveRight)) || pad.pressed(PadAction::Right);
+        keys.pressed(settings.key_for(Action::MoveLeft)) || pad.action_pressed(Action::MoveLeft);
+    let right_down = keys.pressed(settings.key_for(Action::MoveRight))
+        || pad.action_pressed(Action::MoveRight);
     let das_secs = settings.das_ms as f32 / 1000.0;
     let arr_secs = settings.arr_ms as f32 / 1000.0;
 
@@ -494,25 +495,27 @@ fn human_input(
     // --- Everything else ---------------------------------------------------
     game.soft_drop_factor = settings.sdf_factor();
     game.set_soft_drop(
-        keys.pressed(settings.key_for(Action::SoftDrop)) || pad.pressed(PadAction::Down),
+        keys.pressed(settings.key_for(Action::SoftDrop)) || pad.action_pressed(Action::SoftDrop),
     );
     if keys.just_pressed(settings.key_for(Action::RotateCw))
-        || pad.just_pressed(PadAction::RotateCw)
+        || pad.action_just_pressed(Action::RotateCw)
     {
         game.rotate(true);
     }
     if keys.just_pressed(settings.key_for(Action::RotateCcw))
-        || pad.just_pressed(PadAction::RotateCcw)
+        || pad.action_just_pressed(Action::RotateCcw)
     {
         game.rotate(false);
     }
-    if keys.just_pressed(settings.key_for(Action::Hold)) || pad.just_pressed(PadAction::Hold) {
+    if keys.just_pressed(settings.key_for(Action::Hold)) || pad.action_just_pressed(Action::Hold) {
         game.hold();
     }
-    if keys.just_pressed(settings.key_for(Action::HardDrop)) || pad.just_pressed(PadAction::Up) {
+    if keys.just_pressed(settings.key_for(Action::HardDrop))
+        || pad.action_just_pressed(Action::HardDrop)
+    {
         game.hard_drop();
     }
-    if keys.just_pressed(settings.key_for(Action::Zone)) || pad.just_pressed(PadAction::Zone) {
+    if keys.just_pressed(settings.key_for(Action::Zone)) || pad.action_just_pressed(Action::Zone) {
         game.activate_zone();
     }
 }

@@ -14,6 +14,10 @@ use super::srs::kicks;
 
 pub const LOCK_DELAY: f32 = 0.5;
 pub const MAX_LOCK_RESETS: u32 = 15;
+/// The columns whose overflow loses the game: the spawn area. A piece
+/// locking fully above the skyline only kills when it touches these
+/// four center columns — side stacks may poke over the top and live.
+pub const DEADLY_COLS: std::ops::RangeInclusive<i8> = 3..=6;
 /// Guideline default; the frontend may override per player (SDF setting).
 pub const SOFT_DROP_FACTOR: f32 = 20.0;
 pub const PREVIEW_COUNT: usize = 5;
@@ -246,6 +250,14 @@ impl Game {
     /// Total queued garbage rows (for the danger meter UI).
     pub fn incoming_total(&self) -> u32 {
         self.incoming.iter().map(|(n, _)| n).sum()
+    }
+
+    /// Height of the tallest stack inside the deadly center columns —
+    /// the number the loss condition (and thus the danger warning)
+    /// actually cares about.
+    pub fn deadly_height(&self) -> i8 {
+        let heights = self.board.column_heights();
+        DEADLY_COLS.map(|x| heights[x as usize]).max().unwrap_or(0)
     }
 
     /// Back-to-back armed: the next difficult clear will chain.
@@ -605,10 +617,15 @@ impl Game {
         self.stats.pieces += 1;
         self.events.push(GameEvent::Locked { piece });
 
-        // Lock out: the whole piece settled above the visible field. In a
-        // zone the banked rows caused the squeeze — end it (dropping the
-        // stack back down) instead of ending the game.
-        if piece.board_cells().iter().all(|&(_, y)| y >= VISIBLE_HEIGHT) {
+        // Lock out: the whole piece settled above the visible field AND
+        // touches the deadly center columns — side stacks may poke over
+        // the skyline and live. In a zone the banked rows caused the
+        // squeeze — end it (dropping the stack back down) instead of
+        // ending the game.
+        let cells = piece.board_cells();
+        if cells.iter().all(|&(_, y)| y >= VISIBLE_HEIGHT)
+            && cells.iter().any(|&(x, _)| DEADLY_COLS.contains(&x))
+        {
             if self.zone_active() {
                 self.end_zone();
             } else {
@@ -1115,6 +1132,46 @@ mod tests {
         assert_eq!(game.active.kind, next);
         game.hold();
         assert!(game.events.iter().any(|e| matches!(e, GameEvent::HoldBlocked)));
+    }
+
+    #[test]
+    fn side_lockout_no_longer_ends_game() {
+        // A piece locking fully above the skyline in the side columns is
+        // survivable: only the deadly center columns kill.
+        let mut game = Game::new(1, 1);
+        for x in 0..=1 {
+            for y in 0..=20 {
+                game.board.set_cell(x, y, Some(Cell::Garbage));
+            }
+        }
+        game.active = ActivePiece { kind: PieceKind::O, rot: Rot::R0, x: 0, y: 21 };
+        game.hard_drop(); // locks at rows 21-22, columns 0-1
+        assert!(!game.game_over, "side overflow must not end the game");
+        assert_eq!(game.board.cell(0, 21), Some(Cell::Piece(PieceKind::O)));
+    }
+
+    #[test]
+    fn center_lockout_still_ends_game() {
+        let mut game = Game::new(1, 1);
+        for x in 3..=6 {
+            for y in 0..=20 {
+                game.board.set_cell(x, y, Some(Cell::Garbage));
+            }
+        }
+        game.active = ActivePiece { kind: PieceKind::O, rot: Rot::R0, x: 4, y: 21 };
+        game.hard_drop(); // locks at rows 21-22 inside the deadly columns
+        assert!(game.game_over, "center overflow must still end the game");
+    }
+
+    #[test]
+    fn deadly_height_ignores_side_columns() {
+        let mut game = Game::new(1, 1);
+        for y in 0..18 {
+            game.board.set_cell(0, y, Some(Cell::Garbage));
+        }
+        assert_eq!(game.deadly_height(), 0, "side stacks are not lethal");
+        game.board.set_cell(4, 5, Some(Cell::Garbage));
+        assert_eq!(game.deadly_height(), 6);
     }
 
     #[test]

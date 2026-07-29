@@ -1467,13 +1467,9 @@ fn update_danger(
     }
 
     for (session, index, mut glow) in &mut boards {
-        let stack = session
-            .game
-            .board
-            .column_heights()
-            .into_iter()
-            .max()
-            .unwrap_or(0) as f32;
+        // Only the deadly center columns can actually kill, so only they
+        // drive the warning — a tall side stack is untidy, not lethal.
+        let stack = session.game.deadly_height() as f32;
         // Queued garbage (plus the opponent's pending zone payout) lands
         // on top of the stack after the next non-clearing lock; only one
         // piece's cap can rise at once, so anything past the cap is not

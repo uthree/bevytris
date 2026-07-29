@@ -12,7 +12,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use super::board::{ActivePiece, Board, BOARD_HEIGHT, BOARD_WIDTH, VISIBLE_HEIGHT};
-use super::game::{attack_for, t_spin_kind, ClearKind};
+use super::game::{attack_for, t_spin_kind, ClearKind, DEADLY_COLS};
 use super::piece::{PieceKind, Rot};
 use super::srs::kicks;
 
@@ -562,6 +562,14 @@ fn board_score(b: &Board, profile: &AiProfile, t_soon: bool) -> f32 {
     score
 }
 
+/// A placement that would lock out (fully above the skyline in the
+/// deadly center columns) loses instantly and is never a candidate.
+fn is_lock_out(piece: &ActivePiece) -> bool {
+    let cells = piece.board_cells();
+    cells.iter().all(|&(_, y)| y >= VISIBLE_HEIGHT)
+        && cells.iter().any(|&(x, _)| DEADLY_COLS.contains(&x))
+}
+
 /// The state a piece spawns in on `board` (guideline: drop one row when
 /// unobstructed), or None if it would block out.
 fn spawn_state(board: &Board, kind: PieceKind) -> Option<ActivePiece> {
@@ -646,9 +654,7 @@ pub fn plan(
     let mut nodes: Vec<Node> = Vec::with_capacity(96);
     for (start, use_hold, q_off) in starts {
         for pl in reachable_placements(board, start, profile.finesse) {
-            // Never choose a placement that rests entirely above the
-            // skyline (instant lock-out).
-            if pl.piece.board_cells().iter().all(|&(_, y)| y >= VISIBLE_HEIGHT) {
+            if is_lock_out(&pl.piece) {
                 continue;
             }
             let sim = simulate(board, &pl.piece, pl.last_kick);
@@ -700,7 +706,7 @@ pub fn plan(
             let mut expanded = false;
             if let Some(start) = spawn_state(&node.board, kind) {
                 for pl in reachable_placements(&node.board, start, profile.finesse) {
-                    if pl.piece.board_cells().iter().all(|&(_, y)| y >= VISIBLE_HEIGHT) {
+                    if is_lock_out(&pl.piece) {
                         continue;
                     }
                     let sim = simulate(&node.board, &pl.piece, pl.last_kick);

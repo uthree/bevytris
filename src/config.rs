@@ -157,6 +157,64 @@ pub fn key_name(key: KeyCode) -> String {
     format!("{key:?}")
 }
 
+/// Gamepad buttons offered for rebinding; also the parse table for the
+/// serialized Debug-string form. Anything a pad reports outside this
+/// list stays unbindable (menus own the fixed navigation controls).
+pub fn bindable_pad_buttons() -> Vec<GamepadButton> {
+    use GamepadButton::*;
+    vec![
+        South, East, West, North, LeftTrigger, RightTrigger, LeftTrigger2, RightTrigger2,
+        Select, Start, LeftThumb, RightThumb, DPadUp, DPadDown, DPadLeft, DPadRight,
+    ]
+}
+
+pub fn pad_button_name(button: GamepadButton) -> String {
+    format!("{button:?}")
+}
+
+/// Short, Xbox-style button label for the UI.
+pub fn pad_button_label(button: GamepadButton) -> &'static str {
+    match button {
+        GamepadButton::South => "A",
+        GamepadButton::East => "B",
+        GamepadButton::West => "X",
+        GamepadButton::North => "Y",
+        GamepadButton::LeftTrigger => "LB",
+        GamepadButton::RightTrigger => "RB",
+        GamepadButton::LeftTrigger2 => "LT",
+        GamepadButton::RightTrigger2 => "RT",
+        GamepadButton::Select => "SELECT",
+        GamepadButton::Start => "START",
+        GamepadButton::LeftThumb => "L3",
+        GamepadButton::RightThumb => "R3",
+        GamepadButton::DPadUp => "D-UP",
+        GamepadButton::DPadDown => "D-DOWN",
+        GamepadButton::DPadLeft => "D-LEFT",
+        GamepadButton::DPadRight => "D-RIGHT",
+        _ => "?",
+    }
+}
+
+fn parse_pad_button(name: &str) -> Option<GamepadButton> {
+    bindable_pad_buttons()
+        .into_iter()
+        .find(|b| pad_button_name(*b) == name)
+}
+
+fn default_pad_bindings() -> HashMap<Action, GamepadButton> {
+    let mut bindings = HashMap::new();
+    bindings.insert(Action::MoveLeft, GamepadButton::DPadLeft);
+    bindings.insert(Action::MoveRight, GamepadButton::DPadRight);
+    bindings.insert(Action::SoftDrop, GamepadButton::DPadDown);
+    bindings.insert(Action::HardDrop, GamepadButton::DPadUp);
+    bindings.insert(Action::RotateCw, GamepadButton::South);
+    bindings.insert(Action::RotateCcw, GamepadButton::East);
+    bindings.insert(Action::Hold, GamepadButton::LeftTrigger);
+    bindings.insert(Action::Zone, GamepadButton::RightTrigger2);
+    bindings.insert(Action::Pause, GamepadButton::Start);
+    bindings
+}
+
 /// Short, human-friendly key label for the UI.
 pub fn key_label(key: KeyCode) -> String {
     let name = key_name(key);
@@ -183,6 +241,8 @@ fn parse_key(name: &str) -> Option<KeyCode> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SettingsFile {
     bindings: HashMap<Action, String>,
+    #[serde(default)]
+    pad_bindings: HashMap<Action, String>,
     das_ms: u32,
     arr_ms: u32,
     master_volume: u32,
@@ -211,6 +271,10 @@ pub const SDF_MAX: u32 = 999;
 #[derive(Resource, Debug, Clone)]
 pub struct GameSettings {
     pub bindings: HashMap<Action, KeyCode>,
+    /// Gamepad button per action. Menu navigation (D-pad/stick, A
+    /// confirm, B back) and stick movement stay fixed; these only drive
+    /// in-game actions.
+    pub pad_bindings: HashMap<Action, GamepadButton>,
     /// Delayed auto shift: hold time before auto-repeat starts (ms).
     pub das_ms: u32,
     /// Auto repeat rate: interval between auto-shifts (ms).
@@ -246,6 +310,7 @@ impl Default for GameSettings {
         bindings.insert(Action::Pause, KeyCode::Escape);
         Self {
             bindings,
+            pad_bindings: default_pad_bindings(),
             das_ms: 160,
             arr_ms: 40,
             master_volume: 8,
@@ -276,6 +341,26 @@ impl GameSettings {
             self.bindings.insert(other, previous);
         }
         self.bindings.insert(action, key);
+    }
+
+    pub fn pad_for(&self, action: Action) -> GamepadButton {
+        *self
+            .pad_bindings
+            .get(&action)
+            .expect("every action always has a pad binding")
+    }
+
+    /// Same swap-steal semantics as [`GameSettings::bind`], for the pad.
+    pub fn bind_pad(&mut self, action: Action, button: GamepadButton) {
+        let previous = self.pad_for(action);
+        if let Some((&other, _)) = self
+            .pad_bindings
+            .iter()
+            .find(|(a, b)| **b == button && **a != action)
+        {
+            self.pad_bindings.insert(other, previous);
+        }
+        self.pad_bindings.insert(action, button);
     }
 
     /// Gravity multiplier the core should use while soft-dropping.
@@ -321,6 +406,11 @@ impl GameSettings {
                 .iter()
                 .map(|(a, k)| (*a, key_name(*k)))
                 .collect(),
+            pad_bindings: self
+                .pad_bindings
+                .iter()
+                .map(|(a, b)| (*a, pad_button_name(*b)))
+                .collect(),
             das_ms: self.das_ms,
             arr_ms: self.arr_ms,
             master_volume: self.master_volume,
@@ -355,6 +445,26 @@ impl GameSettings {
                     .find(|k| Action::ALL.iter().all(|a| settings.key_for(*a) != *k))
                 {
                     settings.bindings.insert(action, free);
+                }
+            }
+        }
+        // Pad bindings: same restore + collision fixup as the keyboard.
+        for (action, name) in &file.pad_bindings {
+            if let Some(button) = parse_pad_button(name) {
+                settings.pad_bindings.insert(*action, button);
+            }
+        }
+        for action in Action::ALL {
+            let button = settings.pad_for(action);
+            let taken_by_other = Action::ALL
+                .iter()
+                .any(|a| *a != action && settings.pad_for(*a) == button);
+            if taken_by_other && !file.pad_bindings.contains_key(&action) {
+                if let Some(free) = bindable_pad_buttons()
+                    .into_iter()
+                    .find(|b| Action::ALL.iter().all(|a| settings.pad_for(*a) != *b))
+                {
+                    settings.pad_bindings.insert(action, free);
                 }
             }
         }
