@@ -44,6 +44,10 @@ impl Default for StarSurge {
 pub struct AudioPulse {
     /// Overall energy, ~0.1 (idle breathing) .. 1.6 (heavy action).
     pub energy: f32,
+    /// Slow-smoothed energy for MOTION parameters (rotation speed,
+    /// amplitude): spiky raw energy makes movement stutter, so anything
+    /// that moves follows this instead and only brightness may twitch.
+    pub slow: f32,
     pub bands: [f32; BANDS],
 }
 
@@ -51,6 +55,7 @@ impl Default for AudioPulse {
     fn default() -> Self {
         AudioPulse {
             energy: 0.15,
+            slow: 0.15,
             bands: [0.0; BANDS],
         }
     }
@@ -61,6 +66,132 @@ const FORMATION: usize = 0;
 const CYBER: usize = 1;
 const GALAXY: usize = 2;
 const VISUALIZER: usize = 3;
+
+/// One color scheme shared by every scene.
+struct Palette {
+    formation: [Color; 4],
+    /// Glyph-rain columns.
+    glyph: Color,
+    /// Drifting code blocks.
+    code: Color,
+    /// Galaxy: core, then the two arm tints.
+    galaxy: [Color; 3],
+    /// Visualizer bar gradient ends.
+    eq: (Color, Color),
+    wave: Color,
+}
+
+/// Preset palettes; every incoming scene draws a random one, so the
+/// backdrop changes hue over a session instead of being eternally cyan.
+const PALETTES: [Palette; 5] = [
+    // NEON — the original cyan/magenta arcade look.
+    Palette {
+        formation: [
+            Color::srgb(0.35, 0.9, 1.0),
+            Color::srgb(0.95, 0.4, 1.0),
+            Color::srgb(0.95, 0.97, 1.0),
+            Color::srgb(1.0, 0.85, 0.3),
+        ],
+        glyph: Color::srgb(0.25, 1.0, 0.5),
+        code: Color::srgb(0.3, 0.75, 0.9),
+        galaxy: [
+            Color::srgb(1.0, 0.9, 0.7),
+            Color::srgb(0.6, 0.8, 1.0),
+            Color::srgb(0.7, 0.5, 1.0),
+        ],
+        eq: (Color::srgb(0.2, 0.9, 1.0), Color::srgb(1.0, 0.3, 0.9)),
+        wave: Color::srgb(0.5, 0.95, 1.0),
+    },
+    // EMBER — warm oranges and reds.
+    Palette {
+        formation: [
+            Color::srgb(1.0, 0.55, 0.2),
+            Color::srgb(1.0, 0.3, 0.25),
+            Color::srgb(1.0, 0.9, 0.4),
+            Color::srgb(1.0, 0.8, 0.6),
+        ],
+        glyph: Color::srgb(1.0, 0.7, 0.25),
+        code: Color::srgb(0.95, 0.55, 0.3),
+        galaxy: [
+            Color::srgb(1.0, 0.85, 0.5),
+            Color::srgb(1.0, 0.6, 0.3),
+            Color::srgb(0.95, 0.35, 0.3),
+        ],
+        eq: (Color::srgb(1.0, 0.8, 0.3), Color::srgb(1.0, 0.25, 0.2)),
+        wave: Color::srgb(1.0, 0.7, 0.4),
+    },
+    // MATRIX — all greens.
+    Palette {
+        formation: [
+            Color::srgb(0.3, 1.0, 0.5),
+            Color::srgb(0.2, 0.9, 0.7),
+            Color::srgb(0.85, 1.0, 0.9),
+            Color::srgb(0.7, 1.0, 0.3),
+        ],
+        glyph: Color::srgb(0.25, 1.0, 0.45),
+        code: Color::srgb(0.4, 0.9, 0.5),
+        galaxy: [
+            Color::srgb(0.85, 1.0, 0.8),
+            Color::srgb(0.4, 0.95, 0.5),
+            Color::srgb(0.2, 0.8, 0.6),
+        ],
+        eq: (Color::srgb(0.3, 1.0, 0.5), Color::srgb(0.15, 0.75, 0.6)),
+        wave: Color::srgb(0.5, 1.0, 0.6),
+    },
+    // ICE — whites and pale blues.
+    Palette {
+        formation: [
+            Color::srgb(0.95, 0.98, 1.0),
+            Color::srgb(0.6, 0.85, 1.0),
+            Color::srgb(0.4, 0.95, 1.0),
+            Color::srgb(0.7, 0.7, 1.0),
+        ],
+        glyph: Color::srgb(0.6, 0.85, 1.0),
+        code: Color::srgb(0.75, 0.85, 1.0),
+        galaxy: [
+            Color::srgb(1.0, 1.0, 1.0),
+            Color::srgb(0.65, 0.85, 1.0),
+            Color::srgb(0.45, 0.6, 1.0),
+        ],
+        eq: (Color::srgb(0.9, 0.97, 1.0), Color::srgb(0.35, 0.6, 1.0)),
+        wave: Color::srgb(0.8, 0.92, 1.0),
+    },
+    // VAPOR — pinks and purples.
+    Palette {
+        formation: [
+            Color::srgb(1.0, 0.5, 0.8),
+            Color::srgb(0.7, 0.4, 1.0),
+            Color::srgb(0.45, 0.6, 1.0),
+            Color::srgb(1.0, 0.85, 0.95),
+        ],
+        glyph: Color::srgb(1.0, 0.55, 0.8),
+        code: Color::srgb(0.75, 0.55, 1.0),
+        galaxy: [
+            Color::srgb(1.0, 0.8, 0.9),
+            Color::srgb(0.9, 0.45, 0.9),
+            Color::srgb(0.55, 0.45, 1.0),
+        ],
+        eq: (Color::srgb(0.7, 0.4, 1.0), Color::srgb(1.0, 0.45, 0.75)),
+        wave: Color::srgb(1.0, 0.6, 0.85),
+    },
+];
+
+/// Which palette each scene is currently wearing. An incoming scene
+/// re-rolls its palette, so colors shift with every crossfade without
+/// ever popping mid-display.
+#[derive(Resource)]
+struct ScenePalettes([usize; SCENE_COUNT]);
+
+impl ScenePalettes {
+    fn random() -> Self {
+        let mut rng = rand::rng();
+        ScenePalettes(std::array::from_fn(|_| rng.random_range(0..PALETTES.len())))
+    }
+
+    fn of(&self, scene: usize) -> &'static Palette {
+        &PALETTES[self.0[scene]]
+    }
+}
 
 /// Seconds a crossfade takes.
 const FADE_SECS: f32 = 3.0;
@@ -90,19 +221,20 @@ struct SceneWeights {
     master: f32,
 }
 
-/// The scenes' own clock. Time stops with the player's zone: `speed`
-/// eases to 0, freezing every scene mid-motion, and eases back to 1
-/// when the zone ends.
-#[derive(Resource)]
-struct SceneClock {
-    t: f32,
-    speed: f32,
+/// The zone's own minimal show: while the player's zone runs, every
+/// scene blacks out (`gate` -> 1) and square shards stream radially
+/// from the screen center instead — less information, more focus.
+#[derive(Resource, Default)]
+struct ZoneFx {
+    gate: f32,
+    spawn_acc: f32,
 }
 
-impl Default for SceneClock {
-    fn default() -> Self {
-        SceneClock { t: 0.0, speed: 1.0 }
-    }
+#[derive(Component)]
+struct ZoneShard {
+    vel: Vec2,
+    life: f32,
+    max_life: f32,
 }
 
 pub struct BackgroundPlugin;
@@ -119,7 +251,8 @@ impl Plugin for BackgroundPlugin {
         app.init_resource::<StarSurge>()
             .init_resource::<AudioPulse>()
             .init_resource::<SceneWeights>()
-            .init_resource::<SceneClock>()
+            .init_resource::<ZoneFx>()
+            .insert_resource(ScenePalettes::random())
             .insert_resource(SceneState {
                 active: start,
                 prev: start,
@@ -133,7 +266,7 @@ impl Plugin for BackgroundPlugin {
                 Update,
                 (
                     update_audio_pulse,
-                    update_scene_clock,
+                    update_zone_fx,
                     update_scene_state,
                     animate_stars,
                     animate_formation,
@@ -167,7 +300,7 @@ struct CodeColumn {
 }
 
 #[derive(Component)]
-struct CodeLine {
+struct CodeBlock {
     speed: f32,
 }
 
@@ -177,6 +310,8 @@ struct GalaxyStar {
     radius: f32,
     phase: f32,
     size: f32,
+    /// Palette slot: 0 = core, 1/2 = arm tints.
+    kind: usize,
 }
 
 #[derive(Component)]
@@ -206,24 +341,17 @@ struct WaveDot {
 
 const FORMATION_DOTS: usize = 240;
 const CODE_COLUMNS: usize = 24;
-const CODE_LINES: usize = 7;
 const GALAXY_STARS: usize = 300;
 const WAVE_DOTS: usize = 72;
 
-/// Real lines from this repository, drifting through the cyber scene.
-const CODE_SNIPPETS: [&str; 12] = [
-    "let ease = t * t * (3.0 - 2.0 * t);",
-    "self.gravity_acc += dt / sec_per_row.max(1e-6);",
-    "let difficult = lines == 4 || tspin.is_some();",
-    "attack = self.cancel_incoming(attack);",
-    "for &rot in distinct_rotations(kind) {",
-    "zone.charge = (zone.charge + charge_gain).min(1.0);",
-    "while board.fits(&piece.shifted(0, -1)) {",
-    "if front_filled == 2 || kick == 4 {",
-    "let seed: u64 = rand::rng().random();",
-    "score += 2 * distance as u64;",
-    "nodes.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));",
-    "fn t_spin_kind(board, piece, last_kick)",
+/// Real multi-line fragments of this repository, drifting through the
+/// cyber scene. Whole nested blocks read far more like a program than
+/// scattered single lines.
+const CODE_BLOCKS: [&str; 4] = [
+    "pub fn rotate(&mut self, clockwise: bool) -> bool {\n    let from = self.active.rot;\n    let to = if clockwise { from.cw() } else { from.ccw() };\n    for (i, &(dx, dy)) in kicks(self.active.kind, from, to) {\n        let candidate = self.active.rotated(to).shifted(dx, dy);\n        if self.board.fits(&candidate) {\n            self.active = candidate;\n            self.last_rotation_kick = Some(i);\n            return true;\n        }\n    }\n    false\n}",
+    "pub fn attack_multiplier(&self) -> f32 {\n    let Some(margin) = self.margin_time else {\n        return 1.0;\n    };\n    let over = self.stats.time as f32 - margin;\n    if over < 0.0 {\n        1.0\n    } else if over < 30.0 {\n        1.5\n    } else {\n        4.0\n    }\n}",
+    "fn lock_active(&mut self) {\n    let piece = self.active;\n    let tspin = self.detect_tspin();\n    self.board.lock(&piece);\n    self.stats.pieces += 1;\n    if self.zone_active() {\n        let banked = self.board.bank_full_rows();\n        if banked > 0 {\n            zone.lines += banked;\n        }\n    }\n}",
+    "while let Some((piece, kick, steps)) = queue.pop_front() {\n    let grounded = !board.fits(&piece.shifted(0, -1));\n    if grounded {\n        let tspin = t_spin_kind(board, &piece, kick);\n        out.push(Placement { piece, steps });\n    }\n    for (dx, step) in [(-1, Step::Left), (1, Step::Right)] {\n        let cand = piece.shifted(dx, 0);\n        if board.fits(&cand) {\n            queue.push_back(cand);\n        }\n    }\n}",
 ];
 
 const GLYPHS: &[char] = &[
@@ -313,21 +441,23 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
                     },
                 ));
             }
-            for i in 0..CODE_LINES {
+            for (i, block) in CODE_BLOCKS.iter().enumerate() {
                 parent.spawn((
-                    Text2d::new(CODE_SNIPPETS[i % CODE_SNIPPETS.len()]),
+                    Text2d::new(*block),
                     TextFont {
-                        font_size: FontSize::Px(14.0),
+                        font_size: FontSize::Px(13.0),
                         ..default()
                     },
+                    // Left-justified so the indentation actually reads.
+                    TextLayout::justify(Justify::Left),
                     TextColor(emissive(Color::srgb(0.3, 0.75, 0.9), 1.2)),
                     Transform::from_xyz(
                         rng.random_range(-640.0..640.0),
-                        -340.0 + i as f32 * 110.0 + rng.random_range(-20.0..20.0),
+                        [230.0, -20.0, -260.0, 120.0][i % 4] + rng.random_range(-30.0..30.0),
                         -0.5,
                     ),
-                    CodeLine {
-                        speed: rng.random_range(25.0..70.0),
+                    CodeBlock {
+                        speed: rng.random_range(14.0..38.0),
                     },
                 ));
             }
@@ -358,17 +488,16 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
                 let t = (i / 2) as f32 / (GALAXY_STARS / 2) as f32;
                 let radius = 30.0 + 530.0 * t.powf(0.8);
                 let angle = arm + t * 4.2 + rng.random_range(-0.16..0.16);
-                let core = t < 0.25;
-                let color = if core {
-                    Color::srgb(1.0, 0.9, 0.7)
+                let kind = if t < 0.25 {
+                    0
                 } else if rng.random_bool(0.25) {
-                    Color::srgb(0.7, 0.5, 1.0)
+                    2
                 } else {
-                    Color::srgb(0.6, 0.8, 1.0)
+                    1
                 };
                 parent.spawn((
                     Sprite::from_color(
-                        emissive(color, 1.6),
+                        emissive(Color::WHITE, 1.6),
                         Vec2::splat(rng.random_range(1.5..4.5)),
                     ),
                     Transform::default(),
@@ -377,6 +506,7 @@ fn setup_background(mut commands: Commands, asset_server: Res<AssetServer>) {
                         radius,
                         phase: rng.random_range(0.0..std::f32::consts::TAU),
                         size: rng.random_range(1.5..4.5),
+                        kind,
                     },
                 ));
             }
@@ -439,6 +569,9 @@ fn update_audio_pulse(
     // Fast decay toward a gentle idle breath, so quiet menus still move.
     let idle = 0.12 + 0.05 * (t * 0.8).sin().abs();
     pulse.energy += (idle - pulse.energy) * (2.2 * dt).min(1.0);
+    // The motion-side envelope follows slowly in both directions.
+    let energy = pulse.energy;
+    pulse.slow += (energy - pulse.slow) * (1.2 * dt).min(1.0);
 
     // Pseudo-spectrum: incommensurate sine mixes per band, scaled by the
     // energy envelope. Reads like an equalizer without needing an FFT.
@@ -451,34 +584,73 @@ fn update_audio_pulse(
     }
 }
 
-/// Ease the scene clock: frozen while the player's zone runs.
-fn update_scene_clock(
+/// The zone's dedicated show: scenes black out and square shards stream
+/// radially from the screen center — minimal, monochrome, focused.
+fn update_zone_fx(
     time: Res<Time>,
     sessions: Query<&GameSession, With<HumanControlled>>,
-    mut clock: ResMut<SceneClock>,
+    mut fx: ResMut<ZoneFx>,
+    mut commands: Commands,
+    mut shards: Query<(Entity, &mut ZoneShard, &mut Transform, &mut Sprite)>,
 ) {
     let dt = time.delta_secs();
-    let frozen = sessions.iter().any(|s| s.game.zone_active());
-    let target = if frozen { 0.0 } else { 1.0 };
-    clock.speed += (target - clock.speed) * (4.0 * dt).min(1.0);
-    if clock.speed < 0.01 {
-        clock.speed = 0.0;
+    let active = sessions.iter().any(|s| s.game.zone_active());
+    let target = if active { 1.0 } else { 0.0 };
+    let rate = if active { 5.0 } else { 2.5 };
+    fx.gate += (target - fx.gate) * (rate * dt).min(1.0);
+
+    // Steady radial stream while the gate is open.
+    if fx.gate > 0.1 {
+        fx.spawn_acc += dt * 80.0 * fx.gate;
+        let mut rng = rand::rng();
+        while fx.spawn_acc >= 1.0 {
+            fx.spawn_acc -= 1.0;
+            let a = rng.random_range(0.0..std::f32::consts::TAU);
+            let dir = Vec2::new(a.cos(), a.sin());
+            let start = dir * rng.random_range(14.0..70.0) + Vec2::new(0.0, -14.0);
+            commands.spawn((
+                Sprite::from_color(
+                    emissive(Color::srgb(0.75, 0.95, 1.0), 2.0),
+                    Vec2::splat(rng.random_range(2.0..5.0)),
+                ),
+                Transform::from_translation(start.extend(-20.0)),
+                ZoneShard {
+                    vel: dir * rng.random_range(50.0..140.0),
+                    life: 1.5,
+                    max_life: 1.5,
+                },
+                DespawnOnExit(AppState::Playing),
+            ));
+        }
     }
-    clock.t += dt * clock.speed;
+
+    for (entity, mut shard, mut tf, mut sprite) in &mut shards {
+        shard.life -= dt;
+        if shard.life <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        // Warp feel: shards accelerate as they fly outward.
+        shard.vel *= 1.0 + 2.0 * dt;
+        tf.translation.x += shard.vel.x * dt;
+        tf.translation.y += shard.vel.y * dt;
+        let k = 1.0 - shard.life / shard.max_life;
+        let alpha = (k / 0.12).min(shard.life / 0.4).clamp(0.0, 1.0);
+        sprite.color.set_alpha(alpha * 0.8);
+    }
 }
 
 fn update_scene_state(
     time: Res<Time>,
     app_state: Res<State<AppState>>,
-    clock: Res<SceneClock>,
+    fx: Res<ZoneFx>,
     mut state: ResMut<SceneState>,
     mut weights: ResMut<SceneWeights>,
+    mut palettes: ResMut<ScenePalettes>,
     mut roots: Query<(&SceneRoot, &mut Visibility)>,
 ) {
     let dt = time.delta_secs();
-    // Crossfades and the scene timer run on the (freezable) scene clock.
-    let dt_s = dt * clock.speed;
-    state.fade = (state.fade + dt_s / FADE_SECS).min(1.0);
+    state.fade = (state.fade + dt / FADE_SECS).min(1.0);
 
     // The show only runs during gameplay; menus fade back to the quiet
     // starfield (in over ~2 s, out faster so the title calms right down).
@@ -487,12 +659,7 @@ fn update_scene_state(
     let target = if playing { 1.0 } else { 0.0 };
     state.master += (target - state.master).clamp(-rate, rate);
 
-    if !state.pinned
-        && state
-            .timer
-            .tick(std::time::Duration::from_secs_f32(dt_s))
-            .is_finished()
-    {
+    if !state.pinned && state.timer.tick(time.delta()).is_finished() {
         let mut rng = rand::rng();
         let mut next = rng.random_range(0..SCENE_COUNT);
         if next == state.active {
@@ -502,13 +669,17 @@ fn update_scene_state(
         state.active = next;
         state.fade = 0.0;
         state.timer = Timer::from_seconds(rng.random_range(40.0..70.0), TimerMode::Once);
+        // The incoming scene picks a fresh color scheme.
+        palettes.0[next] = rng.random_range(0..PALETTES.len());
     }
 
     let ease = state.fade * state.fade * (3.0 - 2.0 * state.fade);
     let master = state.master * state.master * (3.0 - 2.0 * state.master);
+    // The zone show replaces the scenes: they black out while it runs.
+    let show = master * (1.0 - fx.gate);
     weights.scenes = [0.0; SCENE_COUNT];
-    weights.scenes[state.prev] = (1.0 - ease) * master;
-    weights.scenes[state.active] = ease * master;
+    weights.scenes[state.prev] = (1.0 - ease) * show;
+    weights.scenes[state.active] = ease * show;
     weights.master = master;
 
     for (root, mut vis) in &mut roots {
@@ -616,25 +787,32 @@ fn figure_point(shape: usize, i: usize, n: usize, t: f32) -> Vec3 {
 }
 
 fn animate_formation(
-    clock: Res<SceneClock>,
+    time: Res<Time>,
     pulse: Res<AudioPulse>,
     weights: Res<SceneWeights>,
+    palettes: Res<ScenePalettes>,
+    // Integrated rotation angle. Never derive an angle from
+    // `elapsed * speed(t)` — a changing speed makes the angle jump.
+    mut spin: Local<f32>,
     mut dots: Query<(&FormationDot, &mut Transform, &mut Sprite)>,
 ) {
     let weight = weights.scenes[FORMATION];
-    if weight <= 0.001 || clock.speed == 0.0 {
+    if weight <= 0.001 {
         return;
     }
-    let t = clock.t;
+    let t = time.elapsed_secs();
+    let dt = time.delta_secs();
+    let palette = palettes.of(FORMATION);
     // A new figure every 14 s, morphing over 3 s.
     let cycle = t / 14.0;
     let shape = cycle as usize;
     let morph = ((cycle.fract() * 14.0) / 3.0).min(1.0);
     let morph = morph * morph * (3.0 - 2.0 * morph);
 
-    let spin = t * (0.25 + 0.25 * pulse.energy);
+    // Motion follows the slow envelope only: smooth swell, no stutter.
+    *spin += dt * (0.22 + 0.18 * pulse.slow);
     let tilt = 0.45 + 0.25 * (t * 0.13).sin();
-    let scale = 250.0 * (1.0 + 0.18 * pulse.energy);
+    let scale = 250.0 * (1.0 + 0.12 * pulse.slow);
     let (sy, cy) = spin.sin_cos();
     let (sx, cx) = tilt.sin_cos();
 
@@ -652,7 +830,9 @@ fn animate_formation(
         let size = (4.6 * persp).clamp(1.5, 7.0);
         sprite.custom_size = Some(Vec2::splat(size));
         let depth_fade = ((persp - 0.55) * 1.6).clamp(0.15, 1.0);
-        sprite.color.set_alpha(weight * depth_fade * (0.55 + 0.45 * pulse.energy.min(1.0)));
+        let alpha = weight * depth_fade * (0.6 + 0.4 * pulse.slow.min(1.0));
+        sprite.color =
+            emissive(palette.formation[dot.idx % 4], 2.4).with_alpha(alpha);
     }
 }
 
@@ -662,18 +842,19 @@ fn animate_formation(
 
 fn animate_cyber(
     time: Res<Time>,
-    clock: Res<SceneClock>,
     pulse: Res<AudioPulse>,
     weights: Res<SceneWeights>,
-    mut columns: Query<(&CodeColumn, &mut Transform, &mut Text2d, &mut TextColor), Without<CodeLine>>,
-    mut lines: Query<(&CodeLine, &mut Transform, &mut TextColor), (With<CodeLine>, Without<CodeColumn>)>,
+    palettes: Res<ScenePalettes>,
+    mut columns: Query<(&CodeColumn, &mut Transform, &mut Text2d, &mut TextColor), Without<CodeBlock>>,
+    mut blocks: Query<(&CodeBlock, &mut Transform, &mut TextColor), (With<CodeBlock>, Without<CodeColumn>)>,
 ) {
     let weight = weights.scenes[CYBER];
-    if weight <= 0.001 || clock.speed == 0.0 {
+    if weight <= 0.001 {
         return;
     }
-    let dt = time.delta_secs() * clock.speed;
-    let speed_mul = 0.7 + 0.8 * pulse.energy;
+    let dt = time.delta_secs();
+    let palette = palettes.of(CYBER);
+    let speed_mul = 0.7 + 0.6 * pulse.slow;
     let mut rng = rand::rng();
     for (col, mut tf, mut text, mut color) in &mut columns {
         tf.translation.y -= col.speed * speed_mul * dt;
@@ -681,14 +862,15 @@ fn animate_cyber(
             tf.translation.y = rng.random_range(420.0..640.0);
             **text = random_column_text(&mut rng);
         }
-        color.0.set_alpha(weight * (0.28 + 0.3 * pulse.energy.min(1.0)));
+        color.0 = emissive(palette.glyph, 1.5)
+            .with_alpha(weight * (0.28 + 0.25 * pulse.slow.min(1.0)));
     }
-    for (line, mut tf, mut color) in &mut lines {
-        tf.translation.x -= line.speed * speed_mul * dt;
-        if tf.translation.x < -820.0 {
-            tf.translation.x = rng.random_range(700.0..900.0);
+    for (block, mut tf, mut color) in &mut blocks {
+        tf.translation.x -= block.speed * speed_mul * dt;
+        if tf.translation.x < -900.0 {
+            tf.translation.x = rng.random_range(750.0..1000.0);
         }
-        color.0.set_alpha(weight * 0.22);
+        color.0 = emissive(palette.code, 1.2).with_alpha(weight * 0.3);
     }
 }
 
@@ -699,11 +881,13 @@ fn animate_cyber(
 #[allow(clippy::too_many_arguments)]
 fn animate_galaxy(
     time: Res<Time>,
-    clock: Res<SceneClock>,
     pulse: Res<AudioPulse>,
     weights: Res<SceneWeights>,
+    palettes: Res<ScenePalettes>,
     mut commands: Commands,
     mut timer: ResMut<ShootingTimer>,
+    // Integrated disc rotation (see animate_formation's spin note).
+    mut turn: Local<f32>,
     mut stars: Query<(&GalaxyStar, &mut Transform, &mut Sprite), Without<GalaxyArt>>,
     mut art: Query<&mut Sprite, (With<GalaxyArt>, Without<GalaxyStar>)>,
     mut shooting: Query<
@@ -712,8 +896,8 @@ fn animate_galaxy(
     >,
 ) {
     let weight = weights.scenes[GALAXY];
-    let t = clock.t;
-    let dt = time.delta_secs() * clock.speed;
+    let t = time.elapsed_secs();
+    let dt = time.delta_secs();
 
     // Shooting stars live in world space and finish their run even while
     // the scene fades out.
@@ -731,25 +915,23 @@ fn animate_galaxy(
     if let Ok(mut sprite) = art.single_mut() {
         sprite.color.set_alpha(weight);
     }
-    if weight <= 0.001 || clock.speed == 0.0 {
+    if weight <= 0.001 {
         return;
     }
 
-    let turn = t * (0.02 + 0.02 * pulse.energy);
+    let palette = palettes.of(GALAXY);
+    *turn += dt * (0.02 + 0.015 * pulse.slow);
     for (star, mut tf, mut sprite) in &mut stars {
-        let a = star.angle + turn * (1.0 + 60.0 / star.radius);
+        let a = star.angle + *turn * (1.0 + 60.0 / star.radius);
         tf.translation.x = a.cos() * star.radius;
         tf.translation.y = a.sin() * star.radius * 0.55; // inclined disc
         let twinkle = 0.55 + 0.45 * (t * 2.6 + star.phase).sin().abs();
-        sprite.color.set_alpha(weight * twinkle * (0.5 + 0.4 * pulse.energy.min(1.0)));
-        sprite.custom_size = Some(Vec2::splat(star.size * (0.8 + 0.4 * pulse.energy)));
+        let alpha = weight * twinkle * (0.5 + 0.35 * pulse.slow.min(1.0));
+        sprite.color = emissive(palette.galaxy[star.kind], 1.6).with_alpha(alpha);
+        sprite.custom_size = Some(Vec2::splat(star.size * (0.85 + 0.3 * pulse.slow)));
     }
 
-    if timer
-        .0
-        .tick(std::time::Duration::from_secs_f32(dt))
-        .is_finished()
-    {
+    if timer.0.tick(time.delta()).is_finished() {
         let mut rng = rand::rng();
         timer.0 = Timer::from_seconds(rng.random_range(3.0..8.0), TimerMode::Once);
         let from_left = rng.random_bool(0.5);
@@ -775,17 +957,19 @@ fn animate_galaxy(
 // ---------------------------------------------------------------------------
 
 fn animate_visualizer(
-    clock: Res<SceneClock>,
+    time: Res<Time>,
     pulse: Res<AudioPulse>,
     weights: Res<SceneWeights>,
+    palettes: Res<ScenePalettes>,
     mut bars: Query<(&EqBar, &mut Transform, &mut Sprite), Without<WaveDot>>,
     mut dots: Query<(&WaveDot, &mut Transform, &mut Sprite), Without<EqBar>>,
 ) {
     let weight = weights.scenes[VISUALIZER];
-    if weight <= 0.001 || clock.speed == 0.0 {
+    if weight <= 0.001 {
         return;
     }
-    let t = clock.t;
+    let t = time.elapsed_secs();
+    let palette = palettes.of(VISUALIZER);
     for (bar, mut tf, mut sprite) in &mut bars {
         let h = 8.0 + pulse.bands[bar.band] * 120.0;
         let size = sprite.custom_size.unwrap_or(Vec2::new(40.0, 8.0));
@@ -795,9 +979,10 @@ fn animate_visualizer(
         } else {
             -366.0 + h / 2.0
         };
-        sprite
-            .color
-            .set_alpha(weight * if bar.top { 0.14 } else { 0.26 });
+        let f = bar.band as f32 / (BANDS - 1) as f32;
+        let color = palette.eq.0.mix(&palette.eq.1, f);
+        sprite.color =
+            emissive(color, 1.3).with_alpha(weight * if bar.top { 0.14 } else { 0.26 });
     }
     for (dot, mut tf, mut sprite) in &mut dots {
         let f = dot.idx as f32 / WAVE_DOTS as f32;
@@ -805,6 +990,6 @@ fn animate_visualizer(
         let y = (f * 21.0 + t * 3.2).sin() * (10.0 + 70.0 * band)
             + (f * 9.0 - t * 1.4).sin() * 8.0;
         tf.translation.y = y;
-        sprite.color.set_alpha(weight * 0.3);
+        sprite.color = emissive(palette.wave, 1.4).with_alpha(weight * 0.3);
     }
 }
