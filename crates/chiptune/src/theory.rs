@@ -17,6 +17,10 @@ pub enum Mode {
     Aeolian,
     Phrygian,
     HarmonicMinor,
+    /// Ascending melodic minor: a minor third under a major sixth *and*
+    /// a leading tone. Tense without being exotic, which is exactly the
+    /// gap between Aeolian and harmonic minor.
+    MelodicMinor,
     PhrygianDominant,
 }
 
@@ -30,6 +34,7 @@ impl Mode {
             Mode::Aeolian => [0, 2, 3, 5, 7, 8, 10],
             Mode::Phrygian => [0, 1, 3, 5, 7, 8, 10],
             Mode::HarmonicMinor => [0, 2, 3, 5, 7, 8, 11],
+            Mode::MelodicMinor => [0, 2, 3, 5, 7, 9, 11],
             Mode::PhrygianDominant => [0, 1, 4, 5, 7, 8, 10],
         }
     }
@@ -73,6 +78,7 @@ impl Mode {
             Mode::Aeolian => "minor",
             Mode::Phrygian => "Phrygian",
             Mode::HarmonicMinor => "harmonic minor",
+            Mode::MelodicMinor => "melodic minor",
             Mode::PhrygianDominant => "Phrygian dominant",
         }
     }
@@ -328,6 +334,7 @@ mod tests {
             Mode::Aeolian,
             Mode::Phrygian,
             Mode::HarmonicMinor,
+            Mode::MelodicMinor,
             Mode::PhrygianDominant,
         ] {
             let f = m.with_flat_seventh();

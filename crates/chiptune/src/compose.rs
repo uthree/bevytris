@@ -810,28 +810,54 @@ fn roll_tempo(profile: Profile, meter: Meter, rng: &mut Rng) -> f32 {
 /// Phrygian dominant is deliberately unused here despite fitting the
 /// mood: its tonic triad is *major*, and one bright chord is enough to
 /// undo the whole effect.
-fn mode_target(profile: Profile, intensity: f32) -> Mode {
+/// The scales a profile may use at each intensity band.
+///
+/// Each band offers a choice rather than one answer: a piece picks a
+/// lane at the start and stays in it, so within one tune the ladder is
+/// still a ladder, but two pieces at the same danger level do not have
+/// to be in the same scale. One mode per band made every versus round
+/// sound like the last one.
+///
+/// Versus is plain minor throughout. It used to end on Phrygian, and a
+/// flat second is a very particular flavour — Spanish, not tense — which
+/// is not what a match wants at its hottest. Harmonic and melodic minor
+/// do the same job by raising the seventh, which pulls rather than
+/// colours.
+fn mode_palette(profile: Profile, band: usize) -> &'static [Mode] {
     match profile {
-        Profile::Ambient => Mode::Dorian,
-        Profile::Victory => Mode::Lydian,
+        // Menus stay put: one mood, no ladder to climb.
+        Profile::Ambient => &[Mode::Dorian, Mode::Aeolian],
+        Profile::Victory => &[Mode::Lydian, Mode::Ionian, Mode::Mixolydian],
         // Zen inverts the usual reading of intensity. Nothing here is at
-        // stake, so a clear field gets the brightest mode in the set and
-        // a tall stack only shades it back toward minor — colour, not a
-        // warning.
-        Profile::Zen => [Mode::Lydian, Mode::Ionian, Mode::Dorian, Mode::Aeolian][band(intensity)],
-        Profile::SoloCalm => [
-            Mode::Dorian,
-            Mode::Aeolian,
-            Mode::Aeolian,
-            Mode::HarmonicMinor,
-        ][band(intensity)],
-        Profile::VsIntense => [
-            Mode::Aeolian,
-            Mode::Aeolian,
-            Mode::HarmonicMinor,
-            Mode::Phrygian,
-        ][band(intensity)],
+        // stake, so a clear field gets the brightest modes in the set and
+        // a tall stack only shades them back toward minor — colour, not
+        // a warning.
+        Profile::Zen => match band {
+            0 => &[Mode::Lydian, Mode::Ionian],
+            1 => &[Mode::Ionian, Mode::Mixolydian],
+            2 => &[Mode::Mixolydian, Mode::Dorian],
+            _ => &[Mode::Dorian, Mode::Aeolian],
+        },
+        Profile::SoloCalm => match band {
+            0 => &[Mode::Dorian, Mode::Aeolian],
+            1 => &[Mode::Aeolian, Mode::Dorian],
+            2 => &[Mode::Aeolian, Mode::MelodicMinor],
+            _ => &[Mode::HarmonicMinor, Mode::Aeolian, Mode::MelodicMinor],
+        },
+        Profile::VsIntense => match band {
+            0 => &[Mode::Aeolian, Mode::Dorian],
+            1 => &[Mode::Aeolian, Mode::Dorian, Mode::MelodicMinor],
+            2 => &[Mode::Aeolian, Mode::MelodicMinor, Mode::HarmonicMinor],
+            _ => &[Mode::HarmonicMinor, Mode::MelodicMinor, Mode::Aeolian],
+        },
     }
+}
+
+/// `variant` is the lane this piece rolled; it wraps, so a palette may
+/// be any length.
+fn mode_target(profile: Profile, intensity: f32, variant: usize) -> Mode {
+    let palette = mode_palette(profile, band(intensity));
+    palette[variant % palette.len()]
 }
 
 /// What the third pulse channel does when it is switched on.
@@ -1233,6 +1259,10 @@ pub struct Composer {
     /// one the melody switches to for the second half.
     lead_first: Inst,
     lead_alt: Inst,
+    /// Which lane of each intensity band's scale palette this piece
+    /// uses. Rolled per piece, so the ladder stays a ladder within a
+    /// tune while two tunes need not share a scale.
+    mode_variant: usize,
     /// How this piece plays its chord blocks, and whether the strum
     /// pattern is the busy one. Rolled per piece like the kit.
     chord_style: ChordStyle,
@@ -1266,7 +1296,7 @@ impl Composer {
             seed,
             profile,
             material: build_material(seed, profile, Meter::Four, default_smoothness(profile)),
-            mode: mode_target(profile, 0.0),
+            mode: mode_target(profile, 0.0, 0),
             root,
             bpm: roll_tempo(profile, Meter::Four, &mut Rng::new(seed)),
             meter: Meter::Four,
@@ -1275,6 +1305,7 @@ impl Composer {
             lead_override: None,
             lead_first: lead_palette(profile)[0],
             lead_alt: lead_palette(profile)[0],
+            mode_variant: 0,
             chord_style: ChordStyle::Sustain,
             strum_busy: false,
             style_override: None,
@@ -1360,13 +1391,16 @@ impl Composer {
             Profile::Ambient => 0.45,
             _ => 0.7,
         });
+        // Rolled last, so the draws `force_lead` replays to recover this
+        // piece's melody instrument stay exactly where they were.
+        self.mode_variant = rng.below(6);
         self.material = build_material(
             self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
             profile,
             self.meter,
             self.smoothness,
         );
-        self.mode = mode_target(profile, intensity);
+        self.mode = mode_target(profile, intensity, self.mode_variant);
         self.bar = 0;
         // A new song starts back in its own key.
         self.lift = 0;
@@ -1535,7 +1569,7 @@ impl Composer {
         if phrase_start {
             // Mode changes only at phrase boundaries; mid-bar they sound
             // like a bug rather than a modulation.
-            self.mode = mode_target(self.profile, ctx.intensity);
+            self.mode = mode_target(self.profile, ctx.intensity, self.mode_variant);
         }
         // Tempo and meter are fixed for the whole piece — see tempo_range.
         let meter = self.meter;
@@ -2887,6 +2921,7 @@ mod tests {
                         Mode::Aeolian,
                         Mode::Phrygian,
                         Mode::HarmonicMinor,
+                        Mode::MelodicMinor,
                         Mode::PhrygianDominant,
                     ] {
                         c.mode = mode;
@@ -3002,21 +3037,87 @@ mod tests {
     }
 
     #[test]
-    fn calm_is_slower_and_brighter_than_versus() {
+    fn calm_is_slower_than_versus_and_both_stay_minor() {
         assert!(tempo_range(Profile::SoloCalm).1 < tempo_range(Profile::VsIntense).0);
-        // Everything that plays during a match is minor; only the
-        // fanfare is allowed to be cheerful.
+        // Everything that plays during a match is minor, whichever lane
+        // of the palette the piece rolled; only the fanfare is allowed
+        // to be cheerful.
         for p in [Profile::Ambient, Profile::SoloCalm, Profile::VsIntense] {
-            for i in [0.0f32, 0.5, 1.0] {
-                assert!(mode_target(p, i).is_minor(), "{p:?} at {i} went major");
+            for band in 0..4 {
+                for m in mode_palette(p, band) {
+                    assert!(
+                        m.is_minor(),
+                        "{p:?} band {band} offers {m:?}, which is major"
+                    );
+                }
             }
         }
-        assert!(!mode_target(Profile::Victory, 0.0).is_minor());
-        // Solo is still the brighter of the two minors: Dorian's major
-        // sixth is what keeps it from sounding grim.
+        for m in mode_palette(Profile::Victory, 0) {
+            assert!(!m.is_minor(), "the fanfare offers {m:?}");
+        }
+        // Solo and versus deliberately share scales now — the difference
+        // between them is tempo and arrangement, not which minor. What
+        // must hold is that neither wanders out of minor, above.
+    }
+
+    #[test]
+    fn versus_never_reaches_for_phrygian() {
+        // A flat second is a very particular flavour, and it is not the
+        // one a match at its hottest wants. Harmonic and melodic minor
+        // raise the seventh instead, which pulls rather than colours.
+        for band in 0..4 {
+            for m in mode_palette(Profile::VsIntense, band) {
+                assert!(
+                    !matches!(m, Mode::Phrygian | Mode::PhrygianDominant),
+                    "versus band {band} offers {m:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_band_offers_a_choice_of_scale() {
+        // The whole point of the palettes: two pieces at the same danger
+        // level should be able to be in different scales.
+        for p in Profile::ALL {
+            for band in 0..4 {
+                let palette = mode_palette(p, band);
+                assert!(!palette.is_empty(), "{p:?} band {band} has no scale");
+                // Menus are allowed to sit still; the playing profiles
+                // are not.
+                if p != Profile::Ambient && p != Profile::Victory {
+                    assert!(
+                        palette.len() >= 2,
+                        "{p:?} band {band} has only one scale, so every piece sounds alike"
+                    );
+                }
+                // A lane index past the end must still land somewhere.
+                for v in 0..8 {
+                    assert!(palette.contains(&mode_target(p, band as f32 * 0.34, v)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_piece_holds_its_lane_but_pieces_differ() {
+        // Within one piece the scale must be a function of intensity
+        // alone, or it would flicker between phrases at a steady danger
+        // level. Across pieces it must not be.
+        let mut seen: Vec<Mode> = Vec::new();
+        for seed in 0..30u64 {
+            let mut c = Composer::new(seed);
+            c.set_profile(Profile::VsIntense, 0.9);
+            let m = c.mode;
+            // Same piece, same intensity, same answer.
+            assert_eq!(mode_target(c.profile, 0.9, c.mode_variant), m);
+            if !seen.contains(&m) {
+                seen.push(m);
+            }
+        }
         assert!(
-            mode_target(Profile::SoloCalm, 0.0).pitch(5)
-                > mode_target(Profile::VsIntense, 0.0).pitch(5)
+            seen.len() >= 2,
+            "30 versus pieces at full danger all chose {seen:?}"
         );
     }
 
@@ -3322,6 +3423,7 @@ mod tests {
             Mode::Dorian,
             Mode::Phrygian,
             Mode::HarmonicMinor,
+            Mode::MelodicMinor,
         ] {
             let lifted_flat_seven = LIFT_STEP + mode.with_flat_seventh().pitch(6);
             assert_eq!(
