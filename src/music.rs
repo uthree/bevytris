@@ -8,13 +8,13 @@
 //!   arrangement, and emits notes timestamped in *absolute samples*.
 //! * The **audio thread only dispatches**. It owns a [`Synth`], pops
 //!   notes whose timestamp has arrived, and produces samples. It has no
-//!   concept of BPM, bars, chords or danger — so tempo never crosses the
+//!   concept of BPM, bars, chords or danger â€” so tempo never crosses the
 //!   thread boundary, and there is nothing to lock.
 //!
 //! Bevy's [`Decodable`] trait is what lets us hand raw PCM to `bevy_audio`
 //! with no extra dependencies. Note that the stream is spawned with
 //! [`PlaybackSettings::ONCE`], never `LOOP`: `LOOP` wraps the decoder in
-//! rodio's `repeat_infinite`, which buffers every sample ever produced —
+//! rodio's `repeat_infinite`, which buffers every sample ever produced â€”
 //! against a generator that never ends, that is an unbounded leak.
 //! Repetition is the composer's job, not the mixer's.
 
@@ -39,7 +39,7 @@ use crate::session::{GameSession, HumanControlled};
 use crate::state::{AppState, GameMode, PlayState};
 
 /// How far ahead of the playhead the composer keeps the score filled.
-/// Two bars at 140 BPM is about 3.4 s — orders of magnitude more than any
+/// Two bars at 140 BPM is about 3.4 s â€” orders of magnitude more than any
 /// frame hitch, and short enough that the danger level still steers the
 /// music promptly.
 const LOOKAHEAD_SECS: f32 = 3.5;
@@ -54,6 +54,9 @@ pub struct Shared {
     muffle: AtomicBool,
     /// Instantaneous synth envelope, published for the visualizer.
     energy: AtomicU32,
+    /// Bumped when a new piece starts. Notes queued under an older
+    /// generation are dropped on arrival instead of being played out.
+    generation: AtomicU32,
 }
 
 impl Shared {
@@ -65,27 +68,39 @@ impl Shared {
     }
 }
 
+/// A note plus the piece it belongs to. The composer runs several seconds
+/// ahead of the playhead, so when the music changes there is always a
+/// backlog of notes from the *previous* piece already in flight â€” without
+/// the stamp they would keep playing for the whole lookahead and the
+/// switch would seem not to happen at all.
+#[derive(Clone, Copy)]
+struct Cmd {
+    generation: u32,
+    ev: NoteEvent,
+}
+
 // ---------------------------------------------------------------------------
 // The streaming audio source
 // ---------------------------------------------------------------------------
 
-/// The asset `bevy_audio` plays. It carries no samples — just the channel
+/// The asset `bevy_audio` plays. It carries no samples â€” just the channel
 /// the composer writes notes into.
 #[derive(Asset, TypePath)]
 pub struct ChiptuneStream {
     /// `decoder()` takes `&self` and is called exactly once, so the
     /// receiver is handed over through an `Option` that gets emptied.
-    rx: Mutex<Option<Receiver<NoteEvent>>>,
+    rx: Mutex<Option<Receiver<Cmd>>>,
     shared: Arc<Shared>,
 }
 
 pub struct ChiptuneDecoder {
     synth: Synth,
-    rx: Option<Receiver<NoteEvent>>,
-    /// One event popped from the channel but not yet due. Events arrive in
-    /// time order, so a single slot is enough of a peek.
-    held: Option<NoteEvent>,
+    rx: Option<Receiver<Cmd>>,
+    /// One command popped from the channel but not yet due. Events arrive
+    /// in time order, so a single slot is enough of a peek.
+    held: Option<Cmd>,
     shared: Arc<Shared>,
+    generation: u32,
     frame_acc: u32,
 }
 
@@ -94,18 +109,33 @@ impl Iterator for ChiptuneDecoder {
 
     fn next(&mut self) -> Option<f32> {
         let now = self.synth.pos();
-        // Drain everything that has come due. Nothing here allocates.
+        // Read the generation every call rather than once per frame: the
+        // composer bumps it and starts sending new notes in the same
+        // breath, and a stale read here would discard those instead.
+        let generation = self.shared.generation.load(Ordering::Relaxed);
+        if generation != self.generation {
+            self.generation = generation;
+            // Cut whatever is sounding; the new piece starts now.
+            self.synth.all_notes_off();
+        }
+        // Drain everything that has come due, plus anything left over from
+        // a piece that is no longer playing. Nothing here allocates.
         loop {
-            if let Some(ev) = self.held {
-                if ev.at > now {
+            if let Some(cmd) = self.held {
+                if cmd.generation != generation {
+                    // Backlog from the previous piece â€” bin it and keep
+                    // draining rather than waiting for its timestamp.
+                    self.held = None;
+                } else if cmd.ev.at > now {
                     break;
+                } else {
+                    self.synth.note_on(&cmd.ev);
+                    self.held = None;
                 }
-                self.synth.note_on(&ev);
-                self.held = None;
             }
             let Some(rx) = &self.rx else { break };
             match rx.try_recv() {
-                Ok(ev) => self.held = Some(ev),
+                Ok(cmd) => self.held = Some(cmd),
                 Err(TryRecvError::Empty) => break,
                 // The game shut down; keep producing silence rather than
                 // ending the stream mid-teardown.
@@ -141,7 +171,7 @@ impl Source for ChiptuneDecoder {
     }
     fn total_duration(&self) -> Option<std::time::Duration> {
         // Never ends. This is what makes PlaybackSettings::LOOP the wrong
-        // choice — see the module docs.
+        // choice â€” see the module docs.
         None
     }
 }
@@ -155,6 +185,7 @@ impl Decodable for ChiptuneStream {
             synth: Synth::new(),
             rx,
             held: None,
+            generation: self.shared.generation.load(Ordering::Relaxed),
             shared: self.shared.clone(),
             frame_acc: 0,
         }
@@ -170,13 +201,16 @@ impl Decodable for ChiptuneStream {
 #[derive(Resource)]
 pub struct MusicEngine {
     composer: Composer,
-    tx: Sender<NoteEvent>,
+    tx: Sender<Cmd>,
     pub shared: Arc<Shared>,
     scratch: Vec<NoteEvent>,
     profile: Profile,
     profile_age: f32,
     intensity: f32,
     transpose: i32,
+    generation: u32,
+    /// A new piece is waiting to be anchored to the playhead.
+    resync: bool,
     /// Set when the label should be re-announced in the corner.
     announce: bool,
 }
@@ -189,11 +223,11 @@ pub struct ScoreFeed {
     pub notes: Vec<RollNote>,
     pub pos: u64,
     pub bpm: f32,
-    /// Quarter notes per bar — 4 in common time, 3 in a waltz or in 6/8.
+    /// Quarter notes per bar â€” 4 in common time, 3 in a waltz or in 6/8.
     /// The roll draws a heavy line every this many beats.
     pub quarters_per_bar: u32,
     pub tonic: i32,
-    /// Pitch classes that belong to the current mode — the piano roll
+    /// Pitch classes that belong to the current mode â€” the piano roll
     /// bands its rows by this, so the backdrop visibly changes key.
     pub scale: [bool; 12],
 }
@@ -233,6 +267,8 @@ impl Plugin for MusicPlugin {
             profile_age: 0.0,
             intensity: 0.0,
             transpose: 0,
+            generation: 0,
+            resync: false,
             announce: false,
         });
         app.insert_resource(PendingStream(Some(ChiptuneStream {
@@ -282,6 +318,23 @@ fn start_stream(
     ));
 }
 
+/// Which musical personality belongs to a given place in the game.
+/// `PlayState` only exists inside `Playing`, hence the `Option`.
+fn profile_for(app: AppState, play: Option<PlayState>, mode: GameMode) -> Profile {
+    match app {
+        AppState::Playing | AppState::Restarting => {
+            if play == Some(PlayState::Finished) {
+                Profile::Victory
+            } else if matches!(mode, GameMode::Single | GameMode::Sprint | GameMode::Dig) {
+                Profile::SoloCalm
+            } else {
+                Profile::VsIntense
+            }
+        }
+        _ => Profile::Ambient,
+    }
+}
+
 /// Pick the musical personality from where the player actually is.
 fn choose_profile(
     time: Res<Time>,
@@ -290,24 +343,23 @@ fn choose_profile(
     mode: Res<GameMode>,
     mut engine: ResMut<MusicEngine>,
 ) {
-    let profile = match app_state.get() {
-        AppState::Playing | AppState::Restarting => {
-            if matches!(play_state.map(|s| *s.get()), Some(PlayState::Finished)) {
-                Profile::Victory
-            } else if matches!(*mode, GameMode::Single | GameMode::Sprint | GameMode::Dig) {
-                Profile::SoloCalm
-            } else {
-                Profile::VsIntense
-            }
-        }
-        _ => Profile::Ambient,
-    };
+    let profile = profile_for(*app_state.get(), play_state.map(|s| *s.get()), *mode);
     if profile != engine.profile {
         engine.profile = profile;
         engine.profile_age = 0.0;
         engine.transpose = 0;
         let i = engine.intensity;
         engine.composer.set_profile(profile, i);
+        // Retire the notes already queued for the previous piece. Without
+        // this the old music plays on for the whole lookahead (several
+        // seconds) and the change reads as not having happened.
+        engine.generation = engine.generation.wrapping_add(1);
+        let generation = engine.generation;
+        engine
+            .shared
+            .generation
+            .store(generation, Ordering::Relaxed);
+        engine.resync = true;
         // Only the real music is worth naming; menus change too often.
         engine.announce = matches!(profile, Profile::SoloCalm | Profile::VsIntense);
     } else {
@@ -356,12 +408,23 @@ fn plan_music(
     let pos = engine.shared.pos();
     let lookahead = (LOOKAHEAD_SECS * SAMPLE_RATE as f32) as u64;
 
+    if engine.resync {
+        engine.resync = false;
+        // The old piece was planned several seconds into the future, so
+        // the new one has to be dragged back to the playhead or it would
+        // not start until that lookahead ran out.
+        engine.composer.seek(pos);
+        feed.notes.clear();
+    }
+
     let MusicEngine {
         composer,
         scratch,
         tx,
+        generation,
         ..
     } = &mut *engine;
+    let generation = *generation;
     scratch.clear();
     composer.advance(pos, lookahead, &ctx, scratch);
 
@@ -379,7 +442,10 @@ fn plan_music(
     }
     for ev in scratch.iter() {
         // A closed channel only happens while the app is shutting down.
-        let _ = tx.send(*ev);
+        let _ = tx.send(Cmd {
+            generation,
+            ev: *ev,
+        });
         feed.notes.push(RollNote {
             at: ev.at,
             end: ev.at + ev.frames as u64 * SAMPLES_PER_FRAME as u64,
@@ -409,7 +475,7 @@ mod tests {
     use super::*;
     use bevytris_chiptune::Inst;
 
-    fn stream() -> (ChiptuneStream, Sender<NoteEvent>) {
+    fn stream() -> (ChiptuneStream, Sender<Cmd>) {
         let (tx, rx) = channel();
         (
             ChiptuneStream {
@@ -420,25 +486,35 @@ mod tests {
         )
     }
 
+    fn note(at: u64, generation: u32) -> Cmd {
+        Cmd {
+            generation,
+            ev: NoteEvent {
+                at,
+                inst: Inst::Pluck,
+                midi: 69,
+                vel: 120,
+                frames: 40,
+                arp: None,
+            },
+        }
+    }
+
+    fn energy(d: &mut ChiptuneDecoder, n: usize) -> f32 {
+        (0..n).map(|_| d.next().unwrap().abs()).sum()
+    }
+
     #[test]
     fn the_decoder_runs_the_clock_and_plays_what_it_is_sent() {
         let (s, tx) = stream();
         let shared = s.shared.clone();
         let mut d = s.decoder();
 
-        let quiet: f32 = (0..2_000).map(|_| d.next().unwrap().abs()).sum();
+        let quiet = energy(&mut d, 2_000);
         assert!(quiet < 0.05, "an idle stream should be silent, got {quiet}");
 
-        tx.send(NoteEvent {
-            at: 2_500,
-            inst: Inst::Pluck,
-            midi: 69,
-            vel: 120,
-            frames: 40,
-            arp: None,
-        })
-        .unwrap();
-        let loud: f32 = (0..12_000).map(|_| d.next().unwrap().abs()).sum();
+        tx.send(note(2_500, 0)).unwrap();
+        let loud = energy(&mut d, 12_000);
         assert!(loud > 1.0, "the scheduled note never sounded, got {loud}");
 
         // The clock only advances inside next(), which is what makes it
@@ -474,5 +550,114 @@ mod tests {
         // and still produces silence instead of panicking.
         assert!(second.rx.is_none());
         assert!(second.next().is_some());
+    }
+
+    #[test]
+    fn every_screen_maps_to_the_right_music() {
+        use AppState::*;
+        // Menus are menus whatever mode is selected behind them.
+        for mode in [
+            GameMode::Single,
+            GameMode::Sprint,
+            GameMode::Dig,
+            GameMode::VsCpu { stage: 15 },
+            GameMode::ZoneBattle { stage: 15 },
+            GameMode::Custom,
+        ] {
+            for app in [Title, Settings, SoloSelect, StageSelect, ZoneSelect, CustomSetup] {
+                assert_eq!(
+                    profile_for(app, None, mode),
+                    Profile::Ambient,
+                    "{app:?} should stay on menu music"
+                );
+            }
+            // A match is a match from the countdown onwards.
+            for play in [
+                PlayState::Countdown,
+                PlayState::Running,
+                PlayState::Paused,
+                PlayState::RoundOver,
+            ] {
+                let want = match mode {
+                    GameMode::Single | GameMode::Sprint | GameMode::Dig => Profile::SoloCalm,
+                    _ => Profile::VsIntense,
+                };
+                assert_eq!(profile_for(Playing, Some(play), mode), want, "{mode:?}");
+            }
+            // The result screen is a fanfare regardless of mode.
+            assert_eq!(
+                profile_for(Playing, Some(PlayState::Finished), mode),
+                Profile::Victory
+            );
+            // A restart bounces through Restarting with no PlayState at
+            // all; the music must not fall back to the menu for that frame.
+            assert_ne!(profile_for(Restarting, None, mode), Profile::Ambient);
+        }
+    }
+
+    /// The title-to-match bug: the composer plans several seconds ahead,
+    /// so at the moment the screen changes there is a backlog of the old
+    /// piece's notes already queued. They used to play out in full, which
+    /// made the switch look like it had not happened.
+    #[test]
+    fn a_new_piece_retires_the_notes_still_queued_for_the_old_one() {
+        let (s, tx) = stream();
+        let shared = s.shared.clone();
+        let mut d = s.decoder();
+
+        // A lookahead's worth of the old piece: notes spread over the
+        // next several seconds.
+        for i in 0..200u64 {
+            tx.send(note(4_000 + i * 1_200, 0)).unwrap();
+        }
+        // Let a couple of them sound, then start a new piece.
+        let before = energy(&mut d, 12_000);
+        assert!(before > 100.0, "the old piece never started, got {before}");
+        shared.generation.store(1, Ordering::Relaxed);
+
+        // Nothing from the old backlog may be heard again, even though its
+        // timestamps are still ahead of the playhead. (The first block
+        // still carries the release ramp of the notes that were sounding
+        // at the moment of the cut, so it is skipped.)
+        energy(&mut d, 8_000);
+        let after = energy(&mut d, 60_000);
+        assert!(
+            after < 1.0,
+            "stale notes kept playing after the cut, got {after} (was {before} per 12k before)"
+        );
+
+        // ...and the new piece is audible immediately.
+        let now = shared.pos();
+        tx.send(note(now + 500, 1)).unwrap();
+        assert!(
+            energy(&mut d, 12_000) > 1.0,
+            "the new piece never started"
+        );
+    }
+
+    #[test]
+    fn a_cut_silences_notes_that_are_already_sounding() {
+        let (s, tx) = stream();
+        let shared = s.shared.clone();
+        let mut d = s.decoder();
+        // A long note, mid-ring.
+        tx.send(Cmd {
+            generation: 0,
+            ev: NoteEvent {
+                at: 100,
+                inst: Inst::Sustain,
+                midi: 69,
+                vel: 127,
+                frames: 600,
+                arp: None,
+            },
+        })
+        .unwrap();
+        assert!(energy(&mut d, 8_000) > 1.0);
+        shared.generation.store(7, Ordering::Relaxed);
+        // Skip the release ramp, then confirm it really stopped.
+        energy(&mut d, 2_000);
+        let after = energy(&mut d, 8_000);
+        assert!(after < 0.05, "note rang on through the cut, got {after}");
     }
 }

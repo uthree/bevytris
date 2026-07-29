@@ -484,6 +484,21 @@ impl Synth {
         self.zone_target = if on { ZONE_CUTOFF_HZ } else { OPEN_CUTOFF_HZ };
     }
 
+    /// Release every sounding note. The gains ramp down over the current
+    /// frame rather than snapping, so a hard cut between pieces does not
+    /// click.
+    pub fn all_notes_off(&mut self) {
+        for st in [&mut self.p1.st, &mut self.p2.st, &mut self.noi.st] {
+            st.active = false;
+            st.frames_left = 0;
+            st.set_gain_target(0.0);
+        }
+        self.tri.st.active = false;
+        self.tri.st.frames_left = 0;
+        self.tri.gate_target = 0.0;
+        self.tri.kick_frames = 0;
+    }
+
     pub fn note_on(&mut self, ev: &NoteEvent) {
         match ev.voice() {
             Voice::Lead => self.p1.st.start(ev),
