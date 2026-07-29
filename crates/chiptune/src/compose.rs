@@ -31,9 +31,29 @@ pub const BARS_PER_SECTION: u32 = 8;
 /// gear change — a semitone is subtler than the moment deserves, and
 /// anything larger stops sounding like the same song.
 const LIFT_STEP: i32 = 2;
-/// Long sessions run through the form several times, so the lift is
-/// capped rather than climbing out of the instruments' range.
-const LIFT_CAP: i32 = 6;
+
+/// Bars of outro after the final chorus. The song is a loop, so the key
+/// has to come back down or an hour-long session ends up somewhere
+/// absurd; the outro is what brings it home, and what makes the seam back
+/// to bar one sound like a repeat rather than a restart.
+///
+/// The way back is a pivot, not a retreat. A whole tone above the home
+/// key, the flat-seventh chord is built on the home tonic itself — so the
+/// outro opens on that chord in the new key and simply lets the ear
+/// reinterpret it as home, then cadences there. Four bars is enough to
+/// land it and short enough not to drag.
+const OUTRO_BARS: u32 = 4;
+
+/// Chord per outro bar, and whether that bar is still in the lifted key.
+/// Bar 0 is the pivot: flat-seventh of the lifted key, which sounds the
+/// home tonic. Then iv - V7 - i at home.
+const OUTRO: [(i32, bool, bool); OUTRO_BARS as usize] = [
+    // (scale degree, still lifted, dominant seventh)
+    (6, true, false),
+    (3, false, false),
+    (4, false, true),
+    (0, false, false),
+];
 
 /// Time signature, rolled once per piece. Three and six both fit twelve
 /// sixteenths in a bar; what separates them is where the accents fall,
@@ -840,21 +860,41 @@ impl Composer {
         let bar_at = self.next_bar_at;
         let start = out.len();
 
+        // The last block of the form is the final chorus: the key steps up
+        // and the arrangement goes all in, then an outro brings it home so
+        // the whole thing can loop. Menus and the short fanfare sit this
+        // out — a title screen does not want a key change, and the fanfare
+        // is over before a pass would finish.
+        let big_finish = matches!(self.profile, Profile::SoloCalm | Profile::VsIntense);
         let blocks = self.material.form.len();
-        let block = (self.bar / BARS_PER_SECTION) as usize % blocks;
+        let body_bars = blocks as u32 * BARS_PER_SECTION;
+        let cycle_bars = body_bars + if big_finish { OUTRO_BARS } else { 0 };
+        let cycle_bar = self.bar % cycle_bars;
+
+        if cycle_bar >= body_bars {
+            self.plan_outro(
+                (cycle_bar - body_bars) as usize,
+                ctx,
+                out,
+                meter,
+                spb,
+                fps,
+                bar_at,
+                start,
+            );
+            return;
+        }
+
+        let block = (cycle_bar / BARS_PER_SECTION) as usize % blocks;
         let sec_idx = self.material.form[block];
-        let bar_in = (self.bar % BARS_PER_SECTION) as usize;
+        let bar_in = (cycle_bar % BARS_PER_SECTION) as usize;
         let last_bar = bar_in == BARS_PER_SECTION as usize - 1;
 
-        // The last block of the form is the final chorus: the key steps up
-        // and the arrangement goes all in. Menus and the short fanfare sit
-        // this out — a title screen does not want a key change.
-        let big_finish = matches!(self.profile, Profile::SoloCalm | Profile::VsIntense);
         let final_block = big_finish && block == blocks - 1;
         // The bar immediately before it, where the run-up happens.
         let run_up = big_finish && block == blocks - 2 && last_bar;
-        if final_block && bar_in == 0 && self.lift < LIFT_CAP {
-            self.lift = (self.lift + LIFT_STEP).min(LIFT_CAP);
+        if final_block && bar_in == 0 && self.lift == 0 {
+            self.lift = LIFT_STEP;
             self.modulated = true;
         }
 
@@ -1167,6 +1207,126 @@ impl Composer {
                 frames: 26,
                 arp: None,
             });
+        }
+
+        out[start..].sort_by_key(|e| e.at);
+        self.next_bar_at = bar_at + (spb * steps as f64) as u64;
+        self.bar += 1;
+    }
+
+    /// The wind-down after the final chorus. The texture thins bar by bar
+    /// and the key steps back home on the pivot chord, so that when the
+    /// form comes round again it reads as the song repeating rather than
+    /// as the music having been restarted.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_outro(
+        &mut self,
+        outro_bar: usize,
+        ctx: &Context,
+        out: &mut Vec<NoteEvent>,
+        meter: Meter,
+        spb: f64,
+        fps: f32,
+        bar_at: u64,
+        start: usize,
+    ) {
+        let steps = meter.steps();
+        let (degree, lifted, seventh) = OUTRO[outro_bar.min(OUTRO.len() - 1)];
+        self.lift = if lifted { LIFT_STEP } else { 0 };
+        let chord = Chord { degree, seventh };
+        let tonic = self.root + ctx.transpose + self.lift;
+        // The pivot needs a flat seventh; harmonic minor's leading tone
+        // would land a semitone off home. Softening the mode also suits a
+        // wind-down.
+        let mode = self.mode.with_flat_seventh();
+        let last = outro_bar == OUTRO.len() - 1;
+
+        let at = |step: f32| -> u64 { bar_at + (step as f64 * spb) as u64 };
+        let frames = |len: u8| -> u16 { ((len as f32 * fps) as u16).max(2) };
+        let arp = chord.arp(mode);
+
+        if !ctx.zone {
+            // Held chord and bass, all the way down.
+            out.push(NoteEvent {
+                at: at(0.0),
+                inst: if last { Inst::Bell } else { Inst::WaveOrgan },
+                midi: clamp_midi(tonic + mode.pitch(chord.degree)),
+                vel: if last { 92 } else { 80 },
+                frames: frames(steps as u8),
+                arp: Some(arp),
+            });
+            out.push(NoteEvent {
+                at: at(0.0),
+                inst: Inst::Organ,
+                midi: clamp_midi(tonic + 12 + mode.pitch(chord.degree)),
+                vel: 78,
+                frames: frames(steps as u8),
+                arp: Some(arp),
+            });
+        }
+        out.push(NoteEvent {
+            at: at(0.0),
+            inst: Inst::Bass,
+            midi: clamp_midi(tonic - 12 + mode.pitch(chord.degree)),
+            vel: 108,
+            frames: frames(steps as u8),
+            arp: None,
+        });
+
+        if ctx.zone {
+            out[start..].sort_by_key(|e| e.at);
+            self.next_bar_at = bar_at + (spb * steps as f64) as u64;
+            self.bar += 1;
+            return;
+        }
+
+        let spbeat = meter.steps_per_beat() as usize;
+        match outro_bar {
+            // Still moving, just without the top end.
+            0 | 1 => {
+                for step in (0..steps as usize).step_by(spbeat) {
+                    out.push(NoteEvent {
+                        at: at(step as f32),
+                        inst: Inst::Kick,
+                        midi: 0,
+                        vel: if step == 0 { 116 } else { 90 },
+                        frames: 6,
+                        arp: None,
+                    });
+                }
+            }
+            // One last fill over the dominant.
+            2 => {
+                out.push(NoteEvent {
+                    at: at(0.0),
+                    inst: Inst::Kick,
+                    midi: 0,
+                    vel: 112,
+                    frames: 6,
+                    arp: None,
+                });
+                for k in 0..4u8 {
+                    out.push(NoteEvent {
+                        at: at((steps as u8 - 4 + k) as f32),
+                        inst: Inst::Snare,
+                        midi: 0,
+                        vel: 84 + 12 * k,
+                        frames: 3,
+                        arp: None,
+                    });
+                }
+            }
+            // The last bar only rings.
+            _ => {
+                out.push(NoteEvent {
+                    at: at(0.0),
+                    inst: Inst::Crash,
+                    midi: 0,
+                    vel: 104,
+                    frames: 30,
+                    arp: None,
+                });
+            }
         }
 
         out[start..].sort_by_key(|e| e.at);
@@ -1630,8 +1790,10 @@ mod tests {
         assert!(run.windows(2).all(|w| w[1] >= w[0]), "the run is not rising");
     }
 
+    /// The point of the outro: however long a session runs, the song is a
+    /// loop and the key always comes back to where it started.
     #[test]
-    fn the_lift_is_capped_and_never_falls() {
+    fn the_key_always_comes_home() {
         let mut c = Composer::new(7);
         c.set_profile(Profile::VsIntense, 0.5);
         let ctx = Context {
@@ -1640,23 +1802,103 @@ mod tests {
             elapsed: 600.0,
             ..Default::default()
         };
-        let bars_per_pass = c.material.form.len() as u32 * BARS_PER_SECTION;
+        let body = c.material.form.len() as u32 * BARS_PER_SECTION;
+        let cycle = body + OUTRO_BARS;
         let mut out = Vec::new();
-        let mut last = 0;
-        // Ten passes: far longer than any real match.
-        for _ in 0..bars_per_pass * 10 {
+        let mut lifts = Vec::new();
+        // Ten cycles: far longer than any real match.
+        for _ in 0..cycle * 10 {
             c.plan_bar(&ctx, &mut out);
-            assert!(c.lift >= last, "the key dropped");
-            assert!(c.lift <= LIFT_CAP, "the key ran away to {}", c.lift);
-            last = c.lift;
+            lifts.push(c.lift);
         }
-        assert_eq!(last, LIFT_CAP);
+        assert!(
+            lifts.iter().all(|&l| l == 0 || l == LIFT_STEP),
+            "the key wandered somewhere unplanned"
+        );
+        assert!(lifts.contains(&LIFT_STEP), "it never modulated at all");
+        // Every cycle ends at home, which is what makes the seam a repeat.
+        for c_i in 0..10u32 {
+            let last_bar_of_cycle = (c_i * cycle + cycle - 1) as usize;
+            assert_eq!(
+                lifts[last_bar_of_cycle], 0,
+                "cycle {c_i} did not come home"
+            );
+        }
         // Notes must still be playable after the lift.
         for e in &out {
             if !e.inst.is_drum() {
                 assert!((21..=108).contains(&e.midi));
             }
         }
+    }
+
+    /// The pivot is the whole reason the descent works: a whole tone up,
+    /// the flat-seventh chord is built on the home tonic.
+    #[test]
+    fn the_outro_pivots_through_the_home_tonic() {
+        for mode in [Mode::Aeolian, Mode::Dorian, Mode::Phrygian, Mode::HarmonicMinor] {
+            let lifted_flat_seven = LIFT_STEP + mode.with_flat_seventh().pitch(6);
+            assert_eq!(
+                lifted_flat_seven.rem_euclid(12),
+                0,
+                "{mode:?}: the pivot chord is not the home tonic"
+            );
+        }
+        // The outro table must actually open on that chord, in the lifted
+        // key, and finish at home on the tonic.
+        assert_eq!(OUTRO[0], (6, true, false));
+        assert!(!OUTRO.last().unwrap().1);
+        assert_eq!(OUTRO.last().unwrap().0, 0);
+        // ...via a dominant seventh, or it is not a cadence.
+        assert!(OUTRO.iter().any(|&(d, _, s)| d == 4 && s));
+    }
+
+    #[test]
+    fn the_outro_winds_down_and_rings_out() {
+        let mut c = Composer::new(11);
+        c.set_profile(Profile::VsIntense, 0.7);
+        let ctx = Context {
+            profile: Profile::VsIntense,
+            intensity: 0.7,
+            elapsed: 600.0,
+            ..Default::default()
+        };
+        let body = c.material.form.len() as u32 * BARS_PER_SECTION;
+        let mut out = Vec::new();
+        for _ in 0..body {
+            c.plan_bar(&ctx, &mut out);
+        }
+        let mut bars = Vec::new();
+        for _ in 0..OUTRO_BARS {
+            let mark = out.len();
+            c.plan_bar(&ctx, &mut out);
+            bars.push(out[mark..].to_vec());
+        }
+
+        // No melody anywhere in the outro: the top end is what drops first.
+        for (i, bar) in bars.iter().enumerate() {
+            assert!(
+                !bar.iter().any(|e| e.voice() == crate::Voice::Lead),
+                "outro bar {i} still has a melody"
+            );
+            assert!(
+                bar.iter().any(|e| e.inst == Inst::Bass),
+                "outro bar {i} lost the bass"
+            );
+        }
+        // It thins as it goes.
+        assert!(
+            bars[0].len() > bars[3].len(),
+            "the outro did not thin out ({} -> {})",
+            bars[0].len(),
+            bars[3].len()
+        );
+        // The last bar just rings.
+        assert!(bars[3].iter().any(|e| e.inst == Inst::Crash));
+        assert!(bars[3].iter().any(|e| e.inst == Inst::Bell));
+        assert!(!bars[3].iter().any(|e| e.inst == Inst::Kick));
+        // And the loop point is back in the home key.
+        assert_eq!(c.lift, 0);
     }
 
     #[test]

@@ -46,6 +46,19 @@ impl Mode {
         self.pitch(2) - self.pitch(0) == 3
     }
 
+    /// The nearest mode with a flat seventh, keeping the third as it is.
+    ///
+    /// The outro's pivot depends on the seventh degree sitting ten
+    /// semitones above the tonic; harmonic minor raises it to a leading
+    /// tone, which is exactly the wrong interval. Softening the mode for
+    /// four bars of wind-down costs nothing.
+    pub fn with_flat_seventh(self) -> Mode {
+        if self.pitch(6) == 10 {
+            return self;
+        }
+        if self.is_minor() { Mode::Aeolian } else { Mode::Mixolydian }
+    }
+
     /// English name for the "now playing" toast.
     pub fn name(self) -> &'static str {
         match self {
@@ -241,6 +254,28 @@ mod tests {
         assert_eq!(Mode::Aeolian.pitch(2), 3);
         assert!(Mode::Aeolian.is_minor());
         assert!(!Mode::Ionian.is_minor());
+    }
+
+    #[test]
+    fn flattening_the_seventh_keeps_the_third() {
+        for m in [
+            Mode::Lydian,
+            Mode::Ionian,
+            Mode::Mixolydian,
+            Mode::Dorian,
+            Mode::Aeolian,
+            Mode::Phrygian,
+            Mode::HarmonicMinor,
+            Mode::PhrygianDominant,
+        ] {
+            let f = m.with_flat_seventh();
+            assert_eq!(f.pitch(6), 10, "{m:?} -> {f:?} still has a leading tone");
+            assert_eq!(f.is_minor(), m.is_minor(), "{m:?} changed quality");
+        }
+        // Modes that already have one are left alone.
+        assert_eq!(Mode::Dorian.with_flat_seventh(), Mode::Dorian);
+        assert_eq!(Mode::HarmonicMinor.with_flat_seventh(), Mode::Aeolian);
+        assert_eq!(Mode::Ionian.with_flat_seventh(), Mode::Mixolydian);
     }
 
     #[test]
