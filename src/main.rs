@@ -61,7 +61,8 @@ fn main() -> AppExit {
         // Dev helpers: BEVYTRIS_SCREEN=settings|solo|stages|zones|custom|
         // playing skips the title menu, BEVYTRIS_MODE=sprint|dig|zone|
         // custom|vs-stage-N|vs-easy|vs-normal|vs-hard preselects the game
-        // mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages.
+        // mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages, and
+        // BEVYTRIS_ZONE_CHARGE=1 starts zone gauges full.
         .insert_state(match std::env::var("BEVYTRIS_SCREEN").as_deref() {
             Ok("settings") => AppState::Settings,
             Ok("solo") => AppState::SoloSelect,

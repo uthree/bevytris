@@ -42,6 +42,7 @@ impl Plugin for EffectsPlugin {
                     map_events_to_effects.run_if(in_state(AppState::Playing)),
                     update_particles,
                     update_banners,
+                    update_zone_tally,
                     update_flashes,
                     update_shockwaves,
                     update_streaks,
@@ -394,6 +395,119 @@ fn update_banners(
         tf.translation.y += 34.0 * dt;
         let alpha = if t > 0.6 { 1.0 - (t - 0.6) / 0.4 } else { 1.0 };
         color.0.set_alpha(alpha);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Zone payout tally: a board-covering line count
+// ---------------------------------------------------------------------------
+
+/// One element of the zone-end payout display: a gold sheet washing over
+/// the whole board plus a giant line count that slams in, holds, and
+/// bursts away. Text elements scale-animate; the sheet only fades.
+#[derive(Component)]
+struct ZoneTally {
+    life: f32,
+    max_life: f32,
+}
+
+fn spawn_zone_tally(
+    commands: &mut Commands,
+    bar: &Handle<Image>,
+    center: Vec2,
+    board_size: Vec2,
+    lines: u32,
+) {
+    let gold = Color::srgb(1.0, 0.85, 0.25);
+    let life = 1.7;
+    let tally = || ZoneTally { life, max_life: life };
+    // Gold sheet over the entire playfield.
+    commands.spawn((
+        Sprite {
+            image: bar.clone(),
+            custom_size: Some(board_size * 1.08),
+            color: emissive(gold, 1.5).with_alpha(0.0),
+            ..default()
+        },
+        Transform::from_translation(center.extend(38.0)),
+        tally(),
+        DespawnOnExit(AppState::Playing),
+    ));
+    // The number, sized to span most of the board.
+    commands.spawn((
+        Text2d::new(lines.to_string()),
+        TextFont {
+            font_size: FontSize::Px(board_size.y * 0.42),
+            ..default()
+        },
+        TextColor(emissive(gold, 2.1)),
+        Transform::from_translation((center + Vec2::new(0.0, board_size.y * 0.07)).extend(41.0))
+            .with_scale(Vec3::splat(3.2)),
+        tally(),
+        DespawnOnExit(AppState::Playing),
+    ));
+    commands.spawn((
+        Text2d::new("LINES"),
+        TextFont {
+            font_size: FontSize::Px(board_size.y * 0.09),
+            ..default()
+        },
+        TextColor(emissive(Color::WHITE, 1.6)),
+        Transform::from_translation((center - Vec2::new(0.0, board_size.y * 0.24)).extend(41.0))
+            .with_scale(Vec3::splat(3.2)),
+        tally(),
+        DespawnOnExit(AppState::Playing),
+    ));
+}
+
+fn update_zone_tally(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut query: Query<(
+        Entity,
+        &mut ZoneTally,
+        &mut Transform,
+        Option<&mut Sprite>,
+        Option<&mut TextColor>,
+    )>,
+) {
+    let dt = time.delta_secs();
+    let elapsed = time.elapsed_secs();
+    for (entity, mut tally, mut tf, sprite, text) in &mut query {
+        tally.life -= dt;
+        if tally.life <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let t = 1.0 - tally.life / tally.max_life;
+        if let Some(mut text) = text {
+            // Slam in from huge, hold with a heartbeat, burst away.
+            let scale = if t < 0.14 {
+                let k = 1.0 - t / 0.14;
+                1.0 + 2.2 * k * k * k
+            } else if t < 0.78 {
+                1.0 + 0.05 * (elapsed * 11.0).sin().abs()
+            } else {
+                1.0 + (t - 0.78) / 0.22 * 0.5
+            };
+            tf.scale = Vec3::splat(scale);
+            let alpha = if t < 0.06 {
+                t / 0.06
+            } else if t > 0.78 {
+                1.0 - (t - 0.78) / 0.22
+            } else {
+                1.0
+            };
+            text.0.set_alpha(alpha);
+        } else if let Some(mut sprite) = sprite {
+            // The sheet flares fast, then bleeds out over the hold.
+            let alpha = if t < 0.08 {
+                t / 0.08 * 0.5
+            } else {
+                0.5 * (1.0 - (t - 0.08) / 0.92)
+            };
+            sprite.color.set_alpha(alpha);
+        }
     }
 }
 
@@ -988,43 +1102,42 @@ fn map_events_to_effects(
             GameEvent::ZoneEnded { lines, attack } => {
                 if *lines > 0 {
                     // Payday: fanfare, gold flash, confetti scaled by the
-                    // haul, and a heavy slam.
+                    // haul, a heavy slam — and the line count filling the
+                    // entire board (sheet + giant number + burst-away).
                     play(if *lines >= 8 { Sfx::Clear(4) } else { Sfx::TSpinClear }, gain);
                     let gold = Color::srgb(1.0, 0.85, 0.25);
                     pulse_frame(&mut glows, msg.board, gold, 1.0);
                     spawn_shockwave(&mut commands, center, gold, true);
+                    spawn_shockwave(&mut commands, center, Color::WHITE, true);
                     spawn_burst(
                         &mut commands,
                         &glow_tex,
                         center,
                         gold,
-                        40 + 10 * *lines as usize,
-                        480.0,
+                        (40 + 14 * *lines as usize).min(180),
+                        520.0,
                         14.0,
                         0.9,
                         140.0,
                     );
-                    let h = theme.cell * VISIBLE_HEIGHT as f32;
+                    let board_size = Vec2::new(
+                        theme.cell * BOARD_WIDTH as f32,
+                        theme.cell * VISIBLE_HEIGHT as f32,
+                    );
+                    spawn_zone_tally(&mut commands, &bar_tex, center, board_size, *lines);
                     spawn_confetti_wave(
                         &mut commands,
                         center,
-                        center.y + h / 2.0,
-                        (20 + 8 * *lines as usize).min(120),
-                    );
-                    spawn_banner(
-                        &mut commands,
-                        center + Vec2::new(0.0, 40.0),
-                        format!("{lines} LINES!"),
-                        gold,
-                        theme.cell * 1.5,
+                        center.y + board_size.y / 2.0,
+                        (30 + 12 * *lines as usize).min(160),
                     );
                     if let Ok(mut kick) = kicks.get_mut(msg.board) {
                         kick.impulse(Vec2::new(0.0, -160.0));
                     }
                     if index.0 == 0 {
-                        spawn_flash(&mut commands, gold, 0.3, 0.7);
-                        shake.add(0.35 + *lines as f32 * 0.05);
-                        surge.0 = surge.0.max(8.0);
+                        spawn_flash(&mut commands, gold, 0.34, 0.8);
+                        shake.add(0.4 + *lines as f32 * 0.06);
+                        surge.0 = 9.0;
                     }
                     if *attack > 0 && boards.iter().count() > 1 {
                         play(Sfx::GarbageWarn, 0.8);
@@ -1049,20 +1162,41 @@ fn map_events_to_effects(
                 }
             }
             GameEvent::GarbageRose { rows } => {
-                play(Sfx::GarbageRise, gain);
-                pulse_frame(
-                    &mut glows,
-                    msg.board,
-                    Color::srgb(1.0, 0.2, 0.2),
-                    0.5 + *rows as f32 * 0.06,
+                // Everything here scales with the wave: one row is a light
+                // bump, a full 8-row slam rattles the whole screen.
+                let r = *rows as f32;
+                let heavy = *rows >= 4;
+                let red = Color::srgb(1.0, 0.2, 0.2);
+                play(Sfx::GarbageRise(*rows), gain);
+                pulse_frame(&mut glows, msg.board, red, 0.35 + 0.09 * r);
+                // Debris thrown up from the bottom edge where the rows
+                // punched in (negative gravity: it flies upward).
+                let h = theme.cell * VISIBLE_HEIGHT as f32;
+                spawn_burst(
+                    &mut commands,
+                    &glow_tex,
+                    center + Vec2::new(0.0, -h / 2.0),
+                    Color::srgb(1.0, 0.35, 0.25),
+                    6 + 5 * *rows as usize,
+                    140.0 + 40.0 * r,
+                    9.0,
+                    0.5,
+                    -220.0,
                 );
                 // The rising garbage shoves the board upward (both boards —
                 // it reads as the stack physically pushing in).
                 if let Ok(mut kick) = kicks.get_mut(msg.board) {
-                    kick.impulse(Vec2::new(0.0, 75.0 + *rows as f32 * 8.0));
+                    kick.impulse(Vec2::new(0.0, 55.0 + 22.0 * r));
+                }
+                if heavy {
+                    // A big wave is a hit in its own right.
+                    spawn_shockwave(&mut commands, center, red, *rows >= 6);
                 }
                 if index.0 == 0 {
-                    shake.add(0.1 + *rows as f32 * 0.04);
+                    shake.add(0.05 + 0.055 * r);
+                    if heavy {
+                        spawn_flash(&mut commands, red, 0.10 + 0.025 * r, 0.45);
+                    }
                 }
             }
             GameEvent::TopOut => {

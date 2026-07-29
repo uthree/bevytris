@@ -88,6 +88,13 @@ fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
         }
         GameMode::Single => {}
     }
+    // Dev helper: BEVYTRIS_ZONE_CHARGE=1 starts every zone gauge full so
+    // zone flows can be tested without earning the charge first.
+    if std::env::var("BEVYTRIS_ZONE_CHARGE").is_ok() {
+        if let Some(zone) = &mut game.zone {
+            zone.charge = 1.0;
+        }
+    }
     game
 }
 

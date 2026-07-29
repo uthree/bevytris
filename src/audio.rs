@@ -37,7 +37,8 @@ pub enum Sfx {
     Combo(u32),
     LevelUp,
     GarbageWarn,
-    GarbageRise,
+    /// Garbage rows hit the board; bigger waves land louder and deeper.
+    GarbageRise(u32),
     Countdown,
     Go,
     GameOver,
@@ -133,7 +134,13 @@ impl SfxBank {
             }
             Sfx::LevelUp => (self.level_up.clone(), 0.9, 1.0),
             Sfx::GarbageWarn => (self.garbage_warn.clone(), 0.7, 1.0),
-            Sfx::GarbageRise => (self.garbage_rise.clone(), 0.85, 1.0),
+            Sfx::GarbageRise(rows) => {
+                // 1 row: a light thump. 8 rows: a loud, pitched-down slam.
+                let r = rows.clamp(1, 8) as f32;
+                let gain = (0.55 + 0.11 * r).min(1.4);
+                let speed = (1.12 - 0.06 * r).max(0.62);
+                (self.garbage_rise.clone(), gain, speed)
+            }
             Sfx::Countdown => (self.countdown.clone(), 0.7, 1.0),
             Sfx::Go => (self.go.clone(), 0.9, 1.0),
             Sfx::GameOver => (self.game_over.clone(), 0.9, 1.0),
