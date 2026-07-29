@@ -152,6 +152,10 @@ pub struct Strings {
     /// `metadata.json` and are deliberately not translated here — they
     /// belong to whoever authored the pack.
     pub select_character: &'static str,
+    /// Second pass of the picker, when a custom match also needs a face
+    /// for the other board.
+    pub select_character_p2: &'static str,
+    pub select_character_cpu: &'static str,
     pub no_characters: &'static str,
     pub characters_hint: &'static str,
     pub character_problems: &'static str,
@@ -328,6 +332,8 @@ pub const EN: Strings = Strings {
     zen_resets: "RESETS",
     select_stage: "SELECT STAGE",
     select_character: "SELECT CHARACTER",
+    select_character_p2: "SELECT 2P CHARACTER",
+    select_character_cpu: "SELECT CPU CHARACTER",
     no_characters: "NO CHARACTERS INSTALLED",
     characters_hint: "Drop a folder into assets/characters to add one    ENTER: continue    ESC: back",
     character_problems: "{n} CHARACTER PROBLEM(S) - SEE THE CONSOLE LOG",
@@ -479,6 +485,8 @@ pub const JA: Strings = Strings {
     zen_resets: "リセット",
     select_stage: "ステージ選択",
     select_character: "キャラクター選択",
+    select_character_p2: "2Pのキャラクター選択",
+    select_character_cpu: "CPUのキャラクター選択",
     no_characters: "キャラクターが入っていません",
     characters_hint: "assets/characters にフォルダを置くと追加できます    ENTER: 続行    ESC: 戻る",
     character_problems: "キャラクターに{n}件の問題あり - コンソールログを確認",

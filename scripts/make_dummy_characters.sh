@@ -89,6 +89,8 @@ STANDING_W=512
 STANDING_H=1024
 CUTIN_W=1024
 CUTIN_H=512
+ICON_W=256
+ICON_H=256
 
 # The twelve voice kinds, with the English and Japanese line for each.
 # "kind|english|japanese" — bash 3.2 has no associative arrays.
@@ -176,6 +178,55 @@ cutin_svg() {
   <text x="512" y="230" font-family="$name_font" font-size="96" fill="$text" text-anchor="middle">$name</text>
   <text x="512" y="345" font-family="$FONT_ASCII" font-size="80" fill="$accent" text-anchor="middle">CUT-IN</text>
   <text x="512" y="425" font-family="$FONT_ASCII" font-size="36" fill="$muted" text-anchor="middle">${CUTIN_W}x${CUTIN_H}</text>
+</svg>
+SVG
+}
+
+# icon_svg <name1> <name-font> <body> <accent> <head> <text>
+# Square art for the character picker tile.
+icon_svg() {
+  local name1="$1" name_font="$2" body="$3" accent="$4" head="$5" text="$6"
+  cat <<SVG
+<svg xmlns="http://www.w3.org/2000/svg" width="$ICON_W" height="$ICON_H" viewBox="0 0 $ICON_W $ICON_H">
+  <rect x="6" y="6" width="244" height="244" rx="24" fill="$body" stroke="$accent" stroke-width="6"/>
+  <circle cx="128" cy="104" r="62" fill="$head" stroke="$accent" stroke-width="5"/>
+  <circle cx="106" cy="94" r="9" fill="$text"/>
+  <circle cx="150" cy="94" r="9" fill="$text"/>
+  <text x="128" y="212" font-family="$name_font" font-size="44" fill="$text" text-anchor="middle">$name1</text>
+</svg>
+SVG
+}
+
+# result_svg <won:win|lose> <name1> <name-font> <body> <accent> <head> <text> <muted>
+# The pose held while the result is on screen. Deliberately a different
+# shape from the standing art so a swap that does not happen is obvious.
+result_svg() {
+  local outcome="$1" name1="$2" name_font="$3" body="$4" accent="$5" head="$6" text="$7" muted="$8"
+  local word mouth arms
+  if [ "$outcome" = "win" ]; then
+    word="WIN"
+    mouth='<path d="M 206 250 Q 256 300 306 250" fill="none" stroke="'"$text"'" stroke-width="12"/>'
+    # Both arms up.
+    arms='<polygon points="120,430 176,380 216,470 176,520"  fill="'"$accent"'"/>
+    <polygon points="392,430 336,380 296,470 336,520" fill="'"$accent"'"/>'
+  else
+    word="LOSE"
+    mouth='<path d="M 206 290 Q 256 240 306 290" fill="none" stroke="'"$text"'" stroke-width="12"/>'
+    # Both arms down.
+    arms='<polygon points="120,560 176,610 216,520 176,470" fill="'"$accent"'"/>
+    <polygon points="392,560 336,610 296,520 336,470" fill="'"$accent"'"/>'
+  fi
+  cat <<SVG
+<svg xmlns="http://www.w3.org/2000/svg" width="$STANDING_W" height="$STANDING_H" viewBox="0 0 $STANDING_W $STANDING_H">
+  <rect x="16" y="16" width="480" height="992" rx="28" fill="$body" stroke="$accent" stroke-width="10"/>
+  <circle cx="256" cy="220" r="120" fill="$head" stroke="$accent" stroke-width="6"/>
+  <circle cx="216" cy="190" r="17" fill="$text"/>
+  <circle cx="296" cy="190" r="17" fill="$text"/>
+  $mouth
+  $arms
+  <text x="256" y="720" font-family="$FONT_ASCII" font-size="120" fill="$accent" text-anchor="middle">$word</text>
+  <text x="256" y="830" font-family="$name_font" font-size="60" fill="$text" text-anchor="middle">$name1</text>
+  <text x="256" y="900" font-family="$FONT_ASCII" font-size="34" fill="$muted" text-anchor="middle">result pose</text>
 </svg>
 SVG
 }
@@ -464,6 +515,14 @@ make_character() {
   done
   cutin_svg "$display_name" "$name_font" "$body" "$accent" "$text" "$muted" > "$tmp_svg"
   render_svg "$tmp_svg" "$dir/images/cutin.png" "$CUTIN_W" "$CUTIN_H"
+  icon_svg "$name1" "$name_font" "$body" "$accent" "$head" "$text" > "$tmp_svg"
+  render_svg "$tmp_svg" "$dir/images/icon.png" "$ICON_W" "$ICON_H"
+  local outcome
+  for outcome in win lose; do
+    result_svg "$outcome" "$name1" "$name_font" \
+      "$body" "$accent" "$head" "$text" "$muted" > "$tmp_svg"
+    render_svg "$tmp_svg" "$dir/images/$outcome.png" "$STANDING_W" "$STANDING_H"
+  done
   /bin/rm -f "$tmp_svg"
 
   local entry kind en ja line
@@ -473,7 +532,7 @@ make_character() {
     speak "$voice" "$line" "$dir/voices/$kind.wav"
   done
 
-  echo "  $id: metadata.json, 3 images, $(echo "$VOICE_LINES" | grep -c '|') voices ($voice)"
+  echo "  $id: metadata.json, 6 images, $(echo "$VOICE_LINES" | grep -c '|') voices ($voice)"
 }
 
 make_all() {

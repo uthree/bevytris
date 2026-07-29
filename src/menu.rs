@@ -102,6 +102,11 @@ struct StageFooter;
 #[derive(Component)]
 struct CharacterFooter;
 
+/// The character picker's heading, which changes between the two passes a
+/// custom match needs.
+#[derive(Component)]
+struct CharacterTitle;
+
 /// Bottom-of-screen line describing the focused menu item (title / solo
 /// picker).
 #[derive(Component)]
@@ -170,7 +175,8 @@ impl Plugin for MenuPlugin {
                     refresh_stage_footer.run_if(
                         in_state(AppState::StageSelect).or_else(in_state(AppState::ZoneSelect)),
                     ),
-                    refresh_character_footer.run_if(in_state(AppState::CharacterSelect)),
+                    (refresh_character_footer, refresh_character_title)
+                        .run_if(in_state(AppState::CharacterSelect)),
                     refresh_menu_footer
                         .run_if(in_state(AppState::Title).or_else(in_state(AppState::SoloSelect))),
                 )
@@ -476,6 +482,7 @@ fn setup_character_select(
     issues: Res<crate::character::CharacterIssues>,
     settings: Res<GameSettings>,
     locale: Res<Locale>,
+    asset_server: Res<AssetServer>,
 ) {
     let s = locale.s();
     // Open on whoever they played last.
@@ -489,6 +496,7 @@ fn setup_character_select(
         .with_children(|parent| {
             parent.spawn((
                 Text::new(s.select_character),
+                CharacterTitle,
                 TextFont {
                     font_size: FontSize::Px(40.0),
                     ..default()
@@ -546,6 +554,19 @@ fn setup_character_select(
                             } else {
                                 format!("{} !", character.ascii_name)
                             };
+                            let text_color = if character.issues.is_empty() {
+                                Color::srgb(0.9, 0.93, 1.0)
+                            } else {
+                                Color::srgb(1.0, 0.72, 0.35)
+                            };
+                            // icon.png if the pack drew one, otherwise the
+                            // standing art — a name on its own tells you
+                            // nothing about who you are picking.
+                            let art = character
+                                .icon
+                                .as_deref()
+                                .or_else(|| character.standing_for(0))
+                                .map(|path| asset_server.load::<Image>(path.to_string()));
                             grid.spawn((
                                 Button,
                                 MenuItem {
@@ -554,28 +575,44 @@ fn setup_character_select(
                                 },
                                 Node {
                                     width: px(160),
-                                    height: px(52),
+                                    height: px(132),
+                                    flex_direction: FlexDirection::Column,
                                     align_items: AlignItems::Center,
                                     justify_content: JustifyContent::Center,
+                                    row_gap: px(4),
+                                    padding: UiRect::all(px(4)),
                                     border: UiRect::all(px(2)),
                                     ..default()
                                 },
                                 BackgroundColor(Color::srgba(0.08, 0.1, 0.16, 0.85)),
                                 BorderColor::all(Color::NONE),
-                                children![(
+                            ))
+                            .with_children(|tile| {
+                                if let Some(image) = art {
+                                    // Fixed height, automatic width: the
+                                    // tile keeps whatever aspect the pack
+                                    // drew instead of squashing it.
+                                    tile.spawn((
+                                        ImageNode::new(image),
+                                        Node {
+                                            height: px(84),
+                                            max_width: px(148),
+                                            ..default()
+                                        },
+                                        Pickable::IGNORE,
+                                    ));
+                                }
+                                tile.spawn((
                                     Text::new(label),
                                     MenuItemLabel,
                                     TextFont {
                                         font_size: FontSize::Px(16.0),
                                         ..default()
                                     },
-                                    TextColor(if character.issues.is_empty() {
-                                        Color::srgb(0.9, 0.93, 1.0)
-                                    } else {
-                                        Color::srgb(1.0, 0.72, 0.35)
-                                    }),
-                                )],
-                            ));
+                                    TextColor(text_color),
+                                    Pickable::IGNORE,
+                                ));
+                            });
                         }
                     });
             }
@@ -626,6 +663,37 @@ fn setup_character_select(
                 ));
             }
         });
+}
+
+/// True while the picker is on its second pass, choosing for the other
+/// board. Only a custom match asks — everywhere else the opponent is the
+/// stage's, and picking their face would be picking their identity.
+fn picking_opponent(mode: &GameMode, chosen: &crate::character::MatchCharacters) -> bool {
+    *mode == GameMode::Custom && chosen.sides[0].is_some()
+}
+
+/// Relabel the heading for whichever side is being chosen.
+fn refresh_character_title(
+    mode: Res<GameMode>,
+    chosen: Res<crate::character::MatchCharacters>,
+    settings: Res<GameSettings>,
+    locale: Res<Locale>,
+    mut texts: Query<&mut Text, With<CharacterTitle>>,
+) {
+    let Ok(mut text) = texts.single_mut() else {
+        return;
+    };
+    let s = locale.s();
+    let line = if !picking_opponent(&mode, &chosen) {
+        s.select_character
+    } else if settings.custom.opponent == crate::config::Opponent::Human {
+        s.select_character_p2
+    } else {
+        s.select_character_cpu
+    };
+    if **text != line {
+        **text = line.to_string();
+    }
 }
 
 /// Flavour text for the focused character.
@@ -1729,13 +1797,19 @@ fn menu_keyboard_nav(
     let right = keys.just_pressed(KeyCode::ArrowRight) || pad.just_pressed(PadAction::Right);
     let left = keys.just_pressed(KeyCode::ArrowLeft) || pad.just_pressed(PadAction::Left);
 
+    // A grid whose whole roster fits on one row has no rows to jump
+    // between, so vertical movement walks one tile at a time instead.
+    // Without this, `count - step` underflows — 30 stages over 6 columns
+    // never could, but a picker with two characters over four columns
+    // does, and in a debug build that is a panic rather than a wrap.
+    let vstep = if count <= step { 1 } else { step };
     let mut moved = false;
     if down {
-        cursor.0 = (cursor.0 + step) % count;
+        cursor.0 = (cursor.0 + vstep) % count;
         moved = true;
     }
     if up {
-        cursor.0 = (cursor.0 + count - step) % count;
+        cursor.0 = (cursor.0 as i64 - vstep as i64).rem_euclid(count as i64) as usize;
         moved = true;
     }
     if grid {
@@ -1773,7 +1847,7 @@ fn menu_keyboard_nav(
         .iter()
         .find(|(_, item, _)| item.index == cursor.0)
         .map(|(_, item, _)| item.action);
-    run_menu_action(selected, confirm, adjust, back, activate, sfx);
+    run_menu_action(selected, confirm, adjust, back, activate, sfx, &mut cursor);
 }
 
 fn menu_mouse(
@@ -1807,7 +1881,7 @@ fn menu_mouse(
         }
     }
     if clicked.is_some() {
-        run_menu_action(clicked, true, 0, false, activate, sfx);
+        run_menu_action(clicked, true, 0, false, activate, sfx, &mut cursor);
     }
 }
 
@@ -1837,6 +1911,9 @@ fn open_picker(p: &mut MenuActivateParams, from: AppState) {
     p.next_app.set(AppState::CharacterSelect);
 }
 
+/// `cursor` is passed in rather than living in [`MenuActivateParams`]:
+/// both callers already hold it, and a system that asked for it twice
+/// would fail to initialize.
 fn run_menu_action(
     action: Option<MenuAction>,
     confirm: bool,
@@ -1844,12 +1921,21 @@ fn run_menu_action(
     back: bool,
     mut p: MenuActivateParams,
     mut sfx: MessageWriter<PlaySfx>,
+    cursor: &mut MenuCursor,
 ) {
     if back {
         // The picker is a detour on the way into a match, so escaping it
         // returns to whichever screen sent us here.
         if *p.app_state.get() == AppState::CharacterSelect {
             sfx.write(PlaySfx::new(Sfx::MenuBack));
+            // On the second pass, step back to the first rather than out
+            // of the screen: the player is mid-decision, not leaving.
+            if picking_opponent(&p.mode, &p.characters) {
+                let back_to = p.characters.sides[0].unwrap_or(0);
+                p.characters.sides = [None, None];
+                cursor.0 = back_to;
+                return;
+            }
             p.next_app.set(p.picker_return.0);
             return;
         }
@@ -2070,14 +2156,28 @@ fn run_menu_action(
                 return;
             }
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
-            // The opponent is left unset: `resolve_match_characters` fills
-            // it in deterministically from the mode on the way into the
-            // match, so a restart keeps the same pairing.
+            if picking_opponent(&p.mode, &p.characters) {
+                p.characters.sides[1] = Some(index);
+                p.next_app.set(AppState::Playing);
+                return;
+            }
+            // Only the player's own pick is remembered across sessions;
+            // who they set up as an opponent is per-match.
             p.characters.sides = [Some(index), None];
             if let Some(character) = p.roster.get(index) {
                 p.settings.character = character.id.clone();
                 save_settings(&p.settings);
             }
+            if *p.mode == GameMode::Custom {
+                // Stay here for the other side. The cursor starts on the
+                // player's pick, which is the likeliest neighbour of what
+                // they want next.
+                cursor.0 = index;
+                return;
+            }
+            // Everywhere else the opponent is left unset and
+            // `resolve_match_characters` fills it in deterministically on
+            // the way into the match, so a restart keeps the same pairing.
             p.next_app.set(AppState::Playing);
         }
         MenuAction::Jukebox => {
@@ -2565,6 +2665,7 @@ mod picker_tests {
         app.init_resource::<GameMode>()
             .init_resource::<Rebinding>()
             .init_resource::<PickerReturn>()
+            .init_resource::<MenuCursor>()
             .init_resource::<MatchCharacters>()
             .init_resource::<Progress>()
             .insert_resource(GameSettings::default())
@@ -2576,8 +2677,10 @@ mod picker_tests {
     fn confirm(app: &mut App, action: MenuAction) {
         app.world_mut()
             .run_system_once(
-                move |p: MenuActivateParams, sfx: MessageWriter<PlaySfx>| {
-                    run_menu_action(Some(action), true, 0, false, p, sfx);
+                move |p: MenuActivateParams,
+                      sfx: MessageWriter<PlaySfx>,
+                      mut cursor: ResMut<MenuCursor>| {
+                    run_menu_action(Some(action), true, 0, false, p, sfx, &mut cursor);
                 },
             )
             .expect("the action system ran");
@@ -2585,9 +2688,13 @@ mod picker_tests {
 
     fn escape(app: &mut App) {
         app.world_mut()
-            .run_system_once(|p: MenuActivateParams, sfx: MessageWriter<PlaySfx>| {
-                run_menu_action(None, false, 0, true, p, sfx);
-            })
+            .run_system_once(
+                |p: MenuActivateParams,
+                 sfx: MessageWriter<PlaySfx>,
+                 mut cursor: ResMut<MenuCursor>| {
+                    run_menu_action(None, false, 0, true, p, sfx, &mut cursor);
+                },
+            )
             .expect("the back system ran");
     }
 
@@ -2596,6 +2703,31 @@ mod picker_tests {
             NextState::Pending(state) => Some(*state),
             _ => None,
         }
+    }
+
+    #[test]
+    fn the_menu_systems_can_all_initialize() {
+        // A system that asks for the same resource twice fails when it is
+        // *initialized*, which no amount of testing the functions
+        // themselves will catch: `run_menu_action` picking up a
+        // `MenuCursor` through `MenuActivateParams` while
+        // `menu_keyboard_nav` already held one took the game down on
+        // launch, and every other test in this file still passed.
+        //
+        // Initializing a system needs no resources to exist — only the
+        // types — so this is the whole check and none of the setup.
+        fn init<M, S: IntoSystem<(), (), M>>(system: S) {
+            let mut world = World::new();
+            IntoSystem::into_system(system).initialize(&mut world);
+        }
+        init(menu_keyboard_nav);
+        init(menu_mouse);
+        init(overlay_input);
+        init(setup_character_select);
+        init(refresh_character_footer);
+        init(refresh_character_title);
+        init(highlight_items);
+        init(refresh_settings_labels);
     }
 
     #[test]
@@ -2684,6 +2816,81 @@ mod picker_tests {
         // The opponent is left for the match to resolve deterministically.
         assert_eq!(app.world().resource::<MatchCharacters>().sides[1], None);
         assert_eq!(app.world().resource::<GameSettings>().character, "bob");
+    }
+
+    #[test]
+    fn a_custom_match_picks_both_sides() {
+        let mut app = world_on(AppState::CharacterSelect);
+        app.insert_resource(CharacterRoster(crate::character::test_roster(&[
+            "alice", "bob",
+        ])));
+        *app.world_mut().resource_mut::<GameMode>() = GameMode::Custom;
+
+        // First pass: the player's own side, and the screen stays put.
+        confirm(&mut app, MenuAction::Character(0));
+        assert_eq!(pending(&app), None, "it should ask for the other side");
+        assert_eq!(
+            app.world().resource::<MatchCharacters>().sides,
+            [Some(0), None]
+        );
+
+        // ESC steps back one pass rather than leaving the screen.
+        escape(&mut app);
+        assert_eq!(pending(&app), None);
+        assert_eq!(
+            app.world().resource::<MatchCharacters>().sides,
+            [None, None]
+        );
+
+        // Both passes through: now the match starts.
+        confirm(&mut app, MenuAction::Character(0));
+        confirm(&mut app, MenuAction::Character(1));
+        assert_eq!(pending(&app), Some(AppState::Playing));
+        assert_eq!(
+            app.world().resource::<MatchCharacters>().sides,
+            [Some(0), Some(1)]
+        );
+        // Only the player's own pick is remembered for next time.
+        assert_eq!(app.world().resource::<GameSettings>().character, "alice");
+    }
+
+    #[test]
+    fn only_a_custom_match_asks_twice() {
+        // Everywhere else the opponent belongs to the stage.
+        let mut app = world_on(AppState::CharacterSelect);
+        app.insert_resource(CharacterRoster(crate::character::test_roster(&["alice"])));
+        *app.world_mut().resource_mut::<GameMode>() = GameMode::VsCpu { stage: 3 };
+        confirm(&mut app, MenuAction::Character(0));
+        assert_eq!(pending(&app), Some(AppState::Playing));
+        assert_eq!(
+            app.world().resource::<MatchCharacters>().sides,
+            [Some(0), None],
+            "the opponent is resolved on the way into the match"
+        );
+    }
+
+    #[test]
+    fn a_short_roster_can_still_be_navigated() {
+        // The grid step is a whole row wide, so a roster shorter than one
+        // row used to underflow the wrap — a panic in a debug build, on the
+        // very first Up press of a fresh install.
+        for count in 1..=(CHARACTER_COLUMNS * 2 + 1) {
+            let vstep = if count <= CHARACTER_COLUMNS {
+                1
+            } else {
+                CHARACTER_COLUMNS
+            };
+            for cursor in 0..count {
+                let up = (cursor as i64 - vstep as i64).rem_euclid(count as i64) as usize;
+                let down = (cursor + vstep) % count;
+                assert!(up < count, "up left the grid: {count} items, cursor {cursor}");
+                assert!(down < count, "down left the grid");
+            }
+            // And with a single row, up and down still move somewhere.
+            if count > 1 && count <= CHARACTER_COLUMNS {
+                assert_ne!(vstep % count, 0, "a single row must still move");
+            }
+        }
     }
 
     #[test]

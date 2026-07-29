@@ -33,6 +33,7 @@ use bevy::sprite::Anchor;
 use serde::Deserialize;
 
 use crate::config::GameSettings;
+use crate::i18n::Locale;
 use crate::core::game::{ClearKind, GameEvent, LineClear};
 use crate::emissive;
 use crate::render::BoardTheme;
@@ -209,6 +210,11 @@ pub struct Character {
     /// Facing right, then facing left.
     pub standing: [Option<String>; 2],
     pub cutin: Option<String>,
+    /// The pose held while the result is on screen: winning, then losing.
+    /// Optional — a pack with neither keeps standing still.
+    pub result: [Option<String>; 2],
+    /// Square-ish art for the picker tile.
+    pub icon: Option<String>,
     pub voices: Vec<Option<String>>,
     pub portrait_alpha: f32,
     pub voice_gain: f32,
@@ -222,6 +228,16 @@ impl Character {
         self.voices
             .get(kind as usize)
             .and_then(|v| v.as_deref())
+    }
+
+    /// The winning or losing pose, falling back to however they were
+    /// already standing.
+    pub fn result_art(&self, slot: usize, won: bool) -> Option<&str> {
+        let want = usize::from(!won);
+        self.result[want]
+            .as_deref()
+            .or(self.result[1 - want].as_deref())
+            .or_else(|| self.standing_for(slot))
     }
 
     /// The art for a character standing on board `slot`: the left-hand
@@ -389,6 +405,8 @@ fn finalize(id: &str, meta: CharacterMeta, issues: &mut Vec<String>) -> Characte
         author: meta.author.as_deref().map(|a| sanitize_text(a, 32)).unwrap_or_default(),
         standing: [None, None],
         cutin: None,
+        result: [None, None],
+        icon: None,
         voices: vec![None; VoiceKind::ALL.len()],
         portrait_alpha: clamp_or(meta.portrait_alpha, PORTRAIT_ALPHA_DEFAULT, 0.05, 0.45),
         voice_gain: clamp_or(meta.voice_gain, 1.0, 0.2, 2.0),
@@ -428,6 +446,80 @@ fn png_dimensions(head: &[u8]) -> Option<(u32, u32)> {
 /// anything else under `voices/` would decode to silence with no clue why.
 fn is_riff_wave(head: &[u8]) -> bool {
     head.len() >= 12 && &head[..4] == b"RIFF" && &head[8..12] == b"WAVE"
+}
+
+/// The WAVE format tags this build can actually play: uncompressed PCM and
+/// IEEE float. Anything else — mu-law, ADPCM, an mp3 in a RIFF wrapper —
+/// is a format the decoder will refuse.
+const WAVE_PCM: u16 = 1;
+const WAVE_IEEE_FLOAT: u16 = 3;
+const WAVE_EXTENSIBLE: u16 = 0xFFFE;
+
+/// Walk a RIFF file's chunk list and check that it is really playable.
+///
+/// A twelve-byte `RIFF....WAVE` sniff is not enough, and the shortfall is
+/// not cosmetic: bevy hands the bytes to `rodio::Decoder::new(..).unwrap()`
+/// at *playback* time, so a truncated download or a mu-law clip under
+/// `voices/` takes the whole game down mid-match. Since a pack is someone
+/// else's file, the only acceptable place to find that out is here.
+///
+/// Chunk payloads are skipped rather than read, which matters: `say` writes
+/// a four-kilobyte `FLLR` pad between `fmt ` and `data`, so the interesting
+/// headers are nowhere near the front of the file.
+fn wav_ok(path: &Path) -> Result<(), String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size > MAX_AUDIO_BYTES {
+        return Err(format!(
+            "{size} bytes is over the {MAX_AUDIO_BYTES} limit"
+        ));
+    }
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut head = [0u8; 12];
+    file.read_exact(&mut head)
+        .map_err(|_| "the file is too short to be a WAV".to_string())?;
+    if !is_riff_wave(&head) {
+        return Err("not a RIFF/WAVE file (this build decodes .wav only)".to_string());
+    }
+    let mut format: Option<u16> = None;
+    let mut have_data = false;
+    let mut at = 12u64;
+    // A malformed size field could otherwise walk this forever.
+    for _ in 0..64 {
+        if at + 8 > size {
+            break;
+        }
+        file.seek(SeekFrom::Start(at)).map_err(|e| e.to_string())?;
+        let mut header = [0u8; 8];
+        if file.read_exact(&mut header).is_err() {
+            break;
+        }
+        let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as u64;
+        match &header[..4] {
+            b"fmt " => {
+                let mut fmt = [0u8; 2];
+                file.read_exact(&mut fmt).map_err(|e| e.to_string())?;
+                format = Some(u16::from_le_bytes(fmt));
+            }
+            b"data" => have_data = true,
+            _ => {}
+        }
+        // Chunks are word-aligned, and an odd length is padded.
+        at += 8 + len + (len % 2);
+    }
+    match format {
+        None => Err("the WAV has no fmt chunk".to_string()),
+        Some(tag)
+            if tag != WAVE_PCM && tag != WAVE_IEEE_FLOAT && tag != WAVE_EXTENSIBLE =>
+        {
+            Err(format!(
+                "WAVE format {tag} is not uncompressed PCM; re-export as 16-bit PCM"
+            ))
+        }
+        Some(_) if !have_data => Err("the WAV has no data chunk".to_string()),
+        Some(_) => Ok(()),
+    }
 }
 
 /// Levenshtein distance, capped — only used to turn `tetriss.wav` into a
@@ -655,11 +747,26 @@ fn load_character(dir: &Path, id: &str, issues: &mut Vec<String>) -> Option<Char
         issues.append(&mut own);
         return None;
     }
-    let cutin = dir.join("images").join("cutin.png");
-    if cutin.exists() {
-        match image_ok(&cutin) {
-            Ok(()) => character.cutin = Some(asset_path(id, "images", "cutin.png")),
-            Err(why) => own.push(format!("{id}/cutin.png: {why}")),
+    for (file, slot) in [
+        ("cutin.png", None),
+        ("icon.png", None),
+        ("win.png", Some(0usize)),
+        ("lose.png", Some(1)),
+    ] {
+        let path = dir.join("images").join(file);
+        if !path.exists() {
+            continue;
+        }
+        match image_ok(&path) {
+            Ok(()) => {
+                let asset = asset_path(id, "images", file);
+                match (file, slot) {
+                    (_, Some(i)) => character.result[i] = Some(asset),
+                    ("icon.png", _) => character.icon = Some(asset),
+                    _ => character.cutin = Some(asset),
+                }
+            }
+            Err(why) => own.push(format!("{id}/{file}: {why}")),
         }
     }
 
@@ -673,13 +780,8 @@ fn load_character(dir: &Path, id: &str, issues: &mut Vec<String>) -> Option<Char
         if !path.exists() {
             continue;
         }
-        match peek(&path, MAX_AUDIO_BYTES, 12) {
-            Ok(head) if is_riff_wave(&head) => {
-                character.voices[i] = Some(asset_path(id, "voices", &file));
-            }
-            Ok(_) => own.push(format!(
-                "{id}/voices/{file}: not a RIFF/WAVE file (this build decodes .wav only)"
-            )),
+        match wav_ok(&path) {
+            Ok(()) => character.voices[i] = Some(asset_path(id, "voices", &file)),
             Err(why) => own.push(format!("{id}/voices/{file}: {why}")),
         }
     }
@@ -781,7 +883,10 @@ fn preload(character: &Character, server: &AssetServer, assets: &mut CharacterAs
     for path in character.standing.iter().flatten() {
         assets.image(server, path);
     }
-    if let Some(path) = &character.cutin {
+    for path in [&character.cutin, &character.icon].into_iter().flatten() {
+        assets.image(server, path);
+    }
+    for path in character.result.iter().flatten() {
         assets.image(server, path);
     }
     for path in character.voices.iter().flatten() {
@@ -902,7 +1007,27 @@ fn fit_portraits(
 /// exactly these moments. 20 clears the pause overlay (10) and stays under
 /// the BGM toast (30).
 const CUTIN_Z: i32 = 20;
-const CUTIN_LIFE: f32 = 0.9;
+
+/// How long the whole gesture lasts, and how much of that is the slide in
+/// and back out. It was under a second when the cut-in sat across the
+/// middle of the screen, where every extra frame was a frame of the field
+/// the player could not see. Down in the corner it costs nothing, so it
+/// now stays long enough to actually read the name on it.
+const CUTIN_LIFE: f32 = 2.0;
+const CUTIN_SLIDE_IN: f32 = 0.16;
+const CUTIN_SLIDE_OUT: f32 = 0.22;
+
+/// How tall the cut-in strip is, as a fraction of the window.
+///
+/// It lives along the bottom edge and nowhere else. The first version put
+/// a big card across the middle of the screen, which looked great and was
+/// unplayable: it covered the field for most of a second every time the
+/// player did the thing it was congratulating them for. The boards reach
+/// down to roughly 88% of the window in versus and 94% in solo, so a
+/// strip this size sits under the versus fields entirely and only grazes
+/// the very bottom of a solo one. A celebration must not cost the player
+/// the board.
+const CUTIN_HEIGHT: f32 = 12.0;
 /// A zone release also fires the gold line tally, which is the bigger
 /// moment; let it peak first.
 const CUTIN_DELAY_ZONE: f32 = 0.45;
@@ -911,12 +1036,16 @@ const CUTIN_DELAY_ZONE: f32 = 0.45;
 struct CutIn {
     life: f32,
     from_left: bool,
+    /// How loudly the moment on screen insists. Kept on the entity rather
+    /// than in the queue resource so it cannot outlive it: the cut-in is
+    /// `DespawnOnExit(AppState::Playing)`, and a flag in a resource would
+    /// stay latched when a restart takes the entity away mid-slide —
+    /// silently suppressing every later cut-in for the rest of the run.
+    priority: u8,
 }
 
 #[derive(Resource, Default)]
 struct CutInQueue {
-    /// What is on screen, if anything, and how loudly it insists.
-    active: Option<u8>,
     pending: Option<(f32, usize, CutInKind)>,
 }
 
@@ -933,13 +1062,18 @@ struct PlayVoice {
     kind: VoiceKind,
 }
 
-fn queue_cutins(mut reader: MessageReader<ShowCutIn>, mut queue: ResMut<CutInQueue>) {
+fn queue_cutins(
+    mut reader: MessageReader<ShowCutIn>,
+    mut queue: ResMut<CutInQueue>,
+    live: Query<&CutIn>,
+) {
+    let active = live.iter().map(|c| c.priority).max();
     for msg in reader.read() {
         let incoming = msg.kind.priority();
         // A smaller moment never interrupts a bigger one, and never waits
         // for it either — by the time it got its turn it would be
         // celebrating something the player has forgotten.
-        if queue.active.is_some_and(|active| active >= incoming) {
+        if active.is_some_and(|active| active >= incoming) {
             continue;
         }
         if queue
@@ -958,6 +1092,7 @@ fn spawn_cutins(
     time: Res<Time>,
     mut queue: ResMut<CutInQueue>,
     roster: Res<CharacterRoster>,
+    chosen: Res<MatchCharacters>,
     server: Res<AssetServer>,
     mut assets: ResMut<CharacterAssets>,
     live: Query<Entity, With<CutIn>>,
@@ -970,13 +1105,14 @@ fn spawn_cutins(
         return;
     }
     queue.pending = None;
-    let Some(character) = roster.get(slot) else {
+    // `slot` is a board, not a roster entry — the two only agree when the
+    // player happens to have picked the first character installed.
+    let Some(character) = chosen.sides[slot.min(1)].and_then(|i| roster.get(i)) else {
         return;
     };
     for entity in &live {
         commands.entity(entity).despawn();
     }
-    queue.active = Some(kind.priority());
     debug!("cut-in {kind:?} for {} on slot {slot}", character.id);
     let art = character
         .cutin
@@ -988,37 +1124,53 @@ fn spawn_cutins(
     let tint = kind.tint();
     commands
         .spawn((
+            // A transparent full-width strip along the bottom; the card
+            // inside it hugs the edge the character's own board is on, so
+            // the two sides never collide and neither covers a field.
             Node {
                 position_type: PositionType::Absolute,
                 left: percent(0),
-                top: percent(31),
+                bottom: percent(0),
                 width: percent(100),
-                height: percent(34),
-                align_items: AlignItems::Center,
+                height: percent(CUTIN_HEIGHT),
+                align_items: AlignItems::FlexEnd,
                 justify_content: if from_left {
                     JustifyContent::FlexStart
                 } else {
                     JustifyContent::FlexEnd
                 },
-                column_gap: px(18),
-                padding: UiRect::horizontal(px(28)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.02, 0.02, 0.05, 0.62)),
             GlobalZIndex(CUTIN_Z),
             Pickable::IGNORE,
             CutIn {
                 life: CUTIN_LIFE,
                 from_left,
+                priority: kind.priority(),
             },
             DespawnOnExit(AppState::Playing),
         ))
-        .with_children(|parent| {
+        .with_children(|strip| {
+            strip
+                .spawn((
+                    Node {
+                        height: percent(100),
+                        align_items: AlignItems::Center,
+                        column_gap: px(14),
+                        padding: UiRect::axes(px(16), px(6)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.02, 0.02, 0.05, 0.72)),
+                    Pickable::IGNORE,
+                ))
+                .with_children(|parent| {
             if let Some(image) = art {
                 parent.spawn((
+                    // Auto width against a fixed height keeps whatever
+                    // aspect the pack drew; bevy_ui measures the image.
                     ImageNode::new(image),
                     Node {
-                        height: percent(96),
+                        height: percent(94),
                         ..default()
                     },
                     Pickable::IGNORE,
@@ -1028,7 +1180,7 @@ fn spawn_cutins(
                 .spawn((
                     Node {
                         flex_direction: FlexDirection::Column,
-                        row_gap: px(6),
+                        row_gap: px(2),
                         ..default()
                     },
                     Pickable::IGNORE,
@@ -1037,7 +1189,7 @@ fn spawn_cutins(
                     text.spawn((
                         Text::new(kind.label()),
                         TextFont {
-                            font_size: FontSize::Px(34.0),
+                            font_size: FontSize::Px(22.0),
                             ..default()
                         },
                         TextColor(emissive(tint, 1.6)),
@@ -1045,11 +1197,12 @@ fn spawn_cutins(
                     text.spawn((
                         Text::new(character.display_name.clone()),
                         TextFont {
-                            font_size: FontSize::Px(22.0),
+                            font_size: FontSize::Px(15.0),
                             ..default()
                         },
                         TextColor(Color::srgb(0.85, 0.9, 1.0)),
                     ));
+                });
                 });
         });
 }
@@ -1060,28 +1213,28 @@ fn spawn_cutins(
 fn update_cutins(
     mut commands: Commands,
     time: Res<Time>,
-    mut queue: ResMut<CutInQueue>,
-    mut cutins: Query<(Entity, &mut CutIn, &mut Node, &mut BackgroundColor)>,
+    mut cutins: Query<(Entity, &mut CutIn, &mut Node)>,
 ) {
-    for (entity, mut cutin, mut node, mut bg) in &mut cutins {
+    for (entity, mut cutin, mut node) in &mut cutins {
         cutin.life -= time.delta_secs();
         if cutin.life <= 0.0 {
             commands.entity(entity).despawn();
-            queue.active = None;
             continue;
         }
-        let t = 1.0 - cutin.life / CUTIN_LIFE;
-        // 0.13 in, hold, 0.17 out — the same shape as the banners.
-        let travel = if t < 0.145 {
-            1.0 - t / 0.145
-        } else if t > 0.81 {
-            (t - 0.81) / 0.19
+        // Absolute seconds, not fractions of the life: the slide should
+        // look the same however long the card holds for.
+        let elapsed = CUTIN_LIFE - cutin.life;
+        let travel = if elapsed < CUTIN_SLIDE_IN {
+            1.0 - elapsed / CUTIN_SLIDE_IN
+        } else if cutin.life < CUTIN_SLIDE_OUT {
+            1.0 - cutin.life / CUTIN_SLIDE_OUT
         } else {
             0.0
         };
+        // The strip is transparent, so sliding it takes the card with it
+        // and nothing has to fade.
         let offset = travel * 110.0;
         node.left = percent(if cutin.from_left { -offset } else { offset });
-        bg.0.set_alpha(0.62 * (1.0 - travel));
     }
 }
 
@@ -1100,6 +1253,25 @@ struct VoiceSink {
     /// slot shut forever.
     life: f32,
 }
+
+/// Speech against one-shots.
+///
+/// The sound effects in this game are peak-normalized to -1 dBFS impacts;
+/// a spoken line is a long, low-crest-factor waveform whose *average*
+/// level is far below its peak, and macOS `say` output in particular sits
+/// well under the effects. Matching them by peak, which is what the shared
+/// `sfx_linear()` does, leaves the voice audibly quieter than the lock
+/// sound. This is the make-up gain for that, and it is applied before the
+/// per-character `voice_gain` so a pack can still trim itself.
+const VOICE_MAKEUP: f32 = 2.6;
+
+/// The loudest a line may end up, after every gain in the chain. Above
+/// this the mix starts clipping into the drums.
+const VOICE_CEILING: f32 = 2.2;
+
+/// How much quieter the other board is. Enough to place it across the
+/// room, not enough to lose the words.
+const OPPONENT_GAIN: f32 = 0.8;
 
 /// How long a line may hold its slot before the watchdog frees it.
 const VOICE_WATCHDOG: f32 = 4.0;
@@ -1128,6 +1300,11 @@ fn play_voices(
     sinks: Query<(Entity, &VoiceSink)>,
 ) {
     let base = settings.sfx_linear();
+    // Commands are deferred, so a sink spawned earlier in this same run is
+    // not in the query yet. Two events for one board in one frame is
+    // ordinary (a T-spin that clears nothing while garbage lands), and
+    // without this both would play at once over each other.
+    let mut spawned: [Option<(Entity, u8)>; 2] = [None, None];
     for msg in reader.read() {
         let slot = msg.slot.min(1);
         let Some(character) = chosen.sides[slot].and_then(|i| roster.get(i)) else {
@@ -1144,6 +1321,15 @@ fn play_voices(
             }
             cooldown.0[slot] = CHATTY_COOLDOWN;
         }
+        // A louder line arriving in the same frame still wins, but it has
+        // to take the one already queued with it.
+        if let Some((queued, active)) = spawned[slot] {
+            if active >= priority {
+                continue;
+            }
+            commands.entity(queued).despawn();
+            spawned[slot] = None;
+        }
         let mut busy = None;
         for (entity, sink) in &sinks {
             if sink.slot == slot {
@@ -1158,8 +1344,8 @@ fn play_voices(
         }
         // The opponent is across the room: audible, but not competing with
         // the player's own reactions.
-        let side_gain = if slot == 0 { 1.0 } else { 0.55 };
-        let volume = base * character.voice_gain * side_gain;
+        let side_gain = if slot == 0 { 1.0 } else { OPPONENT_GAIN };
+        let volume = (base * VOICE_MAKEUP * character.voice_gain * side_gain).min(VOICE_CEILING);
         if volume <= 0.001 {
             continue;
         }
@@ -1168,19 +1354,22 @@ fn play_voices(
         // "my voice pack is silent" is the question a pack author will ask
         // first: RUST_LOG=bevytris=debug answers it.
         debug!(
-            "voice {:?} for {} on slot {slot} ({path})",
+            "voice {:?} for {} on slot {slot} at {volume:.2} ({path})",
             msg.kind, character.id
         );
-        commands.spawn((
-            AudioPlayer::new(handle),
-            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume)),
-            VoiceSink {
-                slot,
-                priority,
-                life: VOICE_WATCHDOG,
-            },
-            DespawnOnExit(AppState::Playing),
-        ));
+        let sink = commands
+            .spawn((
+                AudioPlayer::new(handle),
+                PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume)),
+                VoiceSink {
+                    slot,
+                    priority,
+                    life: VOICE_WATCHDOG,
+                },
+                DespawnOnExit(AppState::Playing),
+            ))
+            .id();
+        spawned[slot] = Some((sink, priority));
     }
 }
 
@@ -1237,6 +1426,124 @@ fn character_events(
     }
 }
 
+/// Big WIN / LOSE lettering over a board, and the pose that goes with it.
+///
+/// World space rather than UI, because it belongs to the board it is about
+/// — it rides the same `BoardKick` as everything else on that board, and
+/// it sits behind the result overlay the way the field does.
+const RESULT_TEXT_Z: f32 = 2.5;
+
+/// The pose is the point at this moment, so it stops being scenery: still
+/// translucent enough to read the stack through, far brighter than the
+/// 0.20 it plays at.
+const RESULT_ALPHA: f32 = 0.85;
+
+#[derive(Component)]
+struct ResultBanner;
+
+/// Did board 0 win? `None` while a match is still undecided.
+fn player_won(
+    result: Option<&crate::session::SessionResult>,
+    last: Option<&crate::session::LastRound>,
+) -> Option<bool> {
+    use crate::session::SessionResult;
+    match result {
+        Some(SessionResult::VsWin { winner }) => Some(*winner == 0),
+        Some(SessionResult::RaceDone) => Some(true),
+        Some(SessionResult::SoloOver) => Some(false),
+        None => last.map(|round| round.winner == 0),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_result(
+    mut commands: Commands,
+    result: Option<Res<crate::session::SessionResult>>,
+    last: Option<Res<crate::session::LastRound>>,
+    roster: Res<CharacterRoster>,
+    chosen: Res<MatchCharacters>,
+    locale: Res<Locale>,
+    server: Res<AssetServer>,
+    mut assets: ResMut<CharacterAssets>,
+    boards: Query<(Entity, &BoardIndex, &BoardTheme)>,
+    mut portraits: Query<(&mut Portrait, &mut Sprite)>,
+    children: Query<&Children>,
+) {
+    let Some(player_won) = player_won(result.as_deref(), last.as_deref()) else {
+        return;
+    };
+    let s = locale.s();
+    for (entity, index, theme) in &boards {
+        let slot = index.0.min(1);
+        let won = (slot == 0) == player_won;
+        let Some(character) = chosen.sides[slot].and_then(|i| roster.get(i)) else {
+            continue;
+        };
+        // Swap the pose in place: the portrait is a child of this board.
+        if let Ok(kids) = children.get(entity) {
+            for kid in kids {
+                if let Ok((mut portrait, mut sprite)) = portraits.get_mut(*kid) {
+                    if let Some(path) = character.result_art(slot, won) {
+                        sprite.image = assets.image(&server, path);
+                    }
+                    sprite.color = emissive(Color::srgba(1.0, 1.0, 1.0, RESULT_ALPHA), 1.15);
+                    // Re-measure: the pose is very likely a different shape.
+                    portrait.fitted = false;
+                }
+            }
+        }
+        let (label, tint) = if won {
+            (s.match_win, Color::srgb(0.4, 1.0, 0.7))
+        } else {
+            (s.match_lose, Color::srgb(1.0, 0.45, 0.45))
+        };
+        commands.entity(entity).with_children(|parent| {
+            parent.spawn((
+                Text2d::new(label),
+                TextFont {
+                    font_size: FontSize::Px(theme.cell * 1.5),
+                    ..default()
+                },
+                TextColor(emissive(tint, 2.0)),
+                // High on the board: the result overlay puts its own
+                // headline across the middle of the screen, and two lines
+                // of result text on top of each other reads as a glitch.
+                Transform::from_xyz(0.0, theme.cell * 6.0, RESULT_TEXT_Z),
+                ResultBanner,
+            ));
+        });
+    }
+}
+
+/// Put the pose back for the next round. A first-to-n match keeps the same
+/// board entities across rounds, so nothing else would.
+fn clear_result(
+    mut commands: Commands,
+    roster: Res<CharacterRoster>,
+    chosen: Res<MatchCharacters>,
+    server: Res<AssetServer>,
+    mut assets: ResMut<CharacterAssets>,
+    banners: Query<Entity, With<ResultBanner>>,
+    mut portraits: Query<(&mut Portrait, &mut Sprite)>,
+) {
+    for entity in &banners {
+        commands.entity(entity).despawn();
+    }
+    for (mut portrait, mut sprite) in &mut portraits {
+        let Some(character) = chosen.sides[portrait.slot].and_then(|i| roster.get(i)) else {
+            continue;
+        };
+        if let Some(path) = character.standing_for(portrait.slot) {
+            sprite.image = assets.image(&server, path);
+        }
+        sprite.color = emissive(
+            Color::srgba(1.0, 1.0, 1.0, character.portrait_alpha),
+            1.15,
+        );
+        portrait.fitted = false;
+    }
+}
+
 fn ready_voice(mut voices: MessageWriter<PlayVoice>) {
     voices.write(PlayVoice {
         slot: 0,
@@ -1251,14 +1558,9 @@ fn outcome_voice(
     last: Option<Res<crate::session::LastRound>>,
     mut voices: MessageWriter<PlayVoice>,
 ) {
-    use crate::session::SessionResult;
-    let player_won = match result.as_deref() {
-        Some(SessionResult::VsWin { winner }) => Some(*winner == 0),
-        Some(SessionResult::RaceDone) => Some(true),
-        Some(SessionResult::SoloOver) => Some(false),
-        None => last.as_deref().map(|round| round.winner == 0),
+    let Some(player_won) = player_won(result.as_deref(), last.as_deref()) else {
+        return;
     };
-    let Some(player_won) = player_won else { return };
     for slot in 0..2 {
         let won = (slot == 0) == player_won;
         voices.write(PlayVoice {
@@ -1376,10 +1678,20 @@ impl Plugin for CharacterPlugin {
             .init_resource::<VoiceCooldown>()
             .add_message::<PlayVoice>()
             .add_message::<ShowCutIn>()
-            .add_systems(OnEnter(AppState::Playing), resolve_match_characters)
-            .add_systems(OnEnter(PlayState::Countdown), (ready_voice, start_demo))
-            .add_systems(OnEnter(PlayState::RoundOver), outcome_voice)
-            .add_systems(OnEnter(PlayState::Finished), outcome_voice)
+            .add_systems(
+                OnEnter(AppState::Playing),
+                (resolve_match_characters, |mut queue: ResMut<CutInQueue>| {
+                    // A cut-in still waiting out its delay when the match
+                    // ended has nothing left to celebrate.
+                    queue.pending = None;
+                }),
+            )
+            .add_systems(
+                OnEnter(PlayState::Countdown),
+                (ready_voice, clear_result, start_demo),
+            )
+            .add_systems(OnEnter(PlayState::RoundOver), (outcome_voice, show_result))
+            .add_systems(OnEnter(PlayState::Finished), (outcome_voice, show_result))
             .add_systems(
                 Update,
                 character_events.run_if(in_state(PlayState::Running)),
@@ -1532,6 +1844,91 @@ mod tests {
         assert!(is_riff_wave(&wav));
         assert!(!is_riff_wave(b"OggS\0\0\0\0\0\0\0\0"));
         assert!(!is_riff_wave(b"this is a text file"));
+    }
+
+    /// Write a WAV with the given format tag and chunk layout to a temp
+    /// path, then run the real validator over it.
+    fn check_wav(chunks: &[(&[u8; 4], Vec<u8>)], name: &str) -> Result<(), String> {
+        let mut body: Vec<u8> = b"WAVE".to_vec();
+        for (tag, payload) in chunks {
+            body.extend_from_slice(*tag);
+            body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            body.extend_from_slice(payload);
+            if payload.len() % 2 == 1 {
+                body.push(0);
+            }
+        }
+        let mut file = b"RIFF".to_vec();
+        file.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        file.extend_from_slice(&body);
+        let path = std::env::temp_dir().join(format!("bevytris_wav_{name}.wav"));
+        std::fs::write(&path, &file).expect("temp write");
+        let verdict = wav_ok(&path);
+        let _ = std::fs::remove_file(&path);
+        verdict
+    }
+
+    fn fmt_chunk(tag: u16) -> Vec<u8> {
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&tag.to_le_bytes()); // format
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // channels
+        fmt.extend_from_slice(&22050u32.to_le_bytes()); // rate
+        fmt.extend_from_slice(&44100u32.to_le_bytes()); // byte rate
+        fmt.extend_from_slice(&2u16.to_le_bytes()); // align
+        fmt.extend_from_slice(&16u16.to_le_bytes()); // bits
+        fmt
+    }
+
+    #[test]
+    fn a_wav_that_would_crash_the_decoder_is_rejected() {
+        // This one is not cosmetic: bevy hands the bytes to the decoder
+        // with an unwrap, so a file that only *looks* like a WAV takes the
+        // game down mid-match rather than going quiet.
+        assert!(
+            check_wav(
+                &[(b"fmt ", fmt_chunk(WAVE_PCM)), (b"data", vec![0; 64])],
+                "pcm"
+            )
+            .is_ok(),
+            "ordinary 16-bit PCM has to pass"
+        );
+        // What `say` writes: junk padding between the header and the data.
+        assert!(
+            check_wav(
+                &[
+                    (b"JUNK", vec![0; 28]),
+                    (b"fmt ", fmt_chunk(WAVE_PCM)),
+                    (b"FLLR", vec![0; 4000]),
+                    (b"data", vec![0; 64]),
+                ],
+                "padded"
+            )
+            .is_ok(),
+            "padding chunks must be skipped, not tripped over"
+        );
+        assert!(
+            check_wav(
+                &[(b"fmt ", fmt_chunk(WAVE_IEEE_FLOAT)), (b"data", vec![0; 64])],
+                "float"
+            )
+            .is_ok()
+        );
+        // mu-law: a real format, and one this build cannot decode.
+        let mulaw = check_wav(&[(b"fmt ", fmt_chunk(7)), (b"data", vec![0; 64])], "mulaw");
+        assert!(mulaw.is_err(), "mu-law should be refused");
+        assert!(mulaw.unwrap_err().contains("PCM"));
+        // Truncated download: the header and nothing behind it.
+        assert!(check_wav(&[], "empty").is_err(), "a bare RIFF/WAVE stub");
+        assert!(
+            check_wav(&[(b"data", vec![0; 64])], "nofmt")
+                .unwrap_err()
+                .contains("fmt"),
+        );
+        assert!(
+            check_wav(&[(b"fmt ", fmt_chunk(WAVE_PCM))], "nodata")
+                .unwrap_err()
+                .contains("data"),
+        );
     }
 
     #[test]

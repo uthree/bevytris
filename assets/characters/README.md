@@ -13,7 +13,10 @@ assets/characters/<id>/
 ├── images/
 │   ├── standing_right.png           512x1024, character faces RIGHT
 │   ├── standing_left.png            512x1024, character faces LEFT
-│   └── cutin.png                    1024x512, optional, wide
+│   ├── cutin.png                    optional, wide; the big-move cut-in
+│   ├── icon.png                     optional, square-ish; the picker tile
+│   ├── win.png                      optional; pose held on a win
+│   └── lose.png                     optional; pose held on a loss
 └── voices/
     └── <kind>.wav                   all optional, see the table below
 ```
@@ -39,7 +42,7 @@ beginning with `.` are skipped as hidden.
 
 | field | meaning |
 | --- | --- |
-| `schema` | Format version. Currently always `1`. A pack with an unknown `schema` should be skipped with a warning, not loaded optimistically. |
+| `schema` | Format version. Currently always `1`. A newer one loads anyway, with a warning: losing the whole character is worse than losing whatever the new field did. |
 | `display_name` | Shown in game. May be non-ASCII; `ダミー・ボブ` exists precisely to exercise the Japanese font path. |
 | `ascii_name` | ASCII fallback for the 8x8 pixel font. Max 24 characters. |
 | `flavor` | One-line flavour text. |
@@ -60,6 +63,24 @@ dummy art has a large arrow printed on it.
 
 The portraits have a transparent margin, so they must be composited with alpha,
 not drawn as opaque quads.
+
+Only `standing_right.png` and `standing_left.png` matter for whether a pack
+loads at all: a character with neither is skipped, because it would have nothing
+to show on the board. A pack that ships only one facing gets it reused on both
+sides.
+
+The other three are pure extras and each falls back:
+
+| file | used for | falls back to |
+| --- | --- | --- |
+| `cutin.png` | the strip along the bottom of the screen on a TETRIS, T-Spin Double/Triple, Perfect Clear, or a zone release clearing 5+ lines | the standing art |
+| `icon.png` | the character picker tile | the standing art |
+| `win.png` / `lose.png` | the pose held on the board while the result is up, next to the WIN/LOSE lettering | the other one, then the standing art |
+
+Aspect ratio is preserved everywhere the art is drawn as UI (the cut-in strip
+and the picker tile measure the image and scale it by height), so these do not
+have to be any particular size. The board portrait is fitted to the field, so
+very wide art ends up small rather than spilling out of the frame.
 
 ## Voice kinds
 
