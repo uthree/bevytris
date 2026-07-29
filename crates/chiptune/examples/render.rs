@@ -9,7 +9,7 @@
 //! how the tempo ladder and the layer schedule get auditioned without
 //! playing the game badly on purpose.
 
-use bevytris_chiptune::compose::{Composer, Context, Profile};
+use bevytris_chiptune::compose::{Composer, Context, Meter, Profile};
 use bevytris_chiptune::synth::Synth;
 use bevytris_chiptune::{NoteEvent, SAMPLE_RATE, wav};
 
@@ -21,6 +21,7 @@ fn main() {
     let mut ramp = false;
     let mut zone_at: Option<f32> = None;
     let mut intensity = 0.35f32;
+    let mut meter: Option<Meter> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -57,6 +58,15 @@ fn main() {
                 };
                 i += 2;
             }
+            "--meter" => {
+                meter = Some(match next(i).as_str() {
+                    "4" | "4/4" => Meter::Four,
+                    "3" | "3/4" => Meter::Three,
+                    "6" | "6/8" => Meter::Six,
+                    other => panic!("unknown meter {other} (try 4, 3 or 6)"),
+                });
+                i += 2;
+            }
             "--out" => {
                 out_path = next(i);
                 i += 2;
@@ -73,6 +83,9 @@ fn main() {
     let mut synth = Synth::new();
     let mut composer = Composer::new(seed);
     composer.set_profile(profile, if ramp { 0.0 } else { intensity });
+    if let Some(m) = meter {
+        composer.force_meter(m);
+    }
 
     let mut pending: Vec<NoteEvent> = Vec::new();
     let mut cursor = 0usize;

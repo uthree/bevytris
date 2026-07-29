@@ -1825,7 +1825,7 @@ fn animate_pianoroll(
                 let beat = beat_now.floor() as i64 - 3 + *i as i64;
                 let x = ROLL_PLAYHEAD_X + (beat as f64 - beat_now) as f32 * px_per_beat;
                 tf.translation.x = x;
-                let bar = beat.rem_euclid(4) == 0;
+                let bar = beat.rem_euclid(feed.quarters_per_bar.max(1) as i64) == 0;
                 let edge = ((x + 640.0) / 120.0).clamp(0.0, 1.0)
                     * ((640.0 - x) / 120.0).clamp(0.0, 1.0);
                 sprite.custom_size = Some(Vec2::new(if bar { 2.0 } else { 1.0 }, 720.0));

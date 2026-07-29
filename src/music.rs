@@ -189,6 +189,9 @@ pub struct ScoreFeed {
     pub notes: Vec<RollNote>,
     pub pos: u64,
     pub bpm: f32,
+    /// Quarter notes per bar — 4 in common time, 3 in a waltz or in 6/8.
+    /// The roll draws a heavy line every this many beats.
+    pub quarters_per_bar: u32,
     pub tonic: i32,
     /// Pitch classes that belong to the current mode — the piano roll
     /// bands its rows by this, so the backdrop visibly changes key.
@@ -367,6 +370,7 @@ fn plan_music(
     let info = composer.info();
     feed.pos = pos;
     feed.bpm = info.bpm;
+    feed.quarters_per_bar = info.meter.quarters_per_bar();
     feed.tonic = info.tonic;
     feed.scale = [false; 12];
     for d in 0..7 {

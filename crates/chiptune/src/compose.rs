@@ -23,9 +23,86 @@
 
 use crate::rng::Rng;
 use crate::theory::{Chord, Mode, NOTE_NAMES, euclid_rot};
-use crate::{FRAME_RATE, Inst, NoteEvent, SAMPLE_RATE, STEPS_PER_BAR};
+use crate::{FRAME_RATE, Inst, NoteEvent, SAMPLE_RATE};
 
 pub const BARS_PER_SECTION: u32 = 8;
+
+/// Time signature, rolled once per piece. Three and six both fit twelve
+/// sixteenths in a bar; what separates them is where the accents fall,
+/// which is why they are distinct variants rather than one "12 steps".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Meter {
+    /// 4/4 — four beats of four sixteenths.
+    Four,
+    /// 3/4 — three beats of four sixteenths.
+    Three,
+    /// 6/8 — two dotted-quarter beats of six sixteenths.
+    Six,
+}
+
+impl Meter {
+    pub fn steps(self) -> u32 {
+        match self {
+            Meter::Four => 16,
+            _ => 12,
+        }
+    }
+    /// Felt beats per bar. Six-eight is felt in two, not six.
+    pub fn beats(self) -> u32 {
+        self.steps() / self.steps_per_beat()
+    }
+    /// Sixteenths per felt beat.
+    pub fn steps_per_beat(self) -> u32 {
+        match self {
+            Meter::Four | Meter::Three => 4,
+            Meter::Six => 6,
+        }
+    }
+    /// Quarter notes per bar — what the piano roll's bar lines count.
+    pub fn quarters_per_bar(self) -> u32 {
+        self.steps() / 4
+    }
+    /// Where the backbeat lands. A general "every beat but the first"
+    /// rule would put a snare on beat 3 of a 4/4 bar, which is wrong.
+    fn snare_steps(self) -> &'static [u8] {
+        match self {
+            Meter::Four => &[4, 12],
+            Meter::Three => &[4, 8],
+            Meter::Six => &[6],
+        }
+    }
+    /// Compound time already has its own lilt; swinging it on top just
+    /// muddies the grouping.
+    fn swings(self) -> bool {
+        self != Meter::Six
+    }
+    /// Six-eight counted in sixteenths runs hot, so it gets pulled back
+    /// a little; the waltz slightly less.
+    fn tempo_scale(self) -> f32 {
+        match self {
+            Meter::Four => 1.0,
+            Meter::Three => 0.95,
+            Meter::Six => 0.86,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Meter::Four => "4/4",
+            Meter::Three => "3/4",
+            Meter::Six => "6/8",
+        }
+    }
+    /// 0 = downbeat, 1 = the offbeat subdivision, 2 = everything else.
+    fn prio(self, step: u8) -> u8 {
+        if step as u32 % self.steps_per_beat() == 0 {
+            0
+        } else if step % 2 == 0 {
+            1
+        } else {
+            2
+        }
+    }
+}
 
 /// Which of the four musical personalities is playing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -78,7 +155,7 @@ impl Default for Context {
 /// Every cell is deliberately short of filling its bar: the player is
 /// generating their own rhythmic sound effects and needs the acoustic
 /// space, and a melody with no rests reads as nagging within a minute.
-const RHYTHMS: [&[(u8, u8)]; 8] = [
+const RHYTHMS_4_4: [&[(u8, u8)]; 8] = [
     &[(0, 3), (4, 3), (8, 3), (12, 3)],
     &[(0, 2), (2, 2), (4, 3), (8, 2), (10, 2), (12, 3)],
     &[(0, 3), (3, 3), (6, 2), (8, 3), (12, 3)],
@@ -88,6 +165,35 @@ const RHYTHMS: [&[(u8, u8)]; 8] = [
     &[(0, 7), (8, 4), (12, 3)],
     &[(0, 2), (3, 1), (4, 2), (7, 1), (8, 2), (11, 1), (12, 3)],
 ];
+
+/// 3/4 — three groups of four.
+const RHYTHMS_3_4: [&[(u8, u8)]; 6] = [
+    &[(0, 3), (4, 3), (8, 3)],
+    &[(0, 2), (2, 2), (4, 3), (8, 3)],
+    &[(0, 3), (3, 1), (4, 3), (8, 2), (10, 1)],
+    &[(0, 4), (6, 2), (8, 3)],
+    &[(0, 2), (2, 2), (4, 2), (6, 2), (8, 3)],
+    &[(0, 6), (8, 3)],
+];
+
+/// 6/8 — two groups of three eighths. Onsets stay on even steps so the
+/// compound lilt survives.
+const RHYTHMS_6_8: [&[(u8, u8)]; 6] = [
+    &[(0, 2), (2, 2), (4, 2), (6, 2), (8, 2), (10, 1)],
+    &[(0, 4), (4, 2), (6, 4), (10, 1)],
+    &[(0, 2), (4, 2), (6, 2), (10, 1)],
+    &[(0, 5), (6, 5)],
+    &[(0, 2), (2, 2), (4, 1), (6, 2), (8, 2), (10, 1)],
+    &[(0, 6), (6, 2), (8, 2), (10, 1)],
+];
+
+fn rhythm_bank(meter: Meter) -> &'static [&'static [(u8, u8)]] {
+    match meter {
+        Meter::Four => &RHYTHMS_4_4,
+        Meter::Three => &RHYTHMS_3_4,
+        Meter::Six => &RHYTHMS_6_8,
+    }
+}
 
 /// I-V-vi-IV and friends. Degrees are 0-indexed, so 4 is V and 5 is vi
 /// (or bVI in a minor mode — the same numbers work in every mode, which
@@ -139,10 +245,23 @@ struct Section {
 struct Material {
     sections: Vec<Section>,
     form: Vec<usize>,
-    /// Which rhythm cells this session drew. Nothing reads it at runtime;
+    /// Which rhythm cells this piece drew. Nothing reads it at runtime;
     /// it exists so the "at most eight cells" invariant is testable.
     #[allow(dead_code)]
     rhythms_used: Vec<usize>,
+}
+
+/// Weighted meter roll. 4/4 stays the house style — the odd meters are a
+/// change of scenery, and versus in particular needs a floor to stand on
+/// more than it needs novelty.
+fn roll_meter(profile: Profile, rng: &mut Rng) -> Meter {
+    let w: [f32; 3] = match profile {
+        Profile::Victory => [1.0, 0.0, 0.0],
+        Profile::Ambient => [0.55, 0.25, 0.20],
+        Profile::SoloCalm => [0.66, 0.17, 0.17],
+        Profile::VsIntense => [0.78, 0.07, 0.15],
+    };
+    [Meter::Four, Meter::Three, Meter::Six][rng.weighted(&w)]
 }
 
 /// Antecedent/consequent plan: motif 0 opens three of the four phrases,
@@ -167,23 +286,24 @@ enum Transform {
     Cadence,
 }
 
-fn build_material(seed: u64, profile: Profile) -> Material {
+fn build_material(seed: u64, profile: Profile, meter: Meter) -> Material {
     let mut rng = Rng::new(seed ^ ((profile as u64 + 1) * 0x9E37_79B9));
     // Everything but the fanfare lives in minor. Major progressions read
     // as cheerful, and cheerful is the wrong register for a stack that is
     // about to top out.
     let dark = !matches!(profile, Profile::Victory);
+    let bank = rhythm_bank(meter);
 
     // Four motifs, each on its own rhythm cell.
     let mut rhythms_used: Vec<usize> = Vec::new();
     let mut motifs: Vec<Motif> = Vec::new();
     while motifs.len() < 4 {
-        let r = rng.below(RHYTHMS.len());
+        let r = rng.below(bank.len());
         if rhythms_used.contains(&r) {
             continue;
         }
         rhythms_used.push(r);
-        let n = RHYTHMS[r].len();
+        let n = bank[r].len();
         motifs.push(Motif {
             rhythm: r,
             contour: contour(&mut rng, n),
@@ -208,7 +328,7 @@ fn build_material(seed: u64, profile: Profile) -> Material {
         let melody = (0..8)
             .map(|bar| {
                 let (mi, tf) = MELODY_PLAN[bar];
-                realize(&motifs[mi], tf, chords[bar])
+                realize(&motifs[mi], tf, chords[bar], meter)
             })
             .collect();
 
@@ -260,8 +380,8 @@ fn contour(rng: &mut Rng, n: usize) -> Vec<i32> {
 }
 
 /// Turn a motif into the actual notes of one bar over `chord`.
-fn realize(motif: &Motif, tf: Transform, chord: Chord) -> Vec<MelNote> {
-    let rhythm = RHYTHMS[motif.rhythm];
+fn realize(motif: &Motif, tf: Transform, chord: Chord, meter: Meter) -> Vec<MelNote> {
+    let rhythm = rhythm_bank(meter)[motif.rhythm];
     let shift = match tf {
         Transform::None | Transform::Cadence => 0,
         Transform::Up => 2,
@@ -269,13 +389,7 @@ fn realize(motif: &Motif, tf: Transform, chord: Chord) -> Vec<MelNote> {
     let mut out = Vec::with_capacity(rhythm.len());
     for (i, &(step, len)) in rhythm.iter().enumerate() {
         let mut deg = motif.contour[i.min(motif.contour.len() - 1)] + shift;
-        let prio = if step % 4 == 0 {
-            0
-        } else if step % 2 == 0 {
-            1
-        } else {
-            2
-        };
+        let prio = meter.prio(step);
         // Strong beats must be chord tones: this single rule is the
         // difference between "a melody over the changes" and "notes".
         if prio == 0 {
@@ -294,7 +408,7 @@ fn realize(motif: &Motif, tf: Transform, chord: Chord) -> Vec<MelNote> {
         if let Some(last) = out.last_mut() {
             last.deg = (last.deg as f32 / 7.0).round() as i32 * 7;
             // Hold it a little longer, but never past the bar line.
-            last.len = (last.len + 2).min(STEPS_PER_BAR as u8 - last.step);
+            last.len = (last.len + 2).min(meter.steps() as u8 - last.step);
         }
     }
     out
@@ -316,16 +430,27 @@ fn band(intensity: f32) -> usize {
     }
 }
 
-/// Discrete tempo ladder. Discrete rather than continuous on purpose: the
-/// NES original is a two-state switch, a step is far more legible to the
-/// player than a glide, and a step is much easier to keep musical.
-fn tempo_target(profile: Profile, intensity: f32) -> f32 {
+/// Tempo is rolled **once per piece and never moves again.**
+///
+/// It used to climb with the danger level, NES-Tetris style. That is a
+/// real convention and it does raise the stakes, but a tempo that shifts
+/// under you is genuinely hard to play along with, and a puzzle game is
+/// something you play *along with* for half an hour at a stretch. The
+/// intensity signal still has plenty of voice: mode, note density, drum
+/// density, bass figure, duty cycle and which layers are audible all
+/// keep moving. Only the pulse holds still.
+fn tempo_range(profile: Profile) -> (f32, f32) {
     match profile {
-        Profile::Ambient => 96.0,
-        Profile::Victory => 132.0,
-        Profile::SoloCalm => [118.0, 132.0, 150.0, 174.0][band(intensity)],
-        Profile::VsIntense => [168.0, 184.0, 200.0, 232.0][band(intensity)],
+        Profile::Ambient => (92.0, 104.0),
+        Profile::Victory => (128.0, 138.0),
+        Profile::SoloCalm => (122.0, 144.0),
+        Profile::VsIntense => (178.0, 206.0),
     }
+}
+
+fn roll_tempo(profile: Profile, meter: Meter, rng: &mut Rng) -> f32 {
+    let (lo, hi) = tempo_range(profile);
+    (lo + rng.unit() * (hi - lo)) * meter.tempo_scale()
 }
 
 /// Mode ladder, bright to dark. The tonic never moves, so the bass never
@@ -478,17 +603,19 @@ pub struct Info {
     pub seed: u64,
     pub tonic: i32,
     pub mode: Mode,
+    pub meter: Meter,
     pub bpm: f32,
     pub bar: u32,
 }
 
 impl Info {
-    /// e.g. `A minor · 148 BPM · #3f7a2c`
+    /// e.g. `A minor · 6/8 · 148 BPM · #3f7a2c`
     pub fn label(&self) -> String {
         format!(
-            "{} {} · {:.0} BPM · #{:06x}",
+            "{} {} · {} · {:.0} BPM · #{:06x}",
             NOTE_NAMES[(self.tonic.rem_euclid(12)) as usize],
             self.mode.name(),
+            self.meter.name(),
             self.bpm,
             self.seed & 0xff_ffff
         )
@@ -502,7 +629,12 @@ pub struct Composer {
     mode: Mode,
     /// MIDI note of the tonic, in the harmony register.
     root: i32,
+    /// Fixed for the whole piece — see [`tempo_range`].
     bpm: f32,
+    meter: Meter,
+    /// Counts profile activations, so each match rolls its own meter,
+    /// tempo and material instead of replaying the last one.
+    piece: u64,
     bar: u32,
     next_bar_at: u64,
     transpose: i32,
@@ -515,10 +647,12 @@ impl Composer {
         Composer {
             seed,
             profile,
-            material: build_material(seed, profile),
+            material: build_material(seed, profile, Meter::Four),
             mode: mode_target(profile, 0.0),
             root,
-            bpm: tempo_target(profile, 0.0),
+            bpm: roll_tempo(profile, Meter::Four, &mut Rng::new(seed)),
+            meter: Meter::Four,
+            piece: 0,
             bar: 0,
             next_bar_at: 0,
             transpose: 0,
@@ -530,6 +664,7 @@ impl Composer {
             seed: self.seed,
             tonic: self.root + self.transpose,
             mode: self.mode,
+            meter: self.meter,
             bpm: self.bpm,
             bar: self.bar,
         }
@@ -543,17 +678,46 @@ impl Composer {
         self.next_bar_at
     }
 
-    /// Restart the form with a different personality. Material is derived
-    /// from `seed ^ profile`, so coming back to a profile later brings
-    /// back the same tunes rather than rolling new ones.
+    /// Start a new piece with a different personality. Meter, tempo and
+    /// material are all rolled here and then held for the whole piece —
+    /// each match gets its own tune, but nothing shifts underneath the
+    /// player mid-song.
     pub fn set_profile(&mut self, profile: Profile, intensity: f32) {
         if profile == self.profile {
             return;
         }
+        self.piece += 1;
+        let mut rng = Rng::new(self.seed ^ (self.piece.wrapping_mul(0x1000_0193)));
         self.profile = profile;
-        self.material = build_material(self.seed, profile);
+        self.meter = roll_meter(profile, &mut rng);
+        self.bpm = roll_tempo(profile, self.meter, &mut rng);
+        self.material = build_material(
+            self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
+            profile,
+            self.meter,
+        );
         self.mode = mode_target(profile, intensity);
-        self.bpm = tempo_target(profile, intensity);
+        self.bar = 0;
+    }
+
+    /// Override the meter that [`Composer::set_profile`] rolled, and
+    /// rebuild the material to match. Only the offline renderer uses
+    /// this, to audition a time signature on demand.
+    pub fn force_meter(&mut self, meter: Meter) {
+        if meter == self.meter {
+            return;
+        }
+        self.meter = meter;
+        self.bpm = roll_tempo(
+            self.profile,
+            meter,
+            &mut Rng::new(self.seed ^ self.piece.wrapping_mul(0x1000_0193)),
+        );
+        self.material = build_material(
+            self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
+            self.profile,
+            meter,
+        );
         self.bar = 0;
     }
 
@@ -592,11 +756,9 @@ impl Composer {
             // like a bug rather than a modulation.
             self.mode = mode_target(self.profile, ctx.intensity);
         }
-        // Tempo is latched per bar and ramped, so a threshold that flaps
-        // cannot make the music stutter.
-        let target = tempo_target(self.profile, ctx.intensity);
-        self.bpm += (target - self.bpm).clamp(-9.0, 9.0);
-
+        // Tempo and meter are fixed for the whole piece — see tempo_range.
+        let meter = self.meter;
+        let steps = meter.steps();
         let arr = arrange(self.profile, ctx);
         let spb = samples_per_step(self.bpm);
         let fps = frames_per_step(self.bpm);
@@ -620,7 +782,7 @@ impl Composer {
         let tonic = self.root + ctx.transpose;
         let mode = self.mode;
         let at = |step: f32| -> u64 {
-            let swung = if (step as i32) % 2 == 1 {
+            let swung = if meter.swings() && (step as i32) % 2 == 1 {
                 step + (arr.swing - 0.5) * 2.0
             } else {
                 step
@@ -647,11 +809,13 @@ impl Composer {
         if arr.harmony {
             let arp = chord.arp(mode);
             let base = clamp_midi(tonic + 12 + mode.pitch(chord.degree));
+            let spbeat = meter.steps_per_beat() as u8;
             if arr.harm_inst == Inst::Stab {
                 // Offbeat stabs drive; a held pad would just sit there.
-                for step in [2u8, 6, 10, 14] {
+                // One per beat, halfway through it, whatever the meter.
+                for beat in 0..meter.beats() as u8 {
                     out.push(NoteEvent {
-                        at: at(step as f32),
+                        at: at((beat * spbeat + spbeat / 2) as f32),
                         inst: Inst::Stab,
                         midi: base,
                         vel: 96,
@@ -660,13 +824,14 @@ impl Composer {
                     });
                 }
             } else {
-                for step in [0u8, 8] {
+                let half = (steps / 2) as u8;
+                for step in [0, half] {
                     out.push(NoteEvent {
                         at: at(step as f32),
                         inst: arr.harm_inst,
                         midi: base,
                         vel: 84,
-                        frames: frames(8),
+                        frames: frames(half),
                         arp: Some(arp),
                     });
                 }
@@ -674,7 +839,7 @@ impl Composer {
         }
 
         // --- bass -----------------------------------------------------
-        for (step, len, deg) in bass_pattern(arr.bass_pat, chord.degree) {
+        for (step, len, deg) in bass_pattern(arr.bass_pat, chord.degree, meter) {
             out.push(NoteEvent {
                 at: at(step as f32),
                 inst: Inst::Bass,
@@ -689,38 +854,43 @@ impl Composer {
         if arr.perc {
             // The unconditional fill in the last bar of every section is
             // what makes a loop feel like it has form.
-            let (hat_k, kick_k) = if last_bar {
-                ((arr.hat_k + 4).min(16), arr.kick_k)
-            } else {
-                (arr.hat_k, arr.kick_k)
-            };
-            for (i, on) in euclid_rot(hat_k, 16, hat_rot).iter().enumerate() {
+            // The onset counts were tuned against sixteen steps, so an
+            // odd meter scales them rather than thinning out.
+            let scale = |k: usize| (k * steps as usize).div_ceil(16);
+            let hat_k = if last_bar { arr.hat_k + 4 } else { arr.hat_k };
+            let spbeat = meter.steps_per_beat() as usize;
+            for (i, on) in euclid_rot(scale(hat_k), steps as usize, hat_rot)
+                .iter()
+                .enumerate()
+            {
                 if *on {
                     out.push(NoteEvent {
                         at: at(i as f32),
                         inst: Inst::Hat,
                         midi: 0,
-                        vel: if i % 4 == 0 { 96 } else { 70 },
+                        vel: if i % spbeat == 0 { 96 } else { 70 },
                         frames: 4,
                         arp: None,
                     });
                 }
             }
-            let mut kick_mask = if arr.four_floor {
-                let mut m = [false; 16];
-                for step in (0..16).step_by(4) {
-                    m[step] = true;
+            let mut kick_mask = vec![false; steps as usize];
+            if arr.four_floor {
+                // One per felt beat: four in 4/4, three in a waltz, two
+                // in 6/8.
+                for step in (0..steps as usize).step_by(spbeat) {
+                    kick_mask[step] = true;
                 }
-                m
             } else {
-                let mut m = [false; 16];
-                for (i, on) in euclid_rot(kick_k, 16, kick_rot).iter().enumerate() {
-                    m[i] = *on;
+                for (i, on) in euclid_rot(scale(arr.kick_k), steps as usize, kick_rot)
+                    .iter()
+                    .enumerate()
+                {
+                    kick_mask[i] = *on;
                 }
-                m
-            };
+            }
             for &step in arr.kick_extra {
-                kick_mask[step as usize % 16] = true;
+                kick_mask[step as usize % steps as usize] = true;
             }
             for (i, on) in kick_mask.iter().enumerate() {
                 if *on {
@@ -729,7 +899,7 @@ impl Composer {
                         inst: Inst::Kick,
                         // Pickups sit under the four-on-the-floor pulse
                         // rather than competing with it.
-                        vel: if i % 4 == 0 { 120 } else { 92 },
+                        vel: if i % spbeat == 0 { 120 } else { 92 },
                         midi: 0,
                         frames: 6,
                         arp: None,
@@ -737,7 +907,7 @@ impl Composer {
                 }
             }
             if arr.snare {
-                for step in [4u8, 12] {
+                for &step in meter.snare_steps() {
                     out.push(NoteEvent {
                         at: at(step as f32),
                         inst: Inst::Snare,
@@ -749,12 +919,12 @@ impl Composer {
                 }
             }
             if last_bar {
-                for (k, step) in [13u8, 14, 15].iter().enumerate() {
+                for k in 0..3u8 {
                     out.push(NoteEvent {
-                        at: at(*step as f32),
+                        at: at((steps as u8 - 3 + k) as f32),
                         inst: Inst::Snare,
                         midi: 0,
-                        vel: 90 + 12 * k as u8,
+                        vel: 90 + 12 * k,
                         frames: 3,
                         arp: None,
                     });
@@ -763,7 +933,7 @@ impl Composer {
         }
 
         out[start..].sort_by_key(|e| e.at);
-        self.next_bar_at = bar_at + (spb * STEPS_PER_BAR as f64) as u64;
+        self.next_bar_at = bar_at + (spb * steps as f64) as u64;
         self.bar += 1;
     }
 }
@@ -782,28 +952,34 @@ fn frames_per_step(bpm: f32) -> f32 {
 
 /// `(step, length, scale degree)` triples. Degrees are relative to the
 /// tonic, so +4 is the chord's fifth and +7 is an octave.
-fn bass_pattern(pat: usize, root: i32) -> Vec<(u8, u8, i32)> {
+///
+/// Everything is expressed per beat or per subdivision rather than at
+/// fixed step numbers, so the same five figures work in 4/4, 3/4 and 6/8.
+fn bass_pattern(pat: usize, root: i32, meter: Meter) -> Vec<(u8, u8, i32)> {
+    let steps = meter.steps() as u8;
+    let spb = meter.steps_per_beat() as u8;
     match pat {
-        0 => vec![(0, 16, root)],
-        1 => vec![(0, 8, root), (8, 8, root + 4)],
-        2 => (0..8)
+        // Whole bar.
+        0 => vec![(0, steps, root)],
+        // Root, then the fifth halfway through.
+        1 => {
+            let half = steps / 2;
+            vec![(0, half, root), (half, half, root + 4)]
+        }
+        // Octave-jumping eighths.
+        2 => (0..steps / 2)
             .map(|i| {
-                let step = i * 2;
                 let deg = if i % 2 == 0 { root } else { root + 7 };
-                (step as u8, 2u8, deg)
+                (i * 2, 2u8, deg)
             })
             .collect(),
-        3 => vec![
-            (0, 4, root),
-            (4, 4, root + 4),
-            (8, 4, root + 7),
-            (12, 4, root + 4),
-        ],
-        _ => (0..16)
-            .map(|i| {
-                let deg = root + [0, 2, 4, 7][i % 4];
-                (i as u8, 1u8, deg)
-            })
+        // Root-fifth-octave-fifth, one per beat.
+        3 => (0..steps / spb)
+            .map(|i| (i * spb, spb, root + [0, 4, 7, 4][i as usize % 4]))
+            .collect(),
+        // Arpeggiated sixteenths.
+        _ => (0..steps)
+            .map(|i| (i, 1u8, root + [0, 2, 4, 7][i as usize % 4]))
             .collect(),
     }
 }
@@ -838,55 +1014,64 @@ mod tests {
         }
     }
 
+    const METERS: [Meter; 3] = [Meter::Four, Meter::Three, Meter::Six];
+
     #[test]
-    fn a_session_uses_at_most_eight_rhythm_cells() {
+    fn a_piece_uses_at_most_eight_rhythm_cells() {
         for p in [Profile::Ambient, Profile::SoloCalm, Profile::VsIntense] {
-            let m = build_material(12345, p);
-            assert!(
-                m.rhythms_used.len() <= 8,
-                "{p:?} used {} rhythm cells",
-                m.rhythms_used.len()
-            );
-            assert_eq!(m.rhythms_used.iter().collect::<HashSet<_>>().len(), 4);
+            for m in METERS {
+                let mat = build_material(12345, p, m);
+                assert!(
+                    mat.rhythms_used.len() <= 8,
+                    "{p:?} {} used {} rhythm cells",
+                    m.name(),
+                    mat.rhythms_used.len()
+                );
+                assert_eq!(mat.rhythms_used.iter().collect::<HashSet<_>>().len(), 4);
+            }
         }
     }
 
     #[test]
     fn every_phrase_ends_on_a_cadence() {
-        let m = build_material(999, Profile::SoloCalm);
-        for s in &m.sections {
-            assert_eq!(s.chords[3].degree, 4, "antecedent must close on V");
-            assert!(s.chords[3].seventh);
-            assert_eq!(s.chords[7].degree, 0, "consequent must close on I");
+        for meter in METERS {
+            let m = build_material(999, Profile::SoloCalm, meter);
+            for s in &m.sections {
+                assert_eq!(s.chords[3].degree, 4, "antecedent must close on V");
+                assert!(s.chords[3].seventh);
+                assert_eq!(s.chords[7].degree, 0, "consequent must close on I");
+            }
         }
     }
 
     #[test]
     fn strong_beats_are_chord_tones() {
-        let m = build_material(555, Profile::SoloCalm);
         let mut checked = 0;
-        for s in &m.sections {
-            for (bar, notes) in s.melody.iter().enumerate() {
-                for n in notes.iter().filter(|n| n.prio == 0) {
-                    assert!(
-                        s.chords[bar].contains(n.deg),
-                        "downbeat degree {} is not in chord {:?}",
-                        n.deg,
-                        s.chords[bar]
-                    );
-                    checked += 1;
+        for meter in METERS {
+            let m = build_material(555, Profile::SoloCalm, meter);
+            for s in &m.sections {
+                for (bar, notes) in s.melody.iter().enumerate() {
+                    for n in notes.iter().filter(|n| n.prio == 0) {
+                        assert!(
+                            s.chords[bar].contains(n.deg),
+                            "downbeat degree {} is not in chord {:?}",
+                            n.deg,
+                            s.chords[bar]
+                        );
+                        checked += 1;
+                    }
                 }
             }
         }
-        assert!(checked > 40, "test did not actually look at much");
+        assert!(checked > 100, "test did not actually look at much");
     }
 
     #[test]
     fn material_is_reused_not_re_rolled() {
-        // The form must revisit sections: 64 bars of music from 24 bars of
-        // material keeps new material inside the ~35% budget real songs
-        // sit in.
-        let m = build_material(7, Profile::VsIntense);
+        // The form must revisit sections: eighty bars of music from
+        // twenty-four bars of material keeps new material inside the
+        // ~35% budget real songs sit in.
+        let m = build_material(7, Profile::VsIntense, Meter::Four);
         let unique = m.form.iter().collect::<HashSet<_>>().len();
         assert_eq!(unique, 3);
         let heard = m.form.len() * BARS_PER_SECTION as usize;
@@ -901,18 +1086,113 @@ mod tests {
     fn the_melody_always_leaves_room_to_breathe() {
         // Every bar must have rests: the player is generating their own
         // rhythmic SFX and needs the acoustic space.
-        let m = build_material(31337, Profile::VsIntense);
-        for s in &m.sections {
-            for notes in &s.melody {
-                let covered: u32 = notes.iter().map(|n| n.len as u32).sum();
-                assert!(covered < 16, "a bar is completely full");
+        for meter in METERS {
+            let m = build_material(31337, Profile::VsIntense, meter);
+            for s in &m.sections {
+                for notes in &s.melody {
+                    let covered: u32 = notes.iter().map(|n| n.len as u32).sum();
+                    assert!(
+                        covered < meter.steps(),
+                        "a {} bar is completely full",
+                        meter.name()
+                    );
+                    // Nothing may hang over the bar line either.
+                    for n in notes {
+                        assert!(n.step as u32 + n.len as u32 <= meter.steps());
+                    }
+                }
             }
         }
     }
 
     #[test]
+    fn meters_are_internally_consistent() {
+        for m in METERS {
+            assert_eq!(m.beats() * m.steps_per_beat(), m.steps());
+            assert_eq!(m.quarters_per_bar() * 4, m.steps());
+            for &s in m.snare_steps() {
+                assert!((s as u32) < m.steps());
+                assert_eq!(s as u32 % m.steps_per_beat(), 0, "snare off the beat");
+            }
+        }
+        assert_eq!(Meter::Four.beats(), 4);
+        assert_eq!(Meter::Three.beats(), 3);
+        // Six-eight is felt in two, not six.
+        assert_eq!(Meter::Six.beats(), 2);
+    }
+
+    #[test]
+    fn odd_meters_show_up_but_stay_the_exception() {
+        let mut seen = [0u32; 3];
+        for seed in 0..400u64 {
+            let mut rng = Rng::new(seed);
+            match roll_meter(Profile::SoloCalm, &mut rng) {
+                Meter::Four => seen[0] += 1,
+                Meter::Three => seen[1] += 1,
+                Meter::Six => seen[2] += 1,
+            }
+        }
+        assert!(seen.iter().all(|&n| n > 20), "a meter never came up: {seen:?}");
+        assert!(seen[0] > seen[1] + seen[2], "4/4 should stay the house style");
+        // Versus keeps a floor to stand on far more often.
+        let mut vs_four = 0;
+        for seed in 0..400u64 {
+            if roll_meter(Profile::VsIntense, &mut Rng::new(seed)) == Meter::Four {
+                vs_four += 1;
+            }
+        }
+        assert!(vs_four > 280, "versus wandered off 4/4 too often: {vs_four}");
+        // The fanfare is never in an odd meter.
+        for seed in 0..64u64 {
+            assert_eq!(
+                roll_meter(Profile::Victory, &mut Rng::new(seed)),
+                Meter::Four
+            );
+        }
+    }
+
+    #[test]
+    fn tempo_never_moves_inside_a_piece() {
+        // The whole point of the fixed tempo: a groove you can play along
+        // with for half an hour.
+        let mut c = Composer::new(0xC0FFEE);
+        c.set_profile(Profile::VsIntense, 0.0);
+        let started = c.bpm;
+        let mut out = Vec::new();
+        for i in 0..64 {
+            let ctx = Context {
+                profile: Profile::VsIntense,
+                // Swing the danger level violently across the whole range.
+                intensity: if i % 2 == 0 { 0.05 } else { 0.98 },
+                elapsed: 600.0,
+                ..Default::default()
+            };
+            c.plan_bar(&ctx, &mut out);
+            assert_eq!(c.bpm, started, "tempo moved at bar {i}");
+        }
+        // Bars must therefore all be exactly the same length.
+        let bar = (samples_per_step(started) * c.meter.steps() as f64) as u64;
+        assert!(bar > 0);
+    }
+
+    #[test]
+    fn each_new_piece_rolls_fresh_material() {
+        let mut c = Composer::new(0x1234);
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            c.set_profile(Profile::SoloCalm, 0.3);
+            seen.push((c.bpm, c.meter, c.material.rhythms_used.clone()));
+            c.set_profile(Profile::Ambient, 0.0);
+        }
+        assert!(
+            seen.iter().any(|s| *s != seen[0]),
+            "every match got the identical tune"
+        );
+    }
+
+    #[test]
     fn calm_is_slower_and_brighter_than_versus() {
-        assert!(tempo_target(Profile::SoloCalm, 0.5) < tempo_target(Profile::VsIntense, 0.5));
+        assert!(tempo_range(Profile::SoloCalm).1 < tempo_range(Profile::VsIntense).0);
         // Everything that plays during a match is minor; only the
         // fanfare is allowed to be cheerful.
         for p in [Profile::Ambient, Profile::SoloCalm, Profile::VsIntense] {
@@ -927,43 +1207,52 @@ mod tests {
             mode_target(Profile::SoloCalm, 0.0).pitch(5)
                 > mode_target(Profile::VsIntense, 0.0).pitch(5)
         );
-        // Danger really does push the tempo up.
-        assert!(tempo_target(Profile::VsIntense, 0.95) > tempo_target(Profile::VsIntense, 0.1));
     }
 
     #[test]
-    fn versus_kicks_on_every_quarter() {
+    fn versus_kicks_on_every_beat() {
         let ctx = Context {
             profile: Profile::VsIntense,
             intensity: 0.9,
             elapsed: 600.0,
             ..Default::default()
         };
-        let arr = arrange(Profile::VsIntense, &ctx);
-        assert!(arr.four_floor);
+        assert!(arrange(Profile::VsIntense, &ctx).four_floor);
 
-        // Check it in the emitted score, not just the flag: every bar
-        // must carry a kick on all four beats.
-        let out = run(Profile::VsIntense, 0.9, 8);
-        let mut c = Composer::new(0xBEEF);
-        c.set_profile(Profile::VsIntense, 0.9);
-        let spb = samples_per_step(tempo_target(Profile::VsIntense, 0.9));
-        let bar_len = (spb * STEPS_PER_BAR as f64) as u64;
-        let kicks: Vec<u64> = out
-            .iter()
-            .filter(|e| e.inst == Inst::Kick)
-            .map(|e| e.at)
-            .collect();
-        assert!(kicks.len() >= 8 * 4, "only {} kicks in 8 bars", kicks.len());
-        for beat in 0..4u64 {
-            let want = (beat as f64 * 4.0 * spb) as u64;
+        // Check it in the emitted score, not just the flag — and in every
+        // meter, since "four on the floor" means three in a waltz.
+        for seed in [1u64, 2, 3, 5, 8, 13] {
+            let mut c = Composer::new(seed);
+            c.set_profile(Profile::VsIntense, 0.9);
+            let mut out = Vec::new();
+            for _ in 0..8 {
+                c.plan_bar(&ctx, &mut out);
+            }
+            let spb = samples_per_step(c.bpm);
+            let bar_len = (spb * c.meter.steps() as f64) as u64;
+            let kicks: Vec<u64> = out
+                .iter()
+                .filter(|e| e.inst == Inst::Kick)
+                .map(|e| e.at)
+                .collect();
+            let beats = c.meter.beats();
             assert!(
-                kicks
-                    .iter()
-                    .any(|&k| (k % bar_len).abs_diff(want) < spb as u64 / 2),
-                "no kick on beat {}",
-                beat + 1
+                kicks.len() >= 8 * beats as usize,
+                "{} kicks in 8 bars of {}",
+                kicks.len(),
+                c.meter.name()
             );
+            for beat in 0..beats as u64 {
+                let want = (beat as f64 * c.meter.steps_per_beat() as f64 * spb) as u64;
+                assert!(
+                    kicks
+                        .iter()
+                        .any(|&k| (k % bar_len).abs_diff(want) < spb as u64 / 2),
+                    "no kick on beat {} of {}",
+                    beat + 1,
+                    c.meter.name()
+                );
+            }
         }
     }
 
@@ -1054,10 +1343,12 @@ mod tests {
     }
 
     #[test]
-    fn re_entering_a_profile_brings_back_the_same_tunes() {
-        let a = build_material(0xABCD, Profile::SoloCalm);
-        let b = build_material(0xABCD, Profile::SoloCalm);
-        assert_eq!(a.rhythms_used, b.rhythms_used);
-        assert_eq!(a.form, b.form);
+    fn material_generation_is_reproducible() {
+        for meter in METERS {
+            let a = build_material(0xABCD, Profile::SoloCalm, meter);
+            let b = build_material(0xABCD, Profile::SoloCalm, meter);
+            assert_eq!(a.rhythms_used, b.rhythms_used);
+            assert_eq!(a.form, b.form);
+        }
     }
 }
