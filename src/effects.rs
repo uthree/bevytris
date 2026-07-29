@@ -927,27 +927,26 @@ fn map_events_to_effects(
                 }
             }
             GameEvent::LevelUp { level } => {
-                // Player board only: under timed (VS) leveling both boards
-                // level up on the same frame, and a second copy of the sfx
-                // from the CPU board would double-trigger it.
-                if index.0 == 0 {
+                // A marathon-only celebration (10 lines earned). Under the
+                // timed VS ramp the level rises every 25 s on a clock —
+                // fanfare there would only pull focus from the match, so
+                // VS modes get no level-up presentation at all. (Player
+                // board only: under timed leveling both boards level up on
+                // the same frame, which would double-trigger the sfx.)
+                if index.0 == 0 && *mode == GameMode::Single {
                     play(Sfx::LevelUp, gain);
                     shake.add(0.15);
                     let green = Color::srgb(0.5, 1.0, 0.6);
                     pulse_frame(&mut glows, msg.board, green, 0.8);
                     spawn_shockwave(&mut commands, center, green, true);
                     surge.0 = surge.0.max(4.0);
-                    // The banner is a marathon reward; under the timed VS
-                    // ramp it would just spam "LEVEL n" every 25 seconds.
-                    if *mode == GameMode::Single {
-                        spawn_banner(
-                            &mut commands,
-                            center + Vec2::new(0.0, 80.0),
-                            format!("LEVEL {level}"),
-                            green,
-                            theme.cell,
-                        );
-                    }
+                    spawn_banner(
+                        &mut commands,
+                        center + Vec2::new(0.0, 80.0),
+                        format!("LEVEL {level}"),
+                        green,
+                        theme.cell,
+                    );
                 }
             }
             GameEvent::ZoneReady => {
