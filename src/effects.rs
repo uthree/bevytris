@@ -69,7 +69,8 @@ impl Plugin for EffectsPlugin {
 
 #[derive(Resource)]
 pub struct EffectAssets {
-    /// Soft radial gradient used by particles.
+    /// Soft-edged square used by particles (the whole game is styled on
+    /// rectangles — no round shapes).
     pub glow: Handle<Image>,
     /// Feather-edged rectangle used by streaks (drop trails, row bars):
     /// stays crisp and rectangular when stretched, unlike the radial glow.
@@ -106,12 +107,15 @@ fn image_from_alpha(size: u32, alpha: impl Fn(f32, f32) -> f32) -> Image {
     )
 }
 
-/// 64x64 white radial gradient with soft falloff.
-fn radial_glow_image() -> Image {
-    image_from_alpha(64, |nx, ny| {
-        let d = Vec2::new(nx, ny).length();
-        (1.0 - d).clamp(0.0, 1.0).powi(2)
-    })
+/// 64x64 white square with a flat core and a short feathered edge: the
+/// particle sprite. Tighter falloff than the streak rectangle so small
+/// particles still read as squares, not blobs.
+fn square_glow_image() -> Image {
+    let edge = |n: f32| {
+        let t = ((1.0 - n.abs()) / 0.22).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    image_from_alpha(64, move |nx, ny| edge(nx) * edge(ny))
 }
 
 /// Rectangle with a flat core and feathered edges on both axes.
@@ -139,7 +143,7 @@ fn setup_effect_assets(
     asset_server: Res<AssetServer>,
 ) {
     commands.insert_resource(EffectAssets {
-        glow: images.add(radial_glow_image()),
+        glow: images.add(square_glow_image()),
         bar: images.add(soft_rect_image()),
         vignette: images.add(vignette_image()),
     });
@@ -553,8 +557,8 @@ fn update_flashes(
 }
 
 // ---------------------------------------------------------------------------
-// Shockwave rings (playfield-friendly replacement for fullscreen flashes:
-// thin expanding outlines never obscure the stack)
+// Shockwave frames (playfield-friendly replacement for fullscreen flashes:
+// thin expanding square outlines never obscure the stack)
 // ---------------------------------------------------------------------------
 
 #[derive(Component)]
@@ -610,13 +614,12 @@ fn update_shockwaves(
                 continue;
             }
             let alpha = fade * (1.0 - i as f32 * 0.28);
-            gizmos
-                .circle_2d(
-                    wave.center,
-                    r,
-                    emissive(wave.color, 3.2).with_alpha(alpha),
-                )
-                .resolution(72);
+            // Square outline, matching the game's all-rectangles styling.
+            gizmos.rect_2d(
+                Isometry2d::from_translation(wave.center),
+                Vec2::splat(r * 2.0),
+                emissive(wave.color, 3.2).with_alpha(alpha),
+            );
         }
     }
 }

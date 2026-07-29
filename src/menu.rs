@@ -190,7 +190,6 @@ fn item_bundle(index: usize, action: MenuAction, label: String, width: f32) -> i
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             border: UiRect::all(px(2)),
-            border_radius: BorderRadius::all(px(8)),
             ..default()
         },
         BackgroundColor(Color::srgba(0.08, 0.1, 0.16, 0.85)),
@@ -484,7 +483,6 @@ fn spawn_stage_grid(
                                 align_items: AlignItems::Center,
                                 justify_content: JustifyContent::Center,
                                 border: UiRect::all(px(2)),
-                                border_radius: BorderRadius::all(px(8)),
                                 ..default()
                             },
                             BackgroundColor(Color::srgba(0.08, 0.1, 0.16, 0.85)),
