@@ -189,7 +189,7 @@ impl Default for Context {
 /// Every cell is deliberately short of filling its bar: the player is
 /// generating their own rhythmic sound effects and needs the acoustic
 /// space, and a melody with no rests reads as nagging within a minute.
-const RHYTHMS_4_4: [&[(u8, u8)]; 10] = [
+const RHYTHMS_4_4: [&[(u8, u8)]; 8] = [
     &[(0, 3), (4, 3), (8, 3), (12, 3)],
     &[(0, 2), (2, 2), (4, 3), (8, 2), (10, 2), (12, 3)],
     &[(0, 3), (3, 3), (6, 2), (8, 3), (12, 3)],
@@ -198,31 +198,6 @@ const RHYTHMS_4_4: [&[(u8, u8)]; 10] = [
     &[(0, 6), (6, 2), (8, 5), (14, 2)],
     &[(0, 7), (8, 4), (12, 3)],
     &[(0, 2), (3, 1), (4, 2), (7, 1), (8, 2), (11, 1), (12, 3)],
-    // The two busy ones. Only the dense profiles draw from a pool that
-    // reaches this far, and the calm ones filter most of it out anyway:
-    // their `max_prio` drops everything off the beat.
-    &[
-        (0, 2),
-        (2, 2),
-        (4, 2),
-        (6, 2),
-        (8, 2),
-        (10, 2),
-        (12, 2),
-        (14, 1),
-    ],
-    &[
-        (0, 2),
-        (2, 1),
-        (3, 1),
-        (4, 2),
-        (6, 2),
-        (8, 2),
-        (10, 1),
-        (11, 1),
-        (12, 2),
-        (14, 1),
-    ],
 ];
 
 /// 3/4 — three groups of four.
@@ -296,6 +271,74 @@ struct Section {
     kick_rot: usize,
 }
 
+/// A strum: which step, and whether the hand is going down or up.
+///
+/// Down means low string first, up means high string first, and an
+/// upstroke only catches the top of the chord — a real one does not
+/// reach the bass strings on the way back. That asymmetry is most of
+/// what separates a strummed chord from a chord played six times.
+#[derive(Clone, Copy)]
+struct Strum {
+    step: u8,
+    down: bool,
+}
+
+const fn d(step: u8) -> Strum {
+    Strum { step, down: true }
+}
+const fn u(step: u8) -> Strum {
+    Strum { step, down: false }
+}
+
+/// `D - D U - U D U` on the eighths: the pattern every guitarist learns
+/// first, and the reason is that it works.
+const STRUM_4_4: [Strum; 6] = [d(0), d(4), u(6), u(10), d(12), u(14)];
+const STRUM_3_4: [Strum; 5] = [d(0), d(4), u(6), d(8), u(10)];
+/// 6/8 is two groups of three, so the hand moves on the dotted beat.
+const STRUM_6_8: [Strum; 4] = [d(0), u(3), d(6), u(9)];
+/// The sparse version, for when the chords are background rather than
+/// the point: one downstroke a beat, no upstrokes at all.
+const STRUM_SLOW_4_4: [Strum; 4] = [d(0), d(4), d(8), d(12)];
+const STRUM_SLOW_3_4: [Strum; 3] = [d(0), d(4), d(8)];
+const STRUM_SLOW_6_8: [Strum; 2] = [d(0), d(6)];
+
+fn strum_pattern(meter: Meter, busy: bool) -> &'static [Strum] {
+    match (meter, busy) {
+        (Meter::Four, true) => &STRUM_4_4,
+        (Meter::Four, false) => &STRUM_SLOW_4_4,
+        (Meter::Three, true) => &STRUM_3_4,
+        (Meter::Three, false) => &STRUM_SLOW_3_4,
+        (Meter::Six, true) => &STRUM_6_8,
+        (Meter::Six, false) => &STRUM_SLOW_6_8,
+    }
+}
+
+/// Seconds between one string and the next inside a single strum. A
+/// gesture, not a musical duration, so it does not scale with tempo —
+/// a guitarist's hand crosses the strings at the same speed at 80 BPM
+/// as at 200.
+const STRUM_SPREAD_SECS: f32 = 0.013;
+
+/// How the chord blocks play their chord.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChordStyle {
+    /// Three voices held together, organ-like.
+    Sustain,
+    /// Struck string by string, in a strum pattern.
+    Strum,
+}
+
+impl ChordStyle {
+    pub fn name(self) -> &'static str {
+        match self {
+            ChordStyle::Sustain => "held",
+            ChordStyle::Strum => "strum",
+        }
+    }
+
+    pub const ALL: [ChordStyle; 2] = [ChordStyle::Sustain, ChordStyle::Strum];
+}
+
 /// What a block of the form is for.
 ///
 /// This is the piece's shape, and it is the thing that was missing: the
@@ -314,10 +357,11 @@ enum BlockRole {
     Break,
 }
 
-/// Which block does what. Two chord blocks and one breakdown across the
-/// ten-block form: often enough to shape the piece, rare enough that the
-/// tune is what you mostly hear.
-const FORM_ROLES: [BlockRole; 10] = [
+/// Versus and the fanfare: two chord blocks and one breakdown across the
+/// ten-block form. Often enough to shape the piece, rare enough that the
+/// tune is what you mostly hear — a match is not the place to stop
+/// playing the melody.
+const FORM_DRIVEN: [BlockRole; 10] = [
     BlockRole::Full,
     BlockRole::Full,
     BlockRole::Chords,
@@ -329,6 +373,43 @@ const FORM_ROLES: [BlockRole; 10] = [
     BlockRole::Full,
     BlockRole::Full,
 ];
+
+/// The solo and menu profiles put the harmony out front instead: four
+/// chord blocks, the first of them early, so the chords are something
+/// the piece is *about* rather than a place it visits twice.
+const FORM_CHORDAL: [BlockRole; 10] = [
+    BlockRole::Full,
+    BlockRole::Chords,
+    BlockRole::Full,
+    BlockRole::Chords,
+    BlockRole::Full,
+    BlockRole::Break,
+    BlockRole::Chords,
+    BlockRole::Full,
+    BlockRole::Chords,
+    BlockRole::Full,
+];
+
+/// How often a piece strums its chord blocks rather than holding them.
+/// The solo profiles lean strummed: those are the pieces built around
+/// the harmony, and a strum gives the block its own pulse instead of
+/// leaving it to the drums.
+fn strum_chance(profile: Profile) -> f32 {
+    match profile {
+        Profile::SoloCalm => 0.65,
+        Profile::Zen => 0.55,
+        Profile::Ambient => 0.40,
+        Profile::VsIntense => 0.45,
+        Profile::Victory => 0.50,
+    }
+}
+
+fn form_roles(profile: Profile) -> &'static [BlockRole; 10] {
+    match profile {
+        Profile::VsIntense | Profile::Victory => &FORM_DRIVEN,
+        Profile::SoloCalm | Profile::Zen | Profile::Ambient => &FORM_CHORDAL,
+    }
+}
 
 struct Material {
     sections: Vec<Section>,
@@ -457,21 +538,17 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
     let dark = !matches!(profile, Profile::Victory);
     let bank = rhythm_bank(meter);
 
-    // Four motifs, each on its own rhythm cell. Which cells are in play
-    // is where a profile's note density actually comes from, and it has
-    // to be done by restricting the pool rather than by weighting it:
-    // four draws out of ten cells average out to the bank's own mean
-    // almost whatever the weights say. Ordering the bank by onset count
-    // and handing each profile a window of it does move the average,
-    // because the sparse cells are simply not in the bag.
-    let mut order: Vec<usize> = (0..bank.len()).collect();
-    order.sort_by_key(|r| std::cmp::Reverse(bank[*r].len()));
-    let pool = &order[..melody_pool(profile, bank.len())];
-
+    // Four motifs, each on its own rhythm cell, drawn evenly.
+    //
+    // Versus used to draw from a window of the busiest cells instead, to
+    // make it denser. It worked and it was wrong: a fast profile with a
+    // relentless tune has no room left to build, and the melody is the
+    // one part a player is following while they are trying to think. The
+    // contrast belongs in the form, not in the note count.
     let mut rhythms_used: Vec<usize> = Vec::new();
     let mut motifs: Vec<Motif> = Vec::new();
     while motifs.len() < 4 {
-        let r = pool[rng.below(pool.len())];
+        let r = rng.below(bank.len());
         if rhythms_used.contains(&r) {
             continue;
         }
@@ -521,23 +598,9 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         // returning every other block — 30% new material, which is where
         // real songs sit.
         form: vec![0, 0, 1, 0, 2, 0, 1, 0, 2, 0],
-        roles: FORM_ROLES.to_vec(),
+        roles: form_roles(profile).to_vec(),
         rhythms_used,
     }
-}
-
-/// How many of the rhythm cells, busiest first, a profile may draw its
-/// four motifs from. Never below four, or there would be nothing to pick
-/// four distinct cells out of.
-fn melody_pool(profile: Profile, bank: usize) -> usize {
-    let want = match profile {
-        Profile::VsIntense => 5,
-        Profile::Victory => 6,
-        Profile::SoloCalm => 8,
-        // The calm profiles get the whole bank, sparse cells included.
-        Profile::Ambient | Profile::Zen => bank,
-    };
-    want.clamp(4, bank)
 }
 
 /// Stack thirds onto the progression, by profile.
@@ -1170,6 +1233,11 @@ pub struct Composer {
     /// one the melody switches to for the second half.
     lead_first: Inst,
     lead_alt: Inst,
+    /// How this piece plays its chord blocks, and whether the strum
+    /// pattern is the busy one. Rolled per piece like the kit.
+    chord_style: ChordStyle,
+    strum_busy: bool,
+    style_override: Option<ChordStyle>,
     /// How stepwise this piece's melodies are, 0..=1 (see [`contour`]).
     smoothness: f32,
     /// Set by [`Composer::force_smoothness`]; survives re-rolls, where
@@ -1207,6 +1275,9 @@ impl Composer {
             lead_override: None,
             lead_first: lead_palette(profile)[0],
             lead_alt: lead_palette(profile)[0],
+            chord_style: ChordStyle::Sustain,
+            strum_busy: false,
+            style_override: None,
             smoothness: default_smoothness(profile),
             smooth_override: None,
             piece: 0,
@@ -1275,6 +1346,20 @@ impl Composer {
             .unwrap_or_else(|| palette[rng.below(palette.len())]);
         self.lead_alt = self.roll_alt_lead(&mut rng, palette);
         self.lead = self.lead_first;
+        self.chord_style = self.style_override.unwrap_or_else(|| {
+            if rng.chance(strum_chance(profile)) {
+                ChordStyle::Strum
+            } else {
+                ChordStyle::Sustain
+            }
+        });
+        // A busy strum under a fast profile is a lot of hand; under a
+        // slow one it is what makes the block move at all.
+        self.strum_busy = rng.chance(match profile {
+            Profile::Zen => 0.35,
+            Profile::Ambient => 0.45,
+            _ => 0.7,
+        });
         self.material = build_material(
             self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
             profile,
@@ -1395,6 +1480,19 @@ impl Composer {
     /// through the form, so it is what the readouts should show.
     pub fn lead(&self) -> Inst {
         self.lead
+    }
+
+    /// Override how the chord blocks play their chord. `None` hands the
+    /// choice back to the per-piece roll.
+    pub fn force_chord_style(&mut self, style: Option<ChordStyle>) {
+        self.style_override = style;
+        if let Some(style) = style {
+            self.chord_style = style;
+        }
+    }
+
+    pub fn chord_style(&self) -> ChordStyle {
+        self.chord_style
     }
 
     /// The instrument this piece rolled for the first half of the form.
@@ -1618,24 +1716,56 @@ impl Composer {
         // reason these blocks exist.
         if role == BlockRole::Chords {
             let voicing = chord.voicing();
-            let (span, hits) = HarmRate::HalfBar.grid(meter);
-            for k in 0..hits {
-                for (v, inst) in [Inst::ChordLo, Inst::ChordMid, Inst::ChordHi]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, inst)| (voicing[i], inst))
-                {
-                    out.push(NoteEvent {
-                        at: at((k * span) as f32),
-                        inst,
-                        midi: clamp_midi(tonic + 12 + mode.pitch(v)),
-                        // Let it ring right up to the next strike: the
-                        // point is the sustain, not the attack.
-                        frames: frames(span as u8),
-                        vel: 92,
-                        arp: None,
-                        glide: 0,
-                    });
+            let midi_of = |v: i32| clamp_midi(tonic + 12 + mode.pitch(v));
+            match self.chord_style {
+                ChordStyle::Sustain => {
+                    let (span, hits) = HarmRate::HalfBar.grid(meter);
+                    for k in 0..hits {
+                        for (i, inst) in [Inst::ChordLo, Inst::ChordMid, Inst::ChordHi]
+                            .into_iter()
+                            .enumerate()
+                        {
+                            out.push(NoteEvent {
+                                at: at((k * span) as f32),
+                                inst,
+                                midi: midi_of(voicing[i]),
+                                // Ring right up to the next strike: the
+                                // point is the sustain, not the attack.
+                                frames: frames(span as u8),
+                                vel: 92,
+                                arp: None,
+                                glide: 0,
+                            });
+                        }
+                    }
+                }
+                ChordStyle::Strum => {
+                    let pattern = strum_pattern(meter, self.strum_busy);
+                    let spread = (STRUM_SPREAD_SECS * SAMPLE_RATE as f32) as u64;
+                    for (n, s) in pattern.iter().enumerate() {
+                        // Ring until the next stroke, so the chord is
+                        // continuous the way a strummed one is.
+                        let next = pattern.get(n + 1).map_or(steps as f32, |x| x.step as f32)
+                            - s.step as f32;
+                        let len = (next.max(1.0) as u8).max(1);
+                        // Down goes low string first and takes the whole
+                        // chord; up comes back over the top two only.
+                        let strings: &[usize] = if s.down { &[0, 1, 2] } else { &[2, 1] };
+                        let base = at(s.step as f32);
+                        for (order, i) in strings.iter().enumerate() {
+                            out.push(NoteEvent {
+                                at: base + order as u64 * spread,
+                                inst: [Inst::StrumLo, Inst::StrumMid, Inst::StrumHi][*i],
+                                midi: midi_of(voicing[*i]),
+                                frames: frames(len),
+                                // Upstrokes are lighter — that is the
+                                // accent pattern doing the work.
+                                vel: if s.down { 100 } else { 74 },
+                                arp: None,
+                                glide: 0,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -2363,7 +2493,7 @@ mod tests {
         let full_snares = count(&blocks[0], |i| i.is_snare());
         let full_hats = count(&blocks[0], |i| i == Inst::Hat || i == Inst::Shaker);
 
-        for (i, role) in FORM_ROLES.iter().enumerate() {
+        for (i, role) in form_roles(Profile::VsIntense).iter().enumerate() {
             let b = &blocks[i];
             let has = |want: Inst| b.iter().any(|(x, _)| *x == want);
             match role {
@@ -2375,9 +2505,14 @@ mod tests {
                     );
                     // All three pulses, sounding together — that is what
                     // makes it a chord rather than an implied one.
-                    for want in [Inst::ChordLo, Inst::ChordMid, Inst::ChordHi] {
-                        assert!(has(want), "block {i} is missing {want:?}");
-                    }
+                    // Whichever way this piece plays them, all three
+                    // pulses have to be sounding.
+                    let held = [Inst::ChordLo, Inst::ChordMid, Inst::ChordHi];
+                    let strummed = [Inst::StrumLo, Inst::StrumMid, Inst::StrumHi];
+                    assert!(
+                        held.iter().all(|w| has(*w)) || strummed.iter().all(|w| has(*w)),
+                        "block {i} is not holding a full chord"
+                    );
                 }
                 BlockRole::Break => {
                     assert_eq!(count(b, melody), 0, "block {i} is a break, lead played");
@@ -2398,8 +2533,9 @@ mod tests {
                 }
                 BlockRole::Full => {
                     assert!(count(b, melody) > 0, "block {i} is full but has no melody");
-                    assert!(
-                        !has(Inst::ChordHi),
+                    assert_eq!(
+                        count(b, |x| x.is_chord_voice()),
+                        0,
                         "block {i} should not hold block chords"
                     );
                 }
@@ -2439,44 +2575,134 @@ mod tests {
     }
 
     #[test]
-    fn the_form_ends_on_a_full_block() {
-        // The last block is the final chorus, which forces every layer
-        // on. A rest or a chord block there would be overridden anyway,
-        // so the roles must not put one there.
-        assert_eq!(FORM_ROLES[FORM_ROLES.len() - 1], BlockRole::Full);
-        assert_eq!(FORM_ROLES.len(), 10);
-        // And there has to be some contrast in there at all.
-        assert!(FORM_ROLES.contains(&BlockRole::Chords));
-        assert!(FORM_ROLES.contains(&BlockRole::Break));
+    fn a_strum_spreads_its_strings_in_time() {
+        let mut c = Composer::new(3);
+        c.set_profile(Profile::SoloCalm, 0.5);
+        c.force_chord_style(Some(ChordStyle::Strum));
+        let ctx = Context {
+            profile: Profile::SoloCalm,
+            intensity: 0.5,
+            elapsed: 600.0,
+            ..Default::default()
+        };
+        // Block 1 is the first chord block of the chordal form.
+        let mut out = Vec::new();
+        for _ in 0..(BARS_PER_SECTION * 2) {
+            c.plan_bar(&ctx, &mut out);
+        }
+        let strums: Vec<&NoteEvent> = out.iter().filter(|e| e.inst.is_chord_voice()).collect();
+        assert!(!strums.is_empty(), "no chord notes at all");
+        assert!(
+            strums
+                .iter()
+                .all(|e| matches!(e.inst, Inst::StrumLo | Inst::StrumMid | Inst::StrumHi)),
+            "a pinned strum played held chords"
+        );
+
+        // Find one downstroke: low, then mid, then high, each a little
+        // after the last. Simultaneous notes would mean no strum at all.
+        let lo = strums
+            .iter()
+            .find(|e| e.inst == Inst::StrumLo)
+            .expect("no low string");
+        let mid = strums
+            .iter()
+            .find(|e| e.inst == Inst::StrumMid && e.at > lo.at)
+            .expect("no middle string after the low one");
+        let hi = strums
+            .iter()
+            .find(|e| e.inst == Inst::StrumHi && e.at > mid.at)
+            .expect("no top string after the middle one");
+        let spread = (STRUM_SPREAD_SECS * SAMPLE_RATE as f32) as u64;
+        assert_eq!(mid.at - lo.at, spread);
+        assert_eq!(hi.at - mid.at, spread);
+        // And the whole gesture stays short enough to read as one chord
+        // rather than as an arpeggio.
+        assert!(
+            ((hi.at - lo.at) as f32 / SAMPLE_RATE as f32) < 0.05,
+            "the strum takes too long to cross the strings"
+        );
     }
 
     #[test]
-    fn versus_writes_a_busier_tune_than_zen() {
+    fn upstrokes_are_lighter_and_skip_the_bass_string() {
+        let mut c = Composer::new(11);
+        c.set_profile(Profile::SoloCalm, 0.5);
+        c.force_chord_style(Some(ChordStyle::Strum));
+        let ctx = Context {
+            profile: Profile::SoloCalm,
+            intensity: 0.5,
+            elapsed: 600.0,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        for _ in 0..(BARS_PER_SECTION * 2) {
+            c.plan_bar(&ctx, &mut out);
+        }
+        let lows = out.iter().filter(|e| e.inst == Inst::StrumLo).count();
+        let highs = out.iter().filter(|e| e.inst == Inst::StrumHi).count();
+        assert!(lows > 0 && highs > 0);
+        assert!(
+            highs > lows,
+            "upstrokes should skip the bass string: {lows} low vs {highs} high"
+        );
+        // Two velocities, and the quiet one is the upstroke.
+        let mut vels: Vec<u8> = out
+            .iter()
+            .filter(|e| e.inst == Inst::StrumHi)
+            .map(|e| e.vel)
+            .collect();
+        vels.sort_unstable();
+        vels.dedup();
+        assert_eq!(vels.len(), 2, "strums should be accented, got {vels:?}");
+    }
+
+    #[test]
+    fn every_form_ends_on_a_full_block() {
+        for profile in Profile::ALL {
+            let roles = form_roles(profile);
+            // The last block is the final chorus, which forces every
+            // layer on. A rest or a chord block there would be
+            // overridden anyway, so the roles must not put one there.
+            assert_eq!(roles[roles.len() - 1], BlockRole::Full, "{profile:?}");
+            // And there has to be some contrast in there at all.
+            assert!(roles.contains(&BlockRole::Chords), "{profile:?}");
+            assert!(roles.contains(&BlockRole::Break), "{profile:?}");
+            // Something has to still play the tune.
+            let full = roles.iter().filter(|r| **r == BlockRole::Full).count();
+            assert!(
+                full >= 5,
+                "{profile:?} only has {full} blocks with a melody"
+            );
+        }
+    }
+
+    #[test]
+    fn the_solo_profiles_give_the_chords_more_room_than_versus() {
+        let chordy = |p: Profile| {
+            form_roles(p)
+                .iter()
+                .filter(|r| **r == BlockRole::Chords)
+                .count()
+        };
+        assert!(
+            chordy(Profile::SoloCalm) > chordy(Profile::VsIntense),
+            "solo should be the chord-forward one"
+        );
+        assert_eq!(chordy(Profile::Zen), chordy(Profile::SoloCalm));
+    }
+
+    #[test]
+    fn no_profile_writes_a_denser_tune_than_another() {
+        // Melody density is deliberately uniform: the note count is not
+        // where a profile's character lives, and a relentless tune in
+        // versus left no room to build. Contrast comes from the form.
         let vs = mean_onsets(Profile::VsIntense);
         let zen = mean_onsets(Profile::Zen);
-        let solo = mean_onsets(Profile::SoloCalm);
         assert!(
-            vs > zen * 1.25,
-            "versus should be markedly busier: vs {vs:.2} vs zen {zen:.2}"
+            (vs - zen).abs() < 0.35,
+            "versus {vs:.2} and zen {zen:.2} should write equally dense tunes"
         );
-        assert!(vs > solo, "versus {vs:.2} should out-pace solo {solo:.2}");
-    }
-
-    #[test]
-    fn every_profile_can_still_find_four_distinct_cells() {
-        // The pool is a window on the bank; too narrow a window and the
-        // motif loop spins forever looking for a fourth distinct cell.
-        for meter in METERS {
-            let bank = rhythm_bank(meter).len();
-            for profile in Profile::ALL {
-                let pool = melody_pool(profile, bank);
-                assert!(
-                    (4..=bank).contains(&pool),
-                    "{profile:?} in {} has a pool of {pool} out of {bank}",
-                    meter.name()
-                );
-            }
-        }
     }
 
     #[test]

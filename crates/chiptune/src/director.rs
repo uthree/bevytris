@@ -61,6 +61,7 @@ pub struct Director {
     pin_kit: Option<crate::compose::Kit>,
     pin_smooth: Option<f32>,
     pin_lead: Option<crate::Inst>,
+    pin_style: Option<crate::compose::ChordStyle>,
     ctx: Context,
     /// The bar currently being played out, in time order.
     bar: Vec<NoteEvent>,
@@ -82,6 +83,7 @@ impl Director {
             pin_kit: None,
             pin_smooth: None,
             pin_lead: None,
+            pin_style: None,
             ctx: Context::default(),
             bar: Vec::with_capacity(256),
             cursor: 0,
@@ -181,6 +183,14 @@ impl Director {
         }
     }
 
+    /// Hold how the chord blocks play their chord across re-rolls.
+    pub fn pin_chord_style(&mut self, style: Option<crate::compose::ChordStyle>) {
+        if style != self.pin_style {
+            self.pin_style = style;
+            self.apply_pins();
+        }
+    }
+
     fn apply_pins(&mut self) {
         if let Some(m) = self.pin_meter {
             self.composer.force_meter(m);
@@ -193,6 +203,7 @@ impl Director {
         // it just means "leave what the roll picked".
         self.composer.force_smoothness(self.pin_smooth);
         self.composer.force_lead(self.pin_lead);
+        self.composer.force_chord_style(self.pin_style);
     }
 
     /// Restart the piece in place, after something that changed its

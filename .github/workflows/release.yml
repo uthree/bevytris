@@ -118,6 +118,9 @@ jobs:
               VSync & fullscreen (F11)
             - English / Japanese UI, auto-detected from the OS (switchable in settings)
             - HDR bloom, particles, shockwaves, board inertia, Misaki pixel font
+            - Chord blocks: the melody rests and all three pulse channels hold one
+              voicing between them, held or strummed string-by-string. Solo and zen
+              build their pieces around these; versus visits them twice
             - Seven melody instruments — pluck, soft, sustain, piano, guitar, marimba,
               brass — one rolled per piece, so two pieces on a preset do not arrive
               with the same voice on the tune

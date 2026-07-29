@@ -108,6 +108,13 @@ pub enum Inst {
     ChordHi,
     ChordMid,
     ChordLo,
+    /// The same three channels, plucked instead of held. A strummed
+    /// chord is the sustained one struck string by string a few
+    /// milliseconds apart, so it needs an envelope with an attack to
+    /// hear the offsets against.
+    StrumHi,
+    StrumMid,
+    StrumLo,
     /// Held 50%-duty chord bed.
     Organ,
     /// Percussive 12.5%-duty chord stab.
@@ -164,9 +171,12 @@ impl Inst {
             | Inst::Guitar
             | Inst::Marimba
             | Inst::Brass
-            | Inst::ChordHi => Voice::Lead,
-            Inst::Organ | Inst::Stab | Inst::Pad | Inst::ChordMid => Voice::Harmony,
-            Inst::Echo | Inst::Arp | Inst::ChordLo => Voice::Counter,
+            | Inst::ChordHi
+            | Inst::StrumHi => Voice::Lead,
+            Inst::Organ | Inst::Stab | Inst::Pad | Inst::ChordMid | Inst::StrumMid => {
+                Voice::Harmony
+            }
+            Inst::Echo | Inst::Arp | Inst::ChordLo | Inst::StrumLo => Voice::Counter,
             Inst::SawLead | Inst::SawBass => Voice::Saw,
             Inst::Bell | Inst::Glass | Inst::WaveOrgan | Inst::WaveBass => Voice::Wave,
             Inst::Bass => Voice::Bass,
@@ -192,7 +202,15 @@ impl Inst {
     /// "is on the lead channel" is not the same question as "can play
     /// the tune".
     pub fn is_chord_voice(self) -> bool {
-        matches!(self, Inst::ChordHi | Inst::ChordMid | Inst::ChordLo)
+        matches!(
+            self,
+            Inst::ChordHi
+                | Inst::ChordMid
+                | Inst::ChordLo
+                | Inst::StrumHi
+                | Inst::StrumMid
+                | Inst::StrumLo
+        )
     }
 
     /// True for the instruments that may carry the melody.
@@ -476,6 +494,53 @@ const CHORD_LO: InstDef = InstDef {
     noise_short: false,
     wave: 0,
 };
+/// The strummed chord family. A plucked envelope on all three channels,
+/// with the same pick-slides-into-the-note attack the guitar lead uses —
+/// the offsets between the strings are only a few frames, so without an
+/// attack to hear them against a strum is just a chord.
+///
+/// The low string decays fastest and the top one rings longest, which is
+/// what a real strum does and what keeps the chord from turning to mud
+/// when the strokes come every eighth note.
+const STRUM_HI: InstDef = InstDef {
+    vol: m(&[15, 14, 13, 12, 11, 10, 10, 9, 9, 8, 8, 7, 7, 6], Some(9)),
+    duty: 1,
+    duty_seq: &[1, 1, 1, 2],
+    attack: &[-0.5, -0.2, -0.06],
+    vib_delay: 22,
+    vib_depth: 0.14,
+    vib_rate: 5.5,
+    fall: 0.0,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+const STRUM_MID: InstDef = InstDef {
+    vol: m(&[13, 12, 11, 10, 9, 8, 8, 7, 7, 6, 6, 5], Some(8)),
+    duty: 1,
+    duty_seq: &[1, 1, 2],
+    attack: &[-0.45, -0.18, -0.05],
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: 0.0,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
+const STRUM_LO: InstDef = InstDef {
+    vol: m(&[12, 11, 9, 8, 7, 6, 5, 5, 4, 4, 3], None),
+    duty: 2,
+    duty_seq: &[1, 2],
+    attack: &[-0.4, -0.15, -0.04],
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: 0.0,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
 const ORGAN: InstDef = InstDef {
     vol: m(&[10, 12, 11, 11, 10, 10], Some(2)),
     duty: 2,
@@ -742,6 +807,9 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
         Inst::ChordHi => &CHORD_HI,
         Inst::ChordMid => &CHORD_MID,
         Inst::ChordLo => &CHORD_LO,
+        Inst::StrumHi => &STRUM_HI,
+        Inst::StrumMid => &STRUM_MID,
+        Inst::StrumLo => &STRUM_LO,
         Inst::Organ => &ORGAN,
         Inst::Stab => &STAB,
         Inst::Pad => &PAD,
@@ -766,7 +834,7 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
 }
 
 /// Every instrument, for tests and for the offline renderer.
-pub const ALL_INSTRUMENTS: [Inst; 33] = [
+pub const ALL_INSTRUMENTS: [Inst; 36] = [
     Inst::Pluck,
     Inst::Sustain,
     Inst::Soft,
@@ -777,6 +845,9 @@ pub const ALL_INSTRUMENTS: [Inst; 33] = [
     Inst::ChordHi,
     Inst::ChordMid,
     Inst::ChordLo,
+    Inst::StrumHi,
+    Inst::StrumMid,
+    Inst::StrumLo,
     Inst::Organ,
     Inst::Stab,
     Inst::Pad,
@@ -855,7 +926,7 @@ mod tests {
 
     #[test]
     fn every_instrument_is_defined_and_listed() {
-        assert_eq!(ALL_INSTRUMENTS.len(), 33);
+        assert_eq!(ALL_INSTRUMENTS.len(), 36);
         for i in ALL_INSTRUMENTS {
             let d = inst_def(i);
             assert!(!d.vol.v.is_empty(), "{i:?} has no volume macro");

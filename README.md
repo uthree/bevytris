@@ -144,6 +144,7 @@ Settings are stored as RON at the platform config directory, e.g.
   `--lead piano|guitar|marimba|brass|...` and `--smooth 0..1` audition the
   melody instrument and how stepwise the line is; both are also rows in
   the in-game MUSIC room.
+  `--chords strum|held` auditions how the chord blocks play their chord.
 
 ### Reproducing a piece of music
 

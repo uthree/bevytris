@@ -12,7 +12,7 @@
 //! how the tempo ladder and the layer schedule get auditioned without
 //! playing the game badly on purpose.
 
-use bevytris_chiptune::compose::{Context, Kit, Meter, Profile};
+use bevytris_chiptune::compose::{ChordStyle, Context, Kit, Meter, Profile};
 use bevytris_chiptune::director::Director;
 use bevytris_chiptune::{SAMPLE_RATE, wav};
 
@@ -28,6 +28,7 @@ fn main() {
     let mut kit: Option<Kit> = None;
     let mut smooth: Option<f32> = None;
     let mut lead: Option<bevytris_chiptune::Inst> = None;
+    let mut chords: Option<ChordStyle> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -112,6 +113,15 @@ fn main() {
                 };
                 i += 2;
             }
+            "--chords" => {
+                chords = match next(i).as_str() {
+                    "auto" => None,
+                    "strum" => Some(ChordStyle::Strum),
+                    "held" | "sustain" => Some(ChordStyle::Sustain),
+                    other => panic!("unknown chord style {other} (try strum or held)"),
+                };
+                i += 2;
+            }
             "--ramp" => {
                 ramp = true;
                 i += 1;
@@ -133,6 +143,7 @@ fn main() {
     director.pin_kit(kit);
     director.pin_smoothness(smooth);
     director.pin_lead(lead);
+    director.pin_chord_style(chords);
 
     let mut samples = vec![0.0f32; total * 2];
     let mut notes = Vec::new();
