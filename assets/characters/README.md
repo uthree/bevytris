@@ -87,6 +87,22 @@ and the picker tile measure the image and scale it by height), so these do not
 have to be any particular size. The board portrait is fitted to the field, so
 very wide art ends up small rather than spilling out of the frame.
 
+### Building the set from one drawing
+
+Only `standing.png` is really worth drawing. `scripts/make_character_art.sh`
+derives the rest:
+
+```sh
+scripts/make_character_art.sh --from ~/art/mychar mychar
+```
+
+It takes `standing.png` (required) plus `win.png`, `lose.png`, `cutin.png` and
+`icon.png` if you have them, and writes the pack's `images/` — mirroring the
+standing art for the other facing, cropping the face for the icon, and putting
+it on a wide canvas for the cut-in. Anything you did supply is used as-is
+rather than derived. It also writes a `SOURCE.md` recording where the art came
+from, which is what `assets/CREDITS.md` asks for.
+
 ## Voice kinds
 
 Filenames are fixed. Anything else in `voices/` is ignored. A missing file just
