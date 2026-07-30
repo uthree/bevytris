@@ -177,6 +177,11 @@ impl Plugin for RenderPlugin {
     }
 }
 
+/// Where the playfield itself is drawn inside a board. Everything else on
+/// a board is placed relative to this: the backdrop and the neon frame go
+/// under it, the HUD and the portrait's result pose over it.
+pub const CELL_Z: f32 = 1.0;
+
 /// Called (chained after session spawn) from OnEnter(Playing) in main.rs.
 pub fn setup_board_visuals(
     mut commands: Commands,
@@ -249,7 +254,7 @@ pub fn setup_board_visuals(
                         let pos = cell_pos(cell, x, y, h);
                         parent.spawn((
                             Sprite::from_color(empty_color(y), Vec2::splat(cell - 2.0)),
-                            Transform::from_translation(pos.extend(1.0)),
+                            Transform::from_translation(pos.extend(CELL_Z)),
                             CellSprite { x, y },
                         ));
                     }

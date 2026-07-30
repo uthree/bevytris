@@ -76,7 +76,7 @@ The other three are pure extras and each falls back:
 | --- | --- | --- |
 | `cutin.png` | drawn large *behind* the boards on a TETRIS, T-Spin Double/Triple, Perfect Clear, or a zone release clearing 5+ lines, washed with that move's colour | the standing art |
 | `icon.png` | the character picker tile | the standing art |
-| `win.png` / `lose.png` | the pose held on the board while the result is up, next to the WIN/LOSE lettering | the other one, then the standing art |
+| `win.png` / `lose.png` | the pose held while the result is up, drawn *over* the field (the standing art sits behind the stack; this does not) next to the WIN/LOSE lettering | the other one, then the standing art |
 
 Aspect ratio is preserved everywhere the art is drawn as UI (the cut-in strip
 and the picker tile measure the image and scale it by height), so these do not
@@ -98,10 +98,15 @@ means that event has no line.
 | `combo.wav` | Combo! | コンボ！ |
 | `attack.wav` | Take this | くらえー |
 | `damage.wav` | Ouch | いたっ |
+| `damage_heavy.wav` | That is a lot | うわ、多い！ |
 | `zone_start.wav` | Zone, activate | ゾーン、発動 |
 | `zone_finish.wav` | How was that | どうだった |
 | `win.wav` | I win! | わたしの勝ち！ |
 | `lose.wav` | No way | そんなー |
+
+Taking garbage is the one event with two lines: two or three rows play
+`damage.wav`, four or more play `damage_heavy.wav`. A pack that ships only
+`damage.wav` uses it for both rather than going quiet on the big hits.
 
 ### Audio format
 

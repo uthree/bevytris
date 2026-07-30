@@ -5,7 +5,7 @@
 # WHAT THIS IS FOR
 #   The game loads optional "character" packs from assets/characters/<id>/.
 #   A pack is a metadata.json plus standing portraits, an optional cut-in
-#   image and up to 12 optional voice clips.  Real characters are drawn and
+#   image and up to 13 optional voice clips.  Real characters are drawn and
 #   voiced by humans; this script fabricates two obviously-fake stand-ins
 #   ("alice", English/Samantha, and "bob", Japanese/Kyoko) so the loading,
 #   layout, font and audio code can be developed and eyeballed without any
@@ -92,7 +92,7 @@ CUTIN_H=512
 ICON_W=256
 ICON_H=256
 
-# The twelve voice kinds, with the English and Japanese line for each.
+# The thirteen voice kinds, with the English and Japanese line for each.
 # "kind|english|japanese" — bash 3.2 has no associative arrays.
 VOICE_LINES='
 ready|Here we go|いくよー
@@ -103,6 +103,7 @@ perfect_clear|Perfect clear!|パーフェクトクリア！
 combo|Combo!|コンボ！
 attack|Take this|くらえー
 damage|Ouch|いたっ
+damage_heavy|That is a lot|うわ、多い！
 zone_start|Zone, activate|ゾーン、発動
 zone_finish|How was that|どうだった
 win|I win!|わたしの勝ち！

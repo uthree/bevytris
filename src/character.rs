@@ -36,7 +36,7 @@ use crate::config::GameSettings;
 use crate::i18n::Locale;
 use crate::core::game::{ClearKind, GameEvent, LineClear};
 use crate::emissive;
-use crate::render::BoardTheme;
+use crate::render::{BoardTheme, CELL_Z};
 use crate::session::{BoardEvent, BoardIndex};
 use crate::state::{AppState, GameMode, PlayState};
 
@@ -60,7 +60,10 @@ pub enum VoiceKind {
     PerfectClear,
     Combo,
     Attack,
+    /// A couple of rows of garbage: a complaint.
     Damage,
+    /// [`HEAVY_GARBAGE_ROWS`] or more at once: a different noise entirely.
+    DamageHeavy,
     ZoneStart,
     ZoneFinish,
     Win,
@@ -68,7 +71,7 @@ pub enum VoiceKind {
 }
 
 impl VoiceKind {
-    pub const ALL: [VoiceKind; 12] = [
+    pub const ALL: [VoiceKind; 13] = [
         VoiceKind::Ready,
         VoiceKind::Clear,
         VoiceKind::Tetris,
@@ -77,6 +80,7 @@ impl VoiceKind {
         VoiceKind::Combo,
         VoiceKind::Attack,
         VoiceKind::Damage,
+        VoiceKind::DamageHeavy,
         VoiceKind::ZoneStart,
         VoiceKind::ZoneFinish,
         VoiceKind::Win,
@@ -93,6 +97,7 @@ impl VoiceKind {
             VoiceKind::Combo => "combo",
             VoiceKind::Attack => "attack",
             VoiceKind::Damage => "damage",
+            VoiceKind::DamageHeavy => "damage_heavy",
             VoiceKind::ZoneStart => "zone_start",
             VoiceKind::ZoneFinish => "zone_finish",
             VoiceKind::Win => "win",
@@ -110,12 +115,33 @@ impl VoiceKind {
             VoiceKind::Combo => 2,
             VoiceKind::Attack => 2,
             VoiceKind::Tetris | VoiceKind::TSpin | VoiceKind::Damage => 3,
-            VoiceKind::Ready | VoiceKind::ZoneStart | VoiceKind::ZoneFinish => 4,
+            VoiceKind::Ready
+            | VoiceKind::ZoneStart
+            | VoiceKind::ZoneFinish
+            | VoiceKind::DamageHeavy => 4,
             VoiceKind::PerfectClear => 5,
             VoiceKind::Win | VoiceKind::Lose => 6,
         }
     }
+
+    /// The line to use when the pack does not have this one.
+    ///
+    /// Only the heavy hit has one, and it is not a nicety: every pack
+    /// authored before this variant existed has a `damage.wav` and no
+    /// `damage_heavy.wav`, and going *silent* on the worst hit of a match
+    /// would make it a strictly worse pack than it was yesterday.
+    pub fn fallback(self) -> Option<VoiceKind> {
+        match self {
+            VoiceKind::DamageHeavy => Some(VoiceKind::Damage),
+            _ => None,
+        }
+    }
 }
+
+/// Rows of garbage that make a hit worth its own voice line. Four is a
+/// tetris' worth arriving at once — the point where the stack you were
+/// building stops being the stack you have.
+const HEAVY_GARBAGE_ROWS: u32 = 4;
 
 /// The moves worth stopping the screen for, in the order they outrank each
 /// other.
@@ -215,6 +241,11 @@ pub struct Character {
 
 impl Character {
     pub fn voice(&self, kind: VoiceKind) -> Option<&str> {
+        self.clip(kind)
+            .or_else(|| kind.fallback().and_then(|to| self.clip(to)))
+    }
+
+    fn clip(&self, kind: VoiceKind) -> Option<&str> {
         self.voices
             .get(kind as usize)
             .and_then(|v| v.as_deref())
@@ -564,6 +595,7 @@ fn voice_for(event: &GameEvent, two_boards: bool) -> Option<VoiceKind> {
             }
         }
         GameEvent::TSpinNoLines { .. } => VoiceKind::TSpin,
+        GameEvent::GarbageRose { rows } if *rows >= HEAVY_GARBAGE_ROWS => VoiceKind::DamageHeavy,
         GameEvent::GarbageRose { rows } if *rows >= 2 => VoiceKind::Damage,
         GameEvent::ZoneActivated => VoiceKind::ZoneStart,
         GameEvent::ZoneEnded { lines, .. } if *lines > 0 => VoiceKind::ZoneFinish,
@@ -889,10 +921,10 @@ fn preload(character: &Character, server: &AssetServer, assets: &mut CharacterAs
 // ---------------------------------------------------------------------------
 
 /// Draw order inside a board. The backdrop is 0.5 and the cell grid is
-/// 1.0, so a portrait here is *inside* the field: the stack covers it as
-/// it builds, and the HUD (all of which is at 2.0) stays on top. That is
-/// the whole trick — it reads as part of the board rather than as a
-/// sticker over it.
+/// [`CELL_Z`], so a portrait here is *inside* the field: the stack covers
+/// it as it builds, and the HUD (all of which is at 2.0) stays on top.
+/// That is the whole trick — it reads as part of the board rather than as
+/// a sticker over it.
 const PORTRAIT_Z: f32 = 0.55;
 
 /// How much of the field's height the art fills.
@@ -1464,6 +1496,21 @@ const RESULT_TEXT_Z: f32 = 2.5;
 /// 0.20 it plays at.
 const RESULT_ALPHA: f32 = 0.85;
 
+/// And it comes out in front of the field for the same reason. A portrait
+/// spends the match at [`PORTRAIT_Z`], under [`CELL_Z`], which is exactly
+/// right while it is scenery — but a match ends with the board at its
+/// fullest, so a win pose left back there is a win pose buried behind the
+/// stack that just won. This sits over the cells and under
+/// [`RESULT_TEXT_Z`], so the WIN/LOSE lettering still reads.
+const RESULT_PORTRAIT_Z: f32 = 2.2;
+
+// The portrait is scenery during the match and the subject of the screen
+// after it, and those are opposite sides of the playfield. Cheap to state,
+// silent to get wrong, so state it where a wrong edit cannot compile.
+const _: () = assert!(PORTRAIT_Z < CELL_Z);
+const _: () = assert!(RESULT_PORTRAIT_Z > CELL_Z);
+const _: () = assert!(RESULT_PORTRAIT_Z < RESULT_TEXT_Z);
+
 #[derive(Component)]
 struct ResultBanner;
 
@@ -1492,7 +1539,7 @@ fn show_result(
     server: Res<AssetServer>,
     mut assets: ResMut<CharacterAssets>,
     boards: Query<(Entity, &BoardIndex, &BoardTheme)>,
-    mut portraits: Query<(&mut Portrait, &mut Sprite)>,
+    mut portraits: Query<(&mut Portrait, &mut Sprite, &mut Transform)>,
     children: Query<&Children>,
 ) {
     let Some(player_won) = player_won(result.as_deref(), last.as_deref()) else {
@@ -1508,11 +1555,12 @@ fn show_result(
         // Swap the pose in place: the portrait is a child of this board.
         if let Ok(kids) = children.get(entity) {
             for kid in kids {
-                if let Ok((mut portrait, mut sprite)) = portraits.get_mut(*kid) {
+                if let Ok((mut portrait, mut sprite, mut transform)) = portraits.get_mut(*kid) {
                     if let Some(path) = character.result_art(slot, won) {
                         sprite.image = assets.image(&server, path);
                     }
                     sprite.color = emissive(Color::srgba(1.0, 1.0, 1.0, RESULT_ALPHA), 1.15);
+                    transform.translation.z = RESULT_PORTRAIT_Z;
                     // Re-measure: the pose is very likely a different shape.
                     portrait.fitted = false;
                 }
@@ -1550,12 +1598,12 @@ fn clear_result(
     server: Res<AssetServer>,
     mut assets: ResMut<CharacterAssets>,
     banners: Query<Entity, With<ResultBanner>>,
-    mut portraits: Query<(&mut Portrait, &mut Sprite)>,
+    mut portraits: Query<(&mut Portrait, &mut Sprite, &mut Transform)>,
 ) {
     for entity in &banners {
         commands.entity(entity).despawn();
     }
-    for (mut portrait, mut sprite) in &mut portraits {
+    for (mut portrait, mut sprite, mut transform) in &mut portraits {
         let Some(character) = chosen.sides[portrait.slot].and_then(|i| roster.get(i)) else {
             continue;
         };
@@ -1566,6 +1614,8 @@ fn clear_result(
             Color::srgba(1.0, 1.0, 1.0, character.portrait_alpha),
             1.15,
         );
+        // Back inside the field, where a portrait belongs while it is scenery.
+        transform.translation.z = PORTRAIT_Z;
         portrait.fitted = false;
     }
 }
@@ -2048,6 +2098,10 @@ mod tests {
         // One rising row is a fact of life, not an injury.
         assert_eq!(voice_for(&GameEvent::GarbageRose { rows: 1 }, true), None);
         assert_eq!(
+            voice_for(&GameEvent::GarbageRose { rows: 4 }, true),
+            Some(VoiceKind::DamageHeavy)
+        );
+        assert_eq!(
             voice_for(&GameEvent::ZoneActivated, true),
             Some(VoiceKind::ZoneStart)
         );
@@ -2065,11 +2119,55 @@ mod tests {
         assert_eq!(voice_for(&GameEvent::LevelUp { level: 3 }, true), None);
     }
 
+    /// The whole point of the split: the size of the hit picks the line,
+    /// and the boundary is where a tetris' worth lands at once.
+    #[test]
+    fn a_big_hit_and_a_small_one_do_not_sound_the_same() {
+        let voice = |rows| voice_for(&GameEvent::GarbageRose { rows }, true);
+        for rows in 2..HEAVY_GARBAGE_ROWS {
+            assert_eq!(voice(rows), Some(VoiceKind::Damage), "{rows} rows");
+        }
+        for rows in [HEAVY_GARBAGE_ROWS, HEAVY_GARBAGE_ROWS + 1, 20] {
+            assert_eq!(voice(rows), Some(VoiceKind::DamageHeavy), "{rows} rows");
+        }
+    }
+
+    /// A pack written before `damage_heavy.wav` existed still has something
+    /// to say when it takes one; it just says the same thing as always.
+    #[test]
+    fn the_heavy_hit_falls_back_to_the_ordinary_one() {
+        assert_eq!(meta(r#"{"display_name":"a"}"#).voice(VoiceKind::DamageHeavy), None);
+
+        let mut c = meta(r#"{"display_name":"a"}"#);
+        c.voices[VoiceKind::Damage as usize] = Some(asset_path("a", "voices", "damage.wav"));
+        let heavy = c.voice(VoiceKind::DamageHeavy).expect("falls back");
+        assert!(heavy.ends_with("damage.wav"));
+
+        // Once it has its own clip, that is the one that plays.
+        c.voices[VoiceKind::DamageHeavy as usize] =
+            Some(asset_path("a", "voices", "damage_heavy.wav"));
+        let heavy = c.voice(VoiceKind::DamageHeavy).expect("its own clip");
+        assert!(heavy.ends_with("damage_heavy.wav"));
+        // And the fallback only ever runs the one way.
+        assert!(c.voice(VoiceKind::Damage).unwrap().ends_with("damage.wav"));
+    }
+
+    /// `voice()` indexes `voices` by the discriminant, so the array and the
+    /// enum have to stay in the same order — a mismatch would quietly play
+    /// the wrong clip rather than fail anywhere visible.
+    #[test]
+    fn the_voice_list_is_in_discriminant_order() {
+        for (i, kind) in VoiceKind::ALL.iter().enumerate() {
+            assert_eq!(*kind as usize, i, "{kind:?} is out of order");
+        }
+    }
+
     #[test]
     fn a_loud_line_cuts_a_quiet_one_and_not_the_other_way() {
         assert!(VoiceKind::PerfectClear.priority() > VoiceKind::Clear.priority());
         assert!(VoiceKind::Win.priority() > VoiceKind::PerfectClear.priority());
         assert!(VoiceKind::Tetris.priority() > VoiceKind::Combo.priority());
+        assert!(VoiceKind::DamageHeavy.priority() > VoiceKind::Damage.priority());
         assert_eq!(VoiceKind::Clear.priority(), 1);
     }
 
