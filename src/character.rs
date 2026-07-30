@@ -1032,19 +1032,35 @@ const CUTIN_DRIFT_X: f32 = 260.0;
 /// runs off the edge.
 const CUTIN_BOX: Vec2 = Vec2::new(1240.0, 690.0);
 
-/// How solid the art gets at its peak. A board's backdrop is opaque, so in
-/// versus most of this is hidden behind the two fields and only the edges
-/// and the middle gap show it — which is the trade for it never being in
-/// the way. In solo, with one field and a lot more spare screen, it reads
-/// clearly.
+/// How solid the art gets at its peak: completely.
 ///
-/// Deliberately not pushed into HDR the way the rest of this screen is.
-/// Everything else here is neon line art that is *supposed* to bloom; a
-/// character drawn at full-screen size and then bloomed washes out the HUD
-/// sitting on top of it, and a background that outshines the numbers the
-/// player is reading is a background that has misunderstood its job.
-const CUTIN_ALPHA: f32 = 0.7;
-const CUTIN_GLOW: f32 = 1.0;
+/// The pack's own art is the point, and blending it with whatever
+/// background scene happens to be running behind it only made both look
+/// washed out. Transparency is now only used for the way in and the way
+/// out — while it holds, this is the picture, not a tint over one. (A PNG's
+/// own alpha channel is untouched either way, so art drawn on a
+/// transparent canvas still shows the scene through its own gaps.)
+///
+/// A board's backdrop is opaque, so in versus the two fields hide most of
+/// it and it shows through the middle gap and around the edges; in solo,
+/// with one field and a lot more spare screen, it reads clearly. Either
+/// way it is never in front of anything the player is using.
+const CUTIN_ALPHA: f32 = 1.0;
+
+/// How much of the move's colour is laid over the art.
+///
+/// A straight multiply by the tint was fine at 70% opacity, where the
+/// scene behind diluted it. At full opacity it repaints the whole image in
+/// one hue and the pack's own colours are gone, so the tint is mixed
+/// towards white first: the art keeps its palette and just leans in the
+/// direction of the move.
+///
+/// Deliberately no HDR boost. Everything else on this screen is neon line
+/// art that is *supposed* to bloom; a character drawn at full-screen size
+/// and then bloomed washes out the HUD sitting on top of it, and a
+/// background that outshines the numbers the player is reading has
+/// misunderstood its job.
+const CUTIN_WASH: f32 = 0.4;
 
 /// How far it swells while it holds. Just enough that it is breathing.
 const CUTIN_DRIFT: f32 = 0.05;
@@ -1118,6 +1134,20 @@ fn queue_cutins(
     }
 }
 
+/// The move's colour, leaned towards white so it colours the art instead of
+/// replacing it, at the given opacity. Linear rather than sRGB because that
+/// is the space the renderer multiplies in.
+fn cutin_color(tint: Color, alpha: f32) -> Color {
+    let t = tint.to_linear();
+    let lean = |c: f32| 1.0 - CUTIN_WASH * (1.0 - c);
+    Color::LinearRgba(bevy::color::LinearRgba {
+        red: lean(t.red),
+        green: lean(t.green),
+        blue: lean(t.blue),
+        alpha,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_cutins(
     mut commands: Commands,
@@ -1186,7 +1216,7 @@ fn spawn_cutins(
             custom_size: Some(size),
             // The move's colour, so a glance says which one it was. Pushed
             // into HDR because everything else on this screen blooms.
-            color: emissive(kind.tint().with_alpha(0.0), CUTIN_GLOW),
+            color: cutin_color(kind.tint(), 0.0),
             ..default()
         },
         Transform::from_xyz(anchor - dir * CUTIN_ENTER, 0.0, CUTIN_Z),
@@ -1220,7 +1250,7 @@ fn update_cutins(
         // the same however long the art holds for.
         let elapsed = CUTIN_LIFE - cutin.life;
         let fade = (elapsed / CUTIN_FADE_IN).min(cutin.life / CUTIN_FADE_OUT).min(1.0);
-        sprite.color = emissive(cutin.tint.with_alpha(CUTIN_ALPHA * fade), CUTIN_GLOW);
+        sprite.color = cutin_color(cutin.tint, CUTIN_ALPHA * fade);
         // Swelling slowly is what keeps it from reading as a still image.
         let progress = elapsed / CUTIN_LIFE;
         sprite.custom_size = Some(cutin.size * (1.0 + CUTIN_DRIFT * progress));
