@@ -74,24 +74,31 @@ fi
 # ---------------------------------------------------------------------------
 # The cast
 #
-# id|ascii|display|flavor|voice-name|style-id|design
+# id|ascii|display|flavor|voice-name|style-id|design|defeat
 #
 # `style-id` is a VOICEVOX *style*, not a character — one character usually
 # has several. `curl $VOICEVOX_URL/speakers` lists them all.
+#
+# `defeat` is what losing does to them, and it is per-character for the same
+# reason the accessories are: each of these six is identified by exactly one
+# object, so knocking that object loose is a defeat that reads instantly and
+# reads differently for each of them. Scuffs and messy hair on top. Clothing
+# stays on — this is a character who lost a game, not a character who has
+# been undressed, and the cast is drawn as children.
 # ---------------------------------------------------------------------------
 CAST='
-mint|MINT|ミント|落ち着いていて、いつも音楽を聴いている。|四国めたん|2|teal hair, short bob cut, blunt bangs, aqua eyes, white headphones, white long sleeve shirt, teal skirt, teal and white two tone color scheme
-rosa|ROSA|ローザ|よく喋る。長い髪が自慢。|春日部つむぎ|8|magenta hair, very long low twintails, pink eyes, single red hair ribbon, white blouse, magenta vest, magenta skirt, magenta and white two tone color scheme
-amber|AMBER|アンバー|元気。とにかく速く積む。|ずんだもん|3|orange hair, high side ponytail, amber eyes, goggles on forehead, white tee shirt, orange overalls, orange and white two tone color scheme
-vio|VIO|ヴィオ|物静か。長考派。|冥鳴ひまり|14|purple hair, long straight hair, violet eyes, plain hooded cape, hood down, white dress, plain purple cape, purple and white two tone color scheme
-cobalt|COBALT|コバルト|マイペース。マフラーは一年中。|九州そら|16|dark blue hair, short messy hair, blue eyes, long white scarf, navy blue hoodie, white shirt, navy blue and white two tone color scheme
-ash|ASH|アッシュ|無口。表情は読めない。|東北きりたん|108|white hair, short bob cut, hair clip, grey eyes, grey hoodie, white skirt, white and grey clothes, monochrome color scheme
+mint|MINT|ミント|落ち着いていて、いつも音楽を聴いている。|四国めたん|2|teal hair, short bob cut, blunt bangs, aqua eyes, white headphones, white long sleeve shirt, teal skirt, teal and white two tone color scheme|white headphones slipped down around her neck, messy hair, dust smudge on cheek
+rosa|ROSA|ローザ|よく喋る。長い髪が自慢。|春日部つむぎ|8|magenta hair, very long low twintails, pink eyes, single red hair ribbon, white blouse, magenta vest, magenta skirt, magenta and white two tone color scheme|red hair ribbon untied and coming loose, messy hair, dust smudge on cheek
+amber|AMBER|アンバー|元気。とにかく速く積む。|ずんだもん|3|orange hair, high side ponytail, amber eyes, goggles on forehead, white tee shirt, orange overalls, orange and white two tone color scheme|goggles knocked askew, messy hair, dust smudge on cheek, wrinkled overalls
+vio|VIO|ヴィオ|物静か。長考派。|冥鳴ひまり|14|purple hair, long straight hair, violet eyes, plain hooded cape, hood down, white dress, plain purple cape, purple and white two tone color scheme|hood fallen back off her head, messy hair, dust smudge on cheek, rumpled cape
+cobalt|COBALT|コバルト|マイペース。マフラーは一年中。|九州そら|16|dark blue hair, short messy hair, blue eyes, long white scarf, navy blue hoodie, white shirt, navy blue and white two tone color scheme|long scarf unravelled and trailing loose, messy hair, dust smudge on cheek
+ash|ASH|アッシュ|無口。表情は読めない。|東北きりたん|108|white hair, short bob cut, hair clip, grey eyes, grey hoodie, white skirt, white and grey clothes, monochrome color scheme|hair clip fallen out, messy hair over one eye, dust smudge on cheek
 '
 
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
-STYLE="masterpiece, best quality, high score, great score, anime style, game character, 1girl, solo, young girl, 5 heads tall, full body, facing viewer, thick black outline, bold lineart, cel shading, flat color, simple design, limited color palette, large expressive eyes, eye highlights, detailed hands, five fingers, simple background, white background"
+STYLE="masterpiece, best quality, high score, great score, anime style, game character, 1girl, solo, young girl, 5 heads tall, full body, facing viewer, thick black outline, bold lineart, cel shading, flat color, simple design, limited color palette, large expressive eyes, eye highlights, detailed hands, five fingers"
 
 # All three poses stand, and all three keep the face up and visible.
 #
@@ -103,14 +110,40 @@ STYLE="masterpiece, best quality, high score, great score, anime style, game cha
 # arms dangling. A loss should read as disappointed, not haunted.
 pose_prompt() {
   case "$1" in
-    standing) echo "standing, arms at sides, open hands, looking at viewer, cheerful smile" ;;
-    win)      echo "standing, both arms raised high, victory, open mouth smile, closed eyes, happy, feet on the ground" ;;
-    lose)     echo "standing, sad expression, teary eyes, frowning, hands clasped together, looking at viewer, disappointed, feet on the ground" ;;
+    standing) echo "standing, arms at sides, open hands, looking at viewer, cheerful smile, simple background, white background" ;;
+    win)      echo "standing, both arms raised high, victory, open mouth smile, closed eyes, happy, feet on the ground, simple background, white background" ;;
+    lose)     echo "standing, sad expression, teary eyes, frowning, hands clasped together, looking at viewer, disappointed, feet on the ground, simple background, white background" ;;
+    # The cut-in is the one image drawn wide, close and loud. It sweeps
+    # full-bleed *behind* the boards at full opacity, so it is scenery for a
+    # big move rather than a portrait — which makes it the one place an
+    # effects background belongs. Upper body, because a full figure at this
+    # aspect is a small figure with a lot of nothing either side.
+    cutin)    echo "upper body, close up, dynamic pose, looking at viewer, confident smirk, hand reaching toward viewer, explosive energy background, radial speed lines, glowing particles, dramatic rim lighting, motion blur streaks" ;;
     *) echo "make_characters.sh: unknown pose $1" >&2; return 1 ;;
   esac
 }
 
-NEG="lowres, bad anatomy, bad hands, mitten hands, blob hands, malformed hands, fused fingers, missing fingers, extra digits, text, error, cropped, worst quality, low quality, low score, bad score, signature, watermark, blurry, realistic, 3d, photo, gradient, soft shading, thin lines, multiple views, sketch, border, frame, chibi, super deformed, minimalist, vector art, blank eyes, cluttered, multiple girls, 2girls, crowd, wings, scenery, floating objects, floating orb, sphere, ball, tall, long legs, mature female, adult, rainbow, multicolored, colorful, many colors, ornate, intricate, busy pattern, frills, jewelry, tiara, armor, mecha, horror, scary, creepy, ghost, face covered by hair, hair over face, faceless, duplicate head, extra head, puddle, splash, ground shadow, colored floor, jumping, mid-air, flying, falling, kneeling, sitting, crouching, lying down, from above, animal hood, creature hood, eyes on hood, kigurumi, black dress, grey background, colored background, gradient background"
+# The cut-in wants the opposite of everything the portraits want: a busy,
+# coloured, full-bleed background instead of a plain white one it can be cut
+# out of. So it drops those terms rather than fighting them.
+pose_negative() {
+  case "$1" in
+    cutin) echo "$NEG" \
+      | sed 's/, scenery//; s/, grey background//; s/, colored background//; s/, gradient background//; s/, cluttered//' ;;
+    *) echo "$NEG" ;;
+  esac
+}
+
+# ..and the opposite aspect. SDXL is trained on ~1 megapixel buckets, so the
+# landscape one is the portrait one turned on its side.
+pose_size() {
+  case "$1" in
+    cutin) echo "1216 832" ;;
+    *) echo "832 1216" ;;
+  esac
+}
+
+NEG="lowres, bad anatomy, bad hands, mitten hands, blob hands, malformed hands, fused fingers, missing fingers, extra digits, text, error, cropped, worst quality, low quality, low score, bad score, signature, watermark, blurry, realistic, 3d, photo, gradient, soft shading, thin lines, multiple views, sketch, border, frame, chibi, super deformed, minimalist, vector art, blank eyes, cluttered, multiple girls, 2girls, crowd, wings, scenery, floating objects, floating orb, sphere, ball, tall, long legs, mature female, adult, rainbow, multicolored, colorful, many colors, ornate, intricate, busy pattern, frills, jewelry, tiara, armor, mecha, horror, scary, creepy, ghost, face covered by hair, hair over face, faceless, duplicate head, extra head, puddle, splash, ground shadow, colored floor, jumping, mid-air, flying, falling, kneeling, sitting, crouching, lying down, from above, animal hood, creature hood, eyes on hood, kigurumi, black dress, grey background, colored background, gradient background, undressing, undressed, torn clothes, ripped clothes, open shirt, exposed skin, bare shoulders, underwear, lingerie, cleavage, revealing clothes, midriff, nude, topless, partially clothed, suggestive"
 
 # One seed for the whole cast. Same seed and same design across the three
 # poses is what keeps a character recognisably one person: with only the
@@ -251,13 +284,16 @@ JSON
 }
 
 build_art() {
-  local id="$1" design="$2"
+  local id="$1" design="$2" defeat="$3"
   local hero
   hero="$(mktemp -d)"
   local pose
-  for pose in standing win lose; do
+  for pose in standing win lose cutin; do
+    # shellcheck disable=SC2046 -- pose_size deliberately yields two words.
     "$SCRIPT_DIR/make_character_art.sh" --generate \
-      "$STYLE, $(pose_prompt "$pose"), $design" "$NEG" "$SEED" "$hero/$pose.png" || {
+      "$STYLE, $(pose_prompt "$pose"), $design$([ "$pose" = lose ] && echo ", $defeat")" \
+      "$(pose_negative "$pose")" \
+      "$SEED" "$hero/$pose.png" $(pose_size "$pose") || {
         /bin/rm -rf "$hero"; return 1;
       }
   done
@@ -290,12 +326,12 @@ main() {
     exit 0
   fi
 
-  local id ascii display flavor voice_name style design
-  echo "$CAST" | while IFS='|' read -r id ascii display flavor voice_name style design; do
+  local id ascii display flavor voice_name style design defeat
+  echo "$CAST" | while IFS='|' read -r id ascii display flavor voice_name style design defeat; do
     [ -n "$id" ] || continue
     if [ -n "$want" ] && ! echo " $want " | grep -q " $id "; then continue; fi
     echo "--- $id ($ascii)"
-    [ "$do_art" -eq 1 ] && build_art "$id" "$design"
+    [ "$do_art" -eq 1 ] && build_art "$id" "$design" "$defeat"
     [ "$do_voices" -eq 1 ] && build_voices "$id" "$style" "$voice_name" "$display" "$ascii" "$flavor"
   done
   echo

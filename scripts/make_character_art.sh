@@ -63,7 +63,7 @@
 #       assets/characters/<id>/images/.  Anything that arrives opaque has
 #       its background cut first.
 #
-#   scripts/make_character_art.sh --generate <prompt> <negative> <seed> <out>
+#   scripts/make_character_art.sh --generate <prompt> <negative> <seed> <out> [<w> <h>]
 #       One image out of ComfyUI, and nothing else.  Deliberately low-level:
 #       make_characters.sh owns the cast and its prompts, this owns talking
 #       to the engine, and a character's design lives in exactly one file.
@@ -149,11 +149,24 @@ comfy_up() {
 # the documented size.
 fit_into() {
   local src="$1" dst="$2" w="$3" h="$4"
-  local tmp="$dst.fit.png"
-  # -Z scales the longest side, so ask for whichever side binds.
-  sips -Z "$([ "$w" -gt "$h" ] && echo "$w" || echo "$h")" "$src" --out "$tmp" >/dev/null
+  local tmp="$dst.fit.png" longest
+  # `sips -Z N` sets the *source's longest side* to N. It does not fit an
+  # image into a box, which is what is wanted here, so the box has to be
+  # turned into a longest-side first.
+  #
+  # Getting this wrong is not subtle and was shipped once: passing the box's
+  # longest side straight to -Z scaled a 832x1216 portrait to 700x1024, and
+  # the pad that followed then *cropped* it — to 512 wide for a standing
+  # portrait, cutting the hair off either side, and to 512 tall for a
+  # 1024x512 cut-in, which framed a character from the neck to the knees.
+  longest="$(python3 -c "
+sw, sh = $(png_width "$src"), $(png_height "$src")
+scale = min($w / sw, $h / sh)
+print(max(1, round(max(sw, sh) * scale)))")"
+  sips -Z "$longest" "$src" --out "$tmp" >/dev/null
   # -p pads to a canvas and fills with transparent, which is what we want and
   # is also the only thing it will do: --padColor rejects an 8-digit RGBA.
+  # Nothing is cropped now, because the scale above already fits.
   sips -p "$h" "$w" "$tmp" --out "$dst" >/dev/null
   /bin/rm -f "$tmp"
 }
@@ -476,7 +489,7 @@ derive_pack() {
   local work
   work="$(mktemp -d)"
   local file
-  for file in standing win lose cutin icon; do
+  for file in standing win lose icon; do
     [ -f "$src/$file.png" ] || continue
     if has_alpha "$src/$file.png"; then
       cp "$src/$file.png" "$work/$file.png"
@@ -484,6 +497,12 @@ derive_pack() {
       cut_background "$src/$file.png" "$work/$file.png"
     fi
   done
+  # The cut-in keeps whatever background it was drawn with. It is swept
+  # full-bleed behind the boards rather than composited over a playfield,
+  # and CUTIN_ALPHA is 1.0 precisely so it reads as the picture rather than
+  # a tint over one — so an effects background is content, not something to
+  # be cut away.
+  [ -f "$src/cutin.png" ] && cp "$src/cutin.png" "$work/cutin.png"
   src="$work"
   standing="$src/standing.png"
 
@@ -671,6 +690,7 @@ GEN_H=1216
 
 generate() {
   local prompt="$1" negative="$2" seed="$3" out="$4"
+  local gw="${5:-$GEN_W}" gh="${6:-$GEN_H}"
   local template="$WORKFLOW_DIR/standing.json"
   if [ ! -f "$template" ]; then
     echo "make_character_art.sh: no workflow template at $template" >&2
@@ -684,7 +704,7 @@ generate() {
   mkdir -p "$dest"
   local rendered="$dest/.workflow.$name.json"
   render_workflow "$template" "$rendered" \
-    "PROMPT=$prompt" "NEGATIVE=$negative" "SEED=$seed" "WIDTH=$GEN_W" "HEIGHT=$GEN_H"
+    "PROMPT=$prompt" "NEGATIVE=$negative" "SEED=$seed" "WIDTH=$gw" "HEIGHT=$gh"
   local id
   id="$(comfy_submit "$rendered")" || { /bin/rm -f "$rendered"; return 1; }
   comfy_wait "$id" || { /bin/rm -f "$rendered"; return 1; }
@@ -812,11 +832,11 @@ main() {
     # anywhere else would put a character's design in two files.
     --generate)
       shift
-      [ $# -eq 4 ] || {
-        echo "usage: make_character_art.sh --generate <prompt> <negative> <seed> <out.png>" >&2
+      [ $# -eq 4 ] || [ $# -eq 6 ] || {
+        echo "usage: make_character_art.sh --generate <prompt> <negative> <seed> <out.png> [<w> <h>]" >&2
         exit 2
       }
-      generate "$1" "$2" "$3" "$4"
+      generate "$@"
       ;;
     -h|--help|"") usage ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
