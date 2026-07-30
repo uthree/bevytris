@@ -125,6 +125,16 @@ without an alpha channel has its background cut first. It also writes a
 `SOURCE.md` recording where the art came from, which is what
 `assets/CREDITS.md` asks for.
 
+Cutting the background is the step that decides whether a portrait reads as a
+character or as a rectangle, and there are two ways to do it. If ComfyUI is
+reachable it runs a matting model (`BiRefNet_toonout`, from the ComfyUI-RMBG
+node pack); if it is not, it falls back to flooding white inward from the
+canvas border. The fallback is worse, and specifically worse at poses: a
+victory pose tends to be drawn standing on a coloured impact splash and a
+defeat pose in a cloud of dust, neither of which is white and both of which
+touch the character, so the flood leaves a coloured slab at their feet.
+`--check` says which one you are going to get.
+
 The cut-in is the one worth drawing separately rather than deriving. It is
 swept full-bleed behind the boards at full opacity, so it wants the opposite
 of a portrait: wide, close, and with a background of its own — which the

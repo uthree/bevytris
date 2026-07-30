@@ -70,6 +70,10 @@
 #
 # ENVIRONMENT
 #   COMFYUI_URL        where the engine is (default http://127.0.0.1:8188)
+#   MATTE_MODEL        which BiRefNet variant cuts the backgrounds
+#                      (default BiRefNet_toonout — the illustration one).
+#                      Needs the ComfyUI-RMBG custom node pack; without it
+#                      the flood fill below takes over, which is worse.
 #   CHARACTER_DESIGN   whose character this depicts, if not ours — e.g.
 #                      "ずんだもん (東北ずん子・ずんだもんプロジェクト)".
 #                      Set it and the pack's SOURCE.md records that the art
@@ -120,6 +124,19 @@ ICON=256
 
 COMFYUI_URL="${COMFYUI_URL:-http://127.0.0.1:8188}"
 
+# Which matting model cuts the backgrounds. Requires the ComfyUI-RMBG custom
+# node pack, which is where `BiRefNetRMBG` comes from — note that this is a
+# different thing from ComfyUI's core background-removal node and its
+# models/background_removal/ folder, which stay empty when the pack is what
+# is installed.
+#
+# `BiRefNet_toonout` is the variant trained on illustration rather than
+# photography, and it is the one that matters here: the general and portrait
+# variants read a white shirt with a black outline as more background and
+# punch a hole through it. Measured on this cast — `BiRefNet-HR-matting`
+# erased MINT's shirt entirely.
+MATTE_MODEL="${MATTE_MODEL:-BiRefNet_toonout}"
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -130,6 +147,13 @@ command -v python3 >/dev/null 2>&1 || HAVE_PYTHON=0
 
 comfy_up() {
   curl -sS -m 5 "$COMFYUI_URL/system_stats" >/dev/null 2>&1
+}
+
+# comfy_has_node <class_type> — is that node installed over there?
+# An unknown node comes back as an empty object rather than a 404.
+comfy_has_node() {
+  curl -sS -m 20 "$COMFYUI_URL/object_info/$1" 2>/dev/null \
+    | python3 -c "import json,sys; sys.exit(0 if json.load(sys.stdin) else 1)" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -486,14 +510,30 @@ derive_pack() {
   # Anything that arrived opaque gets its background cut before it is fitted,
   # because a portrait without alpha is a white rectangle over the playfield.
   # Working copies, so the hero images the caller supplied are left alone.
-  local work
+  #
+  # Two ways to cut, and the good one needs a machine that is not always
+  # there: a matting model if ComfyUI is up, the flood fill if it is not.
+  # Decided once rather than per image, so a pack is never half cut one way
+  # and half the other.
+  local work matting=0
   work="$(mktemp -d)"
+  if [ -f "$WORKFLOW_DIR/matte.json" ] && comfy_up; then
+    matting=1
+    CUT_METHOD="$MATTE_MODEL, via ComfyUI"
+    echo "  cutting backgrounds with $MATTE_MODEL"
+  else
+    CUT_METHOD="flood fill from the canvas border"
+    echo "  cutting backgrounds by flood fill (no ComfyUI at $COMFYUI_URL)"
+  fi
   local file
   for file in standing win lose icon; do
     [ -f "$src/$file.png" ] || continue
     if has_alpha "$src/$file.png"; then
       cp "$src/$file.png" "$work/$file.png"
+    elif [ "$matting" -eq 1 ] && matte_background "$src/$file.png" "$work/$file.png"; then
+      :
     else
+      [ "$matting" -eq 1 ] && echo "    $file.png — matting failed, flood filling instead"
       cut_background "$src/$file.png" "$work/$file.png"
     fi
   done
@@ -679,6 +719,57 @@ PY
   curl -sS -f -m 60 "$COMFYUI_URL/view?$spec" -o "$dest/$name.png"
 }
 
+# comfy_upload <file> -> the name ComfyUI knows the file by, on stdout
+#
+# A workflow cannot be handed pixels; LoadImage takes a filename out of the
+# engine's own input directory, so anything going *in* has to be posted there
+# first. The returned name is not always the name sent — the engine
+# deduplicates — so it is read back rather than assumed.
+comfy_upload() {
+  local file="$1" response
+  response="$(curl -sS -f -m 60 -F "image=@$file" -F 'type=input' \
+    -F 'overwrite=true' "$COMFYUI_URL/upload/image")" || {
+    echo "make_character_art.sh: ComfyUI would not accept $file" >&2
+    return 1
+  }
+  python3 -c "import json,sys; print(json.loads(sys.argv[1])['name'])" "$response"
+}
+
+# matte_background <src> <dst>
+#
+# Cut the background with a real matting model instead of the flood fill.
+#
+# The flood fill below is only as good as its assumption — that the
+# background is white and connected to the border — and the poses break it
+# on both counts. A victory pose lands the character on a coloured impact
+# splash, a defeat pose on a puff of dust: neither is white, both touch the
+# figure, and what survives is a coloured slab at the character's feet that
+# reads on screen as a leftover rectangle rather than as art. A model that
+# was taught what a character is does not have that problem, because it is
+# not looking at brightness at all.
+matte_background() {
+  local src="$1" dst="$2"
+  local template="$WORKFLOW_DIR/matte.json"
+  [ -f "$template" ] || return 1
+  local name
+  name="$(comfy_upload "$src")" || return 1
+  local dest base
+  dest="$(dirname "$dst")"
+  base="$(basename "$dst" .png)"
+  local rendered="$dest/.workflow.matte.$base.json"
+  render_workflow "$template" "$rendered" "IMAGE=$name" "MODEL=$MATTE_MODEL" \
+    || { /bin/rm -f "$rendered"; return 1; }
+  local id
+  id="$(comfy_submit "$rendered")" || { /bin/rm -f "$rendered"; return 1; }
+  # Generous, because the first call of a session downloads the weights.
+  comfy_wait "$id" 600 || { /bin/rm -f "$rendered"; return 1; }
+  comfy_collect "$id" "$dest" "$base" || { /bin/rm -f "$rendered"; return 1; }
+  /bin/rm -f "$rendered"
+  # A matte that came back opaque did not matte anything, and letting it
+  # through would put a white rectangle on the playfield.
+  has_alpha "$dst"
+}
+
 # generate <prompt> <negative> <seed> <out.png>
 #
 # The generation resolution is the model's, not the pack's: SDXL is trained
@@ -783,6 +874,14 @@ do_check() {
   if [ "$HAVE_PYTHON" -eq 1 ]; then echo "  python3   yes"; else echo "  python3   NO (needed for JSON and PNG headers)"; fi
   if comfy_up; then
     echo "  ComfyUI   yes, at $COMFYUI_URL"
+    if comfy_has_node BiRefNetRMBG; then
+      echo "  matting   yes, $MATTE_MODEL"
+    else
+      echo "  matting   NO (no BiRefNetRMBG node over there)"
+      echo "            Install the ComfyUI-RMBG custom node pack for it."
+      echo "            Backgrounds get flood filled without it, which leaves"
+      echo "            coloured ground effects behind."
+    fi
   else
     echo "  ComfyUI   NO at $COMFYUI_URL"
     echo "            Set COMFYUI_URL to point at the machine running it."
@@ -807,6 +906,7 @@ do_from() {
   derive_pack "$id" "$src"
   write_source_note "$id" "hand-supplied hero images" \
     "- Source directory: \`$src\` (not part of this repository)
+- Background removal: ${CUT_METHOD:-none}
 - Derived: standing_left is a mirror of standing_right; anything absent above
   was derived from standing.png by \`scripts/make_character_art.sh\`."
   echo

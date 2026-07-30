@@ -3,7 +3,8 @@
 Generated for bevytris by `scripts/make_character_art.sh`.
 
 - Method: hand-supplied hero images
-- Source directory: `/var/folders/rp/3pkr8jjx5276_vpcxyf1c3cw0000gn/T/tmp.xk7NAj5M4A` (not part of this repository)
+- Source directory: `/var/folders/rp/3pkr8jjx5276_vpcxyf1c3cw0000gn/T/tmp.LH5jlsmNOp` (not part of this repository)
+- Background removal: BiRefNet_toonout, via ComfyUI
 - Derived: standing_left is a mirror of standing_right; anything absent above
   was derived from standing.png by `scripts/make_character_art.sh`.
 
