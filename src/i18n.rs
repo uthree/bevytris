@@ -142,6 +142,8 @@ pub struct Strings {
     pub jb_preset: &'static str,
     pub jb_meter: &'static str,
     pub jb_kit: &'static str,
+    /// Listening room: what the piece is built around rhythmically.
+    pub jb_groove: &'static str,
     /// Listening room: how stepwise the melodies are.
     pub jb_smooth: &'static str,
     /// Listening room: which instrument plays the melody.
@@ -346,6 +348,7 @@ pub const EN: Strings = Strings {
     jb_preset: "PRESET",
     jb_meter: "METER",
     jb_kit: "DRUMS",
+    jb_groove: "GROOVE",
     jb_smooth: "MELODY",
     jb_lead: "LEAD",
     jb_intensity: "INTENSITY",
@@ -510,6 +513,7 @@ pub const JA: Strings = Strings {
     jb_preset: "プリセット",
     jb_meter: "拍子",
     jb_kit: "ドラム",
+    jb_groove: "ノリ",
     jb_smooth: "メロディ",
     jb_lead: "リード",
     jb_intensity: "テンション",

@@ -242,6 +242,28 @@ fn build_samples() -> Vec<Vec<f32>> {
         }),
     ));
 
+    // 6 — hard-bass kick. The same idea as slot 0 taken to the other end:
+    // the pitch starts higher and collapses further, the body rings four
+    // times as long, and the whole thing is driven through a saturator.
+    // Clipping a sine is what puts harmonics above it, and those harmonics
+    // are what make a kick audible on a laptop speaker that cannot
+    // reproduce 45 Hz at all.
+    let mut p6 = 0.0f32;
+    out.push(render(
+        0.42,
+        Box::new(move |t, i| {
+            let f = 45.0 + 240.0 * (-t * 46.0).exp();
+            p6 += tau * f / 48_000.0;
+            let click = if i < 130 {
+                (1.0 - i as f32 / 130.0).powi(2) * 0.4
+            } else {
+                0.0
+            };
+            let body = (p6.sin() * 2.6).tanh() * (-t * 6.5).exp();
+            body + click
+        }),
+    ));
+
     out
 }
 
@@ -542,8 +564,11 @@ struct TriCh {
     /// gated — but a hard gate clicks, hence a ~2 ms ramp.
     gate: f32,
     gate_target: f32,
-    /// Frames left of a kick drum body stealing the channel.
+    /// Frames left of a kick drum body stealing the channel, and how many
+    /// it started with — the sweep lands on the same note either way, it
+    /// just takes longer to get there.
     kick_frames: u16,
+    kick_len: u16,
 }
 
 impl TriCh {
@@ -555,20 +580,25 @@ impl TriCh {
             gate: 0.0,
             gate_target: 0.0,
             kick_frames: 0,
+            kick_len: 3,
         }
     }
 
-    fn kick(&mut self) {
-        self.kick_frames = 3;
+    fn kick(&mut self, frames: u16) {
+        self.kick_frames = frames;
+        self.kick_len = frames.max(2);
     }
 
     fn tick_frame(&mut self) {
         let v = self.st.tick();
         if self.kick_frames > 0 {
             // A short descending sweep under the noise burst: this is how
-            // NES games faked a kick drum.
-            let step = 3 - self.kick_frames;
-            let midi = 43.0 - 7.0 * step as f32;
+            // NES games faked a kick drum. It ends on the same note
+            // however long it is given, so a longer body is a slower fall
+            // rather than a deeper one — past about 40 Hz there is nothing
+            // left for a speaker to reproduce anyway.
+            let step = (self.kick_len - self.kick_frames) as f32;
+            let midi = 43.0 - 14.0 * step / (self.kick_len - 1) as f32;
             self.inc = quantize_triangle(midi_to_hz(midi)) / SAMPLE_RATE as f32;
             self.gate_target = 1.0;
             self.kick_frames -= 1;
@@ -825,6 +855,25 @@ impl NoiseCh {
 pub const ZONE_CUTOFF_HZ: f32 = 750.0;
 const OPEN_CUTOFF_HZ: f32 = 18_000.0;
 
+/// How far a kick pushes the rest of the mix down, how far it comes back
+/// up, and how long that takes.
+///
+/// This is sidechain compression with the compressor left out: a dance
+/// record ducks everything else out of the kick's way, and the *pumping*
+/// that comes back afterwards is as much of the groove as the kick itself.
+/// Doing it as a gain envelope triggered by the note rather than by a
+/// detector on the signal is both cheaper and more reliable — the score
+/// already knows exactly when the kick lands.
+///
+/// The ceiling above 1 is makeup gain, and it is not a detail. Ducking
+/// alone costs about two decibels across a bar, so without it the groove
+/// that is supposed to hit hardest would arrive as the quietest thing the
+/// composer writes. Set so that the average over a bar comes back to
+/// where it started: what changes is the shape, not the level.
+const DUCK_FLOOR: f32 = 0.45;
+const DUCK_CEILING: f32 = 1.18;
+const DUCK_RECOVER: f32 = 1.0 / (0.115 * SAMPLE_RATE as f32);
+
 pub struct Synth {
     /// Lead, harmony and counter-melody.
     pulses: [PulseCh; 3],
@@ -848,6 +897,10 @@ pub struct Synth {
     /// Stereo width, collapsed toward mono while the zone runs.
     width: f32,
     width_target: f32,
+    /// Whether kicks duck the rest of the mix, and how far down it
+    /// currently is. See [`DUCK_FLOOR`].
+    pump: bool,
+    duck: f32,
     gain: f32,
 }
 
@@ -888,6 +941,8 @@ impl Synth {
             zone_target: OPEN_CUTOFF_HZ,
             width: 1.0,
             width_target: 1.0,
+            pump: false,
+            duck: 1.0,
             // Equal-power panning drops a centred voice 3 dB relative to
             // a mono sum, so the master makes that back.
             gain: 2.3,
@@ -911,6 +966,13 @@ impl Synth {
         self.width_target = if on { 0.3 } else { 1.0 };
     }
 
+    /// Let the kick duck everything else out of its way. Off everywhere
+    /// but the hard-bass groove — pumping a slow, sparse piece
+    /// does not make it groove, it makes it sound broken.
+    pub fn set_pump(&mut self, on: bool) {
+        self.pump = on;
+    }
+
     /// Release every sounding note. The gains ramp down over the current
     /// frame rather than snapping, so a hard cut between pieces does not
     /// click.
@@ -930,9 +992,13 @@ impl Synth {
         self.tri.gate_target = 0.0;
         self.tri.kick_frames = 0;
         self.pcm.stop();
+        self.duck = 1.0;
     }
 
     pub fn note_on(&mut self, ev: &NoteEvent) {
+        if self.pump && ev.inst.is_kick() {
+            self.duck = DUCK_FLOOR;
+        }
         match ev.voice() {
             Voice::Lead => self.pulses[0].st.start(ev),
             Voice::Harmony => self.pulses[1].st.start(ev),
@@ -943,11 +1009,22 @@ impl Synth {
             Voice::Perc => {
                 self.noise[0].st.start(ev);
                 if ev.inst == Inst::Kick {
-                    self.tri.kick();
+                    self.tri.kick(3);
                 }
             }
             Voice::Hat => self.noise[1].st.start(ev),
-            Voice::Sample => self.pcm.start(ev),
+            Voice::Sample => {
+                self.pcm.start(ev);
+                // The hard kick is the one sampled drum that also takes
+                // the triangle: the sample has the punch and the top of
+                // the thump, and the console's own sub sits under it for
+                // twice as long. Layering a sub under a kick is the whole
+                // genre, and the triangle is the only voice here that can
+                // hold a note that low without buzzing.
+                if ev.inst == Inst::HardKick {
+                    self.tri.kick(6);
+                }
+            }
         }
     }
 
@@ -982,6 +1059,8 @@ impl Synth {
             self.frame_acc = 0;
         }
         self.pos += 1;
+        let rest = if self.pump { DUCK_CEILING } else { 1.0 };
+        self.duck += (rest - self.duck) * DUCK_RECOVER;
 
         let p1 = self.pulses[0].sample();
         let p2 = self.pulses[1].sample();
@@ -1016,12 +1095,19 @@ impl Synth {
         };
 
         let w = self.width;
+        let duck = self.duck;
         let mut left = 0.0;
         let mut right = 0.0;
         let mut place = |v: Voice, amp: f32| {
             if amp == 0.0 {
                 return;
             }
+            // The drum channels are never ducked: a sidechain that pulls
+            // down its own trigger is just a quieter kick.
+            let amp = match v {
+                Voice::Perc | Voice::Hat | Voice::Sample => amp,
+                _ => amp * duck,
+            };
             let (l, r) = pan_gains(VOICE_PAN[v as usize], w);
             left += amp * l;
             right += amp * r;
@@ -1176,6 +1262,54 @@ mod tests {
             let level: f32 = mono(&mut s, 16_000).iter().map(|v| v.abs()).sum();
             assert!(level > 0.5, "{inst:?} produced nothing ({level})");
         }
+    }
+
+    #[test]
+    fn the_kick_only_ducks_the_mix_when_it_is_asked_to() {
+        // A held organ, then a kick over it. The kick is on the sample
+        // channel, which is never ducked, and it is most of the level in
+        // the window — so the organ's share is measured by rendering the
+        // same window without it.
+        let after_a_kick = |pump: bool, organ: bool| {
+            let mut s = Synth::new();
+            s.set_pump(pump);
+            if organ {
+                s.note_on(&ev(Inst::Organ, 67, 240));
+            }
+            mono(&mut s, 8_000);
+            s.note_on(&ev(Inst::PcmKick, 0, 6));
+            mono(&mut s, 3_000).iter().map(|v| v.abs()).sum::<f32>()
+        };
+        let share = |pump: bool| after_a_kick(pump, true) - after_a_kick(pump, false);
+        let open = share(false);
+        let pumped = share(true);
+        assert!(
+            pumped < open * 0.8,
+            "the kick did not duck anything: {open:.1} -> {pumped:.1}"
+        );
+
+        // And the makeup gain pays it back. Four kicks at 150 BPM with an
+        // organ over them must come out at the level it would have had
+        // without the pump: what the sidechain changes is the shape.
+        let across_a_bar = |pump: bool| {
+            let mut s = Synth::new();
+            s.set_pump(pump);
+            s.note_on(&ev(Inst::Organ, 67, 600));
+            let beat = SAMPLE_RATE as usize * 60 / 150;
+            let mut total = 0.0;
+            for _ in 0..4 {
+                s.note_on(&ev(Inst::PcmKick, 0, 6));
+                total += mono(&mut s, beat).iter().map(|v| v.abs()).sum::<f32>();
+            }
+            total
+        };
+        let level = across_a_bar(false);
+        let pumped = across_a_bar(true);
+        assert!(
+            (pumped - level).abs() < level * 0.05,
+            "pumping moved the level by {:.0}%",
+            (pumped / level - 1.0) * 100.0
+        );
     }
 
     #[test]

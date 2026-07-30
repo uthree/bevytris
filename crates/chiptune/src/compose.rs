@@ -252,6 +252,43 @@ const DARK_LOOPS: [[i32; 4]; 6] = [
     [0, 6, 3, 4],
 ];
 
+/// The one progression here that is not a walk between plain triads: what
+/// Japanese pop calls the 丸サ (maru-sa) progression, after the song it is
+/// named for, and what jazz would call a set of changes — `IVM7 III7 vi I7`,
+/// the loop under a very large slice of the last twenty years of J-pop and
+/// vocaloid writing.
+///
+/// Two things make it work and both are outside the key. Its `III7` and
+/// its `I7` are secondary dominants: they pull to the chord that follows
+/// instead of merely arriving next to it, which is why the loop feels like
+/// it is going somewhere despite never leaving.
+///
+/// It is stored here in its minor reading and rotated to start on the
+/// tonic — `i7 bIII7 bVIM7 V7`, which is the same four chords in the same
+/// order — because that puts a real dominant on the fourth bar, exactly
+/// where [`build_material`] schedules its half cadence. The rotation costs
+/// nothing musically and saves the progression from having to argue with
+/// the cadence machinery.
+///
+/// In A minor that reads `Am7 C7 FM7 E7`.
+const MARUSA: [Chord; 4] = [
+    Chord::with(0, Ext::Seventh),
+    Chord::dom(2, Ext::Seventh),
+    Chord::with(5, Ext::Seventh),
+    Chord::dom(4, Ext::Seventh),
+];
+
+/// The maru-sa changes only spell themselves in a mode with a minor sixth
+/// and a minor third — its `bVIM7` is a major seventh chord built on the
+/// flat sixth, which Dorian and the bright modes simply do not have. So a
+/// piece that uses it plays in plain minor and stays there.
+///
+/// That costs the intensity ladder its say over the mode for those pieces.
+/// It is a fair trade: the progression is doing the harmonic work that the
+/// ladder would otherwise be doing, and the arrangement still thickens
+/// with the danger.
+const MARUSA_MODE: Mode = Mode::Aeolian;
+
 #[derive(Clone, Copy, Debug)]
 struct MelNote {
     step: u8,
@@ -486,6 +523,9 @@ struct Material {
     sections: Vec<Section>,
     form: Vec<usize>,
     roles: Vec<BlockRole>,
+    /// True when the progression is [`MARUSA`], which pins the mode — see
+    /// [`MARUSA_MODE`].
+    marusa: bool,
     /// Which rhythm cells this piece drew. Nothing reads it at runtime;
     /// it exists so the "at most eight cells" invariant is testable.
     #[allow(dead_code)]
@@ -500,6 +540,11 @@ struct Material {
 pub enum Kit {
     Chip,
     Sampled,
+    /// The dance kit: a saturated sub kick and a clap on both backbeats,
+    /// with the chip hats still on top. Rolled by the hard-bass groove,
+    /// but it is a kit like any other and plays whatever pattern the
+    /// composer wrote.
+    Hard,
 }
 
 impl Kit {
@@ -507,6 +552,7 @@ impl Kit {
         match self {
             Kit::Chip => Inst::Kick,
             Kit::Sampled => Inst::PcmKick,
+            Kit::Hard => Inst::HardKick,
         }
     }
     fn snare(self, clap: bool) -> Inst {
@@ -514,16 +560,94 @@ impl Kit {
             (Kit::Chip, _) => Inst::Snare,
             (Kit::Sampled, false) => Inst::PcmSnare,
             (Kit::Sampled, true) => Inst::Clap,
+            // Both backbeats clap: on a four-on-the-floor bar a snare
+            // reads as a rock band sitting in, which is the one thing
+            // this kit is not.
+            (Kit::Hard, _) => Inst::Clap,
         }
     }
     pub fn name(self) -> &'static str {
         match self {
             Kit::Chip => "chip",
             Kit::Sampled => "pcm",
+            Kit::Hard => "hard",
         }
     }
 
-    pub const ALL: [Kit; 2] = [Kit::Chip, Kit::Sampled];
+    pub const ALL: [Kit; 3] = [Kit::Chip, Kit::Sampled, Kit::Hard];
+}
+
+/// What a piece is built around rhythmically.
+///
+/// This is a bigger switch than the kit: it decides the bass figure, what
+/// the third pulse plays, where the kick sits, whether the mix pumps under
+/// it, and — where the profile's mode allows it — the progression. One
+/// roll per piece, so a session hears both.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Groove {
+    /// Whatever the profile's own arrangement says. The house style.
+    Normal,
+    /// Hard bass: a kick on every beat with the whole mix ducking out of
+    /// its way, the bass answering on the offbeats under a sawtooth donk
+    /// an octave above it, chord stabs between, and release-cut piano
+    /// scattered over the sixteenths. Nothing here is a new idea — it is
+    /// what a dance record does — but on nine chip voices it is the
+    /// loudest a piece can be without playing more notes.
+    HardBass,
+}
+
+impl Groove {
+    pub fn name(self) -> &'static str {
+        match self {
+            Groove::Normal => "normal",
+            Groove::HardBass => "hard bass",
+        }
+    }
+
+    pub const ALL: [Groove; 2] = [Groove::Normal, Groove::HardBass];
+}
+
+/// How often each profile reaches for the hard-bass groove.
+///
+/// Only where a beat is the point. Zen has no business pumping, the menus
+/// have no drums to pump with, and the fanfare is over before the groove
+/// would establish itself.
+fn hard_bass_chance(profile: Profile) -> f32 {
+    match profile {
+        Profile::VsIntense => 0.65,
+        Profile::ZenPeak => 0.50,
+        Profile::SoloCalm => 0.35,
+        Profile::Zen | Profile::Ambient | Profile::Victory => 0.0,
+    }
+}
+
+/// How often a piece reaches for the maru-sa changes on its own, without
+/// the groove asking for them.
+///
+/// Zero wherever the mode they need would be wrong for the profile — see
+/// [`MARUSA_MODE`]. Those are also exactly the profiles whose whole
+/// character is the mode, so there is nothing to regret.
+fn marusa_chance(profile: Profile) -> f32 {
+    match profile {
+        Profile::VsIntense => 0.45,
+        Profile::SoloCalm => 0.30,
+        Profile::Ambient => 0.15,
+        Profile::Zen | Profile::ZenPeak | Profile::Victory => 0.0,
+    }
+}
+
+/// True where plain minor is a mode the profile would have chosen anyway,
+/// which is the condition for the maru-sa changes being available at all.
+fn marusa_fits(profile: Profile) -> bool {
+    marusa_chance(profile) > 0.0
+}
+
+fn roll_groove(profile: Profile, rng: &mut Rng) -> Groove {
+    if rng.chance(hard_bass_chance(profile)) {
+        Groove::HardBass
+    } else {
+        Groove::Normal
+    }
 }
 
 impl Profile {
@@ -656,7 +780,13 @@ pub fn default_smoothness(profile: Profile) -> f32 {
     }
 }
 
-fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) -> Material {
+fn build_material(
+    seed: u64,
+    profile: Profile,
+    meter: Meter,
+    smoothness: f32,
+    groove: Groove,
+) -> Material {
     let mut rng = Rng::new(seed ^ ((profile as u64 + 1) * 0x9E37_79B9));
     // Everything but the fanfare lives in minor. Major progressions read
     // as cheerful, and cheerful is the wrong register for a stack that is
@@ -686,6 +816,12 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         });
     }
 
+    // The groove can call for the maru-sa changes, and a piece can reach
+    // for them on its own. The roll happens either way so that pinning a
+    // groove does not shift every draw after this one.
+    let rolled_marusa = rng.chance(marusa_chance(profile));
+    let marusa = marusa_fits(profile) && (rolled_marusa || groove == Groove::HardBass);
+
     let loops: &[[i32; 4]] = if dark { &DARK_LOOPS } else { &CALM_LOOPS };
     let mut sections = Vec::new();
     for _ in 0..3 {
@@ -700,7 +836,14 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         };
         let mut chords = [Chord::new(0); 8];
         for (i, c) in chords.iter_mut().enumerate() {
-            *c = Chord::new(if i < 4 { base[i] } else { answer[i % 4] });
+            // The maru-sa loop is the whole eight bars, twice — it is a
+            // cycle rather than a phrase, and taking an answering
+            // progression to it would only break the cycle.
+            *c = if marusa {
+                MARUSA[i % 4]
+            } else {
+                Chord::new(if i < 4 { base[i] } else { answer[i % 4] })
+            };
         }
         // Scheduled cadences: half at the end of the antecedent phrase,
         // authentic at the end of the consequent.
@@ -709,7 +852,17 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         // A seventh on the dominant sharpens the pull home. This one is
         // structural rather than colour, so every profile gets it.
         chords[3].ext = Ext::Seventh;
-        extend(&mut chords, profile, &mut rng);
+        if marusa {
+            // Where the changes are the point, the half cadence is the
+            // real thing: a major third and a flat seventh, not the minor
+            // seventh chord the mode would otherwise put on this degree.
+            // It is the chord the rotation was arranged around.
+            chords[3] = MARUSA[3];
+        } else {
+            // Colour is for progressions that were not written with their
+            // own; sprinkling sevenths onto these would undo them.
+            extend(&mut chords, profile, &mut rng);
+        }
 
         // Each section sings its own plan, and each bar knows what the
         // one before it ended on so the line can carry over the bar line.
@@ -742,6 +895,7 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         sections,
         form,
         roles,
+        marusa,
         rhythms_used,
     }
 }
@@ -1024,6 +1178,11 @@ fn band(intensity: f32) -> usize {
     }
 }
 
+/// Where the hard-bass groove keeps the pulse whatever the profile
+/// usually does. Below this it stops bouncing; above it the kick stops
+/// having room to be a kick, and the whole thing turns into speedcore.
+const HARD_BASS_BPM: (f32, f32) = (148.0, 176.0);
+
 /// Tempo is rolled **once per piece and never moves again.**
 ///
 /// It used to climb with the danger level, NES-Tetris style. That is a
@@ -1033,7 +1192,25 @@ fn band(intensity: f32) -> usize {
 /// intensity signal still has plenty of voice: mode, note density, drum
 /// density, bass figure, duty cycle and which layers are audible all
 /// keep moving. Only the pulse holds still.
-fn tempo_range(profile: Profile) -> (f32, f32) {
+///
+/// The groove has a say because a groove is a tempo as much as it is a
+/// pattern: four on the floor at 200 BPM is not hard bass, it is
+/// something else with the same drum pattern.
+fn tempo_range(profile: Profile, groove: Groove) -> (f32, f32) {
+    let (lo, hi) = profile_tempo_range(profile);
+    if groove != Groove::HardBass {
+        return (lo, hi);
+    }
+    // Keep whatever the profile and the groove already agree on; where
+    // they do not overlap at all, the groove wins. A versus piece is
+    // otherwise faster than this bounces and a solo piece is slower.
+    let (floor, ceiling) = HARD_BASS_BPM;
+    let (lo, hi) = (lo.max(floor), hi.min(ceiling));
+    if lo < hi { (lo, hi) } else { HARD_BASS_BPM }
+}
+
+/// The window a profile picks from when nothing else has an opinion.
+fn profile_tempo_range(profile: Profile) -> (f32, f32) {
     match profile {
         // Slower than the menus, which is to say slower than anything
         // else the composer writes.
@@ -1051,7 +1228,7 @@ fn tempo_range(profile: Profile) -> (f32, f32) {
 /// Rolled per piece. Sampled drums are the exception rather than the
 /// house style: they are a change of texture, and the chip kit is what
 /// makes the rest of the arrangement sound like a chip.
-fn roll_kit(profile: Profile, rng: &mut Rng) -> Kit {
+fn roll_kit(profile: Profile, groove: Groove, rng: &mut Rng) -> Kit {
     let sampled = match profile {
         Profile::Zen => 0.20,
         Profile::Ambient => 0.25,
@@ -1060,15 +1237,17 @@ fn roll_kit(profile: Profile, rng: &mut Rng) -> Kit {
         Profile::VsIntense => 0.45,
         Profile::Victory => 0.5,
     };
-    if rng.chance(sampled) {
-        Kit::Sampled
-    } else {
-        Kit::Chip
+    // Drawn either way, so pinning the groove does not shift the piece's
+    // remaining rolls.
+    let sampled = rng.chance(sampled);
+    if groove == Groove::HardBass {
+        return Kit::Hard;
     }
+    if sampled { Kit::Sampled } else { Kit::Chip }
 }
 
-fn roll_tempo(profile: Profile, meter: Meter, rng: &mut Rng) -> f32 {
-    let (lo, hi) = tempo_range(profile);
+fn roll_tempo(profile: Profile, meter: Meter, groove: Groove, rng: &mut Rng) -> f32 {
+    let (lo, hi) = tempo_range(profile, groove);
     (lo + rng.unit() * (hi - lo)) * meter.tempo_scale()
 }
 
@@ -1150,6 +1329,11 @@ enum Counter {
     Echo,
     /// A fast chord arpeggio in sixteenths.
     Arp,
+    /// Release-cut piano: chord tones scattered over the sixteenths, each
+    /// one cut before it can ring. The same notes an arpeggio would play,
+    /// with holes in the pattern and no sustain — which turns the third
+    /// pulse from a texture into part of the rhythm section.
+    CutPiano,
 }
 
 /// What the sawtooth channel does when it is switched on.
@@ -1302,7 +1486,10 @@ pub fn lead_name(inst: Inst) -> &'static str {
     }
 }
 
-fn arrange(profile: Profile, ctx: &Context, lead: Inst) -> Arrangement {
+/// The bass figure the hard-bass groove plays: see [`bass_pattern`].
+const BASS_OFFBEAT: usize = 5;
+
+fn arrange(profile: Profile, ctx: &Context, lead: Inst, groove: Groove) -> Arrangement {
     let i = ctx.intensity.clamp(0.0, 1.0);
     let b = band(i);
     // High intensity pulls the layer schedule forward: a desperate board
@@ -1490,6 +1677,34 @@ fn arrange(profile: Profile, ctx: &Context, lead: Inst) -> Arrangement {
         },
     };
 
+    // The hard-bass treatment. Everything above the low end gets out of
+    // the kick's way and comes back in the gaps: the kick takes every
+    // beat, the bass answers between the beats instead of under them
+    // (the kick's own body is the note on the beat), the chords stab
+    // where the bass is not, and the piano fills the sixteenths that are
+    // left. The pumping is in `Synth::set_pump`, which is the other half
+    // of this and the half you feel rather than hear.
+    if groove == Groove::HardBass {
+        a.perc = true;
+        a.four_floor = true;
+        a.kick_extra = [&[][..], &[14], &[7, 14], &[7, 11, 14]][b];
+        a.snare = true;
+        // Nothing about this swings. A shuffled sixteenth under a
+        // four-on-the-floor kick is a different genre entirely.
+        a.swing = 0.5;
+        a.bass_pat = BASS_OFFBEAT;
+        // The saw doubles that offbeat an octave up: the donk.
+        a.saw = Some(SawRole::BassDouble);
+        a.harm_inst = Inst::Stab;
+        a.harm_rate = HarmRate::Eighth;
+        a.hat_k = [6, 8, 11, 13][b];
+        a.shaker = i >= 0.35;
+        // The piano arrives with the melody rather than a quarter of a
+        // minute later: it is a hook here, not an ornament.
+        a.counter = (t >= l_at).then_some(Counter::CutPiano);
+        a.max_prio = a.max_prio.max(1);
+    }
+
     // The zone treatment, straight out of Tetris Effect: pull the lead and
     // the drums, leave the harmony and bass, and let the filter close.
     // Losing the melody is what makes the moment feel like held breath.
@@ -1522,6 +1737,7 @@ pub struct Info {
     pub mode: Mode,
     pub meter: Meter,
     pub kit: Kit,
+    pub groove: Groove,
     /// What this piece is singing the melody with.
     pub lead: Inst,
     pub bpm: f32,
@@ -1553,12 +1769,18 @@ impl Info {
     /// out as a tofu box. See the test below.
     pub fn label(&self) -> String {
         format!(
-            "{} {}・{}・{:.0} BPM・{}・#{:06x}",
+            "{} {}・{}・{:.0} BPM・{}{}・#{:06x}",
             NOTE_NAMES[(self.tonic.rem_euclid(12)) as usize],
             self.mode.name(),
             self.meter.name(),
             self.bpm,
             lead_name(self.lead),
+            // The house groove goes unmentioned; there is no room in a
+            // toast for a field that reads the same every time.
+            match self.groove {
+                Groove::Normal => "",
+                Groove::HardBass => "・hard",
+            },
             self.seed & 0xff_ffff
         )
     }
@@ -1575,6 +1797,12 @@ pub struct Composer {
     bpm: f32,
     meter: Meter,
     kit: Kit,
+    /// What this piece is built around rhythmically. Rolled per piece,
+    /// and the one switch that reaches the synthesizer as well as the
+    /// score — see [`Composer::pumps`].
+    groove: Groove,
+    /// Set by [`Composer::force_groove`]; survives re-rolls.
+    groove_override: Option<Groove>,
     /// The melody instrument the last planned bar actually used. It is
     /// one of the two below, and which one depends on where in the form
     /// that bar sat.
@@ -1621,12 +1849,20 @@ impl Composer {
         Composer {
             seed,
             profile,
-            material: build_material(seed, profile, Meter::Four, default_smoothness(profile)),
+            material: build_material(
+                seed,
+                profile,
+                Meter::Four,
+                default_smoothness(profile),
+                Groove::Normal,
+            ),
             mode: mode_target(profile, 0.0, 0),
             root,
-            bpm: roll_tempo(profile, Meter::Four, &mut Rng::new(seed)),
+            bpm: roll_tempo(profile, Meter::Four, Groove::Normal, &mut Rng::new(seed)),
             meter: Meter::Four,
             kit: Kit::Chip,
+            groove: Groove::Normal,
+            groove_override: None,
             lead: lead_palette(profile)[0],
             lead_override: None,
             lead_first: lead_palette(profile)[0],
@@ -1660,6 +1896,7 @@ impl Composer {
             mode: self.mode,
             meter: self.meter,
             kit: self.kit,
+            groove: self.groove,
             lead: self.lead_first,
             bpm: self.bpm,
             bar: self.bar,
@@ -1687,8 +1924,11 @@ impl Composer {
         let mut rng = Rng::new(self.seed ^ (self.piece.wrapping_mul(0x1000_0193)));
         self.profile = profile;
         self.meter = roll_meter(profile, &mut rng);
-        self.bpm = roll_tempo(profile, self.meter, &mut rng);
-        self.kit = roll_kit(profile, &mut rng);
+        // Rolled before the tempo and the kit because it decides both.
+        let groove = roll_groove(profile, &mut rng);
+        self.groove = self.groove_override.unwrap_or(groove);
+        self.bpm = roll_tempo(profile, self.meter, self.groove, &mut rng);
+        self.kit = roll_kit(profile, self.groove, &mut rng);
         self.smoothness = self
             .smooth_override
             .unwrap_or_else(|| default_smoothness(profile));
@@ -1725,17 +1965,71 @@ impl Composer {
             profile,
             self.meter,
             self.smoothness,
+            self.groove,
         );
-        self.mode = mode_target(profile, intensity, self.mode_variant);
+        self.mode = self.piece_mode(intensity);
         self.bar = 0;
         // A new song starts back in its own key.
         self.lift = 0;
+    }
+
+    /// The scale this piece plays in at `intensity`.
+    ///
+    /// Normally the intensity ladder decides, one mode per band. A piece
+    /// on the maru-sa changes does not get a vote: those chords only
+    /// spell themselves in one mode — see [`MARUSA_MODE`].
+    fn piece_mode(&self, intensity: f32) -> Mode {
+        if self.material.marusa {
+            return MARUSA_MODE;
+        }
+        mode_target(self.profile, intensity, self.mode_variant)
     }
 
     /// Override the drum kit [`Composer::set_profile`] rolled. Used by
     /// the offline renderer to audition a kit on demand.
     pub fn force_kit(&mut self, kit: Kit) {
         self.kit = kit;
+    }
+
+    /// Override the groove [`Composer::set_profile`] rolled, rebuilding
+    /// the piece around it: the groove decides the tempo window, the kit
+    /// and — where the mode allows it — the progression, so none of those
+    /// can be left as they were. `None` hands the choice back to the roll.
+    pub fn force_groove(&mut self, groove: Option<Groove>) {
+        if groove == self.groove_override {
+            return;
+        }
+        self.groove_override = groove;
+        // What this piece's own roll would have chosen, by replaying the
+        // draws `set_profile` made up to that point.
+        let mut rng = Rng::new(self.seed ^ (self.piece.wrapping_mul(0x1000_0193)));
+        roll_meter(self.profile, &mut rng);
+        let rolled = roll_groove(self.profile, &mut rng);
+        let want = groove.unwrap_or(rolled);
+        if want == self.groove {
+            return;
+        }
+        self.groove = want;
+        self.bpm = roll_tempo(self.profile, self.meter, want, &mut rng);
+        self.kit = roll_kit(self.profile, want, &mut rng);
+        self.material = build_material(
+            self.seed ^ self.piece.wrapping_mul(0xA24B_AED4),
+            self.profile,
+            self.meter,
+            self.smoothness,
+            want,
+        );
+        self.bar = 0;
+    }
+
+    pub fn groove(&self) -> Groove {
+        self.groove
+    }
+
+    /// Whether the kick should duck the rest of the mix. The one thing
+    /// the composer has to say to the synthesizer that is not a note.
+    pub fn pumps(&self) -> bool {
+        self.groove == Groove::HardBass
     }
 
     /// Override the meter that [`Composer::set_profile`] rolled, and
@@ -1749,6 +2043,7 @@ impl Composer {
         self.bpm = roll_tempo(
             self.profile,
             meter,
+            self.groove,
             &mut Rng::new(self.seed ^ self.piece.wrapping_mul(0x1000_0193)),
         );
         self.material = build_material(
@@ -1756,6 +2051,7 @@ impl Composer {
             self.profile,
             meter,
             self.smoothness,
+            self.groove,
         );
         self.bar = 0;
     }
@@ -1777,6 +2073,7 @@ impl Composer {
             self.profile,
             self.meter,
             want,
+            self.groove,
         );
         self.bar = 0;
     }
@@ -1807,8 +2104,9 @@ impl Composer {
                 // by replaying the draws `set_profile` made.
                 let mut rng = Rng::new(self.seed ^ (self.piece.wrapping_mul(0x1000_0193)));
                 roll_meter(self.profile, &mut rng);
-                roll_tempo(self.profile, self.meter, &mut rng);
-                roll_kit(self.profile, &mut rng);
+                roll_groove(self.profile, &mut rng);
+                roll_tempo(self.profile, self.meter, self.groove, &mut rng);
+                roll_kit(self.profile, self.groove, &mut rng);
                 self.lead_first = palette[rng.below(palette.len())];
                 self.lead_alt = self.roll_alt_lead(&mut rng, palette);
             }
@@ -1895,7 +2193,7 @@ impl Composer {
         if phrase_start {
             // Mode changes only at phrase boundaries; mid-bar they sound
             // like a bug rather than a modulation.
-            self.mode = mode_target(self.profile, ctx.intensity, self.mode_variant);
+            self.mode = self.piece_mode(ctx.intensity);
         }
         // Tempo and meter are fixed for the whole piece — see tempo_range.
         let meter = self.meter;
@@ -1955,7 +2253,7 @@ impl Composer {
             self.lead_first
         };
 
-        let mut arr = arrange(self.profile, ctx, self.lead);
+        let mut arr = arrange(self.profile, ctx, self.lead, self.groove);
         match role {
             BlockRole::Full => {}
             BlockRole::Chords => {
@@ -2025,7 +2323,7 @@ impl Composer {
                 out.push(NoteEvent {
                     at: at(n.step as f32),
                     inst: arr.lead_inst,
-                    midi: clamp_midi(tonic + 24 + mode.pitch(n.deg)),
+                    midi: clamp_midi(tonic + 24 + chord.pitch(mode, n.deg)),
                     vel: if n.prio == 0 { 112 } else { 88 },
                     frames: frames(n.len),
                     arp: None,
@@ -2037,7 +2335,7 @@ impl Composer {
         // --- harmony --------------------------------------------------
         if arr.harmony {
             let arp = chord.arp(mode);
-            let base = clamp_midi(tonic + 12 + mode.pitch(chord.degree));
+            let base = clamp_midi(tonic + 12 + chord.pitch(mode, chord.degree));
             let (span, hits) = arr.harm_rate.grid(meter);
             if arr.harm_inst == Inst::Stab {
                 // Offbeat stabs drive; a held pad would just sit there.
@@ -2076,7 +2374,7 @@ impl Composer {
         // reason these blocks exist.
         if role == BlockRole::Chords {
             let voicing = chord.voicing();
-            let midi_of = |v: i32| clamp_midi(tonic + 12 + mode.pitch(v));
+            let midi_of = |v: i32| clamp_midi(tonic + 12 + chord.pitch(mode, v));
             match self.chord_style {
                 ChordStyle::Sustain => {
                     let (span, hits) = HarmRate::HalfBar.grid(meter);
@@ -2143,7 +2441,7 @@ impl Composer {
                     out.push(NoteEvent {
                         at: at(step),
                         inst: Inst::Echo,
-                        midi: clamp_midi(tonic + 24 + mode.pitch(n.deg)),
+                        midi: clamp_midi(tonic + 24 + chord.pitch(mode, n.deg)),
                         vel: 62,
                         frames: frames(n.len.min(3)),
                         arp: None,
@@ -2162,12 +2460,52 @@ impl Composer {
                     out.push(NoteEvent {
                         at: at(i as f32),
                         inst: Inst::Arp,
-                        midi: clamp_midi(tonic + 12 + mode.pitch(deg)),
+                        midi: clamp_midi(tonic + 12 + chord.pitch(mode, deg)),
                         vel: 72,
                         frames: frames(1),
                         arp: None,
                         glide: 0,
                     });
+                }
+            }
+            Some(Counter::CutPiano) => {
+                // Eleven sixteenths in sixteen, which Bjorklund spaces as
+                // `x.xx.xx.xx.xx.xx` — a rest on the second sixteenth of
+                // every beat. That one hole is the difference between a
+                // figure and a machine gun, and it is why the count is
+                // eleven rather than the twelve that would divide evenly.
+                //
+                // The chord is walked two octaves' worth rather than
+                // circling one: the line has to climb or the ear hears a
+                // loop instead of a hook.
+                //
+                // The notes are cut by the instrument, not by the length
+                // asked for here: `CutPiano`'s envelope is over inside
+                // five frames whatever it is handed.
+                let (tones, n) = chord.ladder();
+                let spbeat = meter.steps_per_beat() as usize;
+                let mut taken = 0usize;
+                // Rotated away from the hats, which are on the same
+                // grid and would otherwise fuse into one sound wherever
+                // the two patterns happen to agree.
+                for (i, on) in euclid_rot(steps as usize * 11 / 16, steps as usize, hat_rot + 2)
+                    .iter()
+                    .enumerate()
+                {
+                    if !*on {
+                        continue;
+                    }
+                    let octave = 7 * (1 + (taken / n) as i32 % 2);
+                    out.push(NoteEvent {
+                        at: at(i as f32),
+                        inst: Inst::CutPiano,
+                        midi: clamp_midi(tonic + 12 + chord.pitch(mode, tones[taken % n] + octave)),
+                        vel: if i % spbeat == 0 { 96 } else { 74 },
+                        frames: frames(1),
+                        arp: None,
+                        glide: 0,
+                    });
+                    taken += 1;
                 }
             }
             _ => {}
@@ -2178,7 +2516,7 @@ impl Composer {
             out.push(NoteEvent {
                 at: at(0.0),
                 inst: pad,
-                midi: clamp_midi(tonic + mode.pitch(chord.degree)),
+                midi: clamp_midi(tonic + chord.pitch(mode, chord.degree)),
                 vel: 76,
                 frames: frames(steps as u8),
                 arp: Some(chord.arp(mode)),
@@ -2192,7 +2530,7 @@ impl Composer {
             out.push(NoteEvent {
                 at: at(step as f32),
                 inst: Inst::Bass,
-                midi: clamp_midi(tonic - 12 + mode.pitch(deg)),
+                midi: clamp_midi(tonic - 12 + chord.pitch(mode, deg)),
                 vel: 110,
                 frames: frames(len),
                 arp: None,
@@ -2210,7 +2548,7 @@ impl Composer {
                     out.push(NoteEvent {
                         at: at(step as f32),
                         inst: Inst::SawBass,
-                        midi: clamp_midi(tonic + mode.pitch(deg)),
+                        midi: clamp_midi(tonic + chord.pitch(mode, deg)),
                         vel: 88,
                         frames: frames(len),
                         arp: None,
@@ -2223,7 +2561,7 @@ impl Composer {
                     out.push(NoteEvent {
                         at: at(n.step as f32),
                         inst: Inst::SawLead,
-                        midi: clamp_midi(tonic + 12 + mode.pitch(n.deg)),
+                        midi: clamp_midi(tonic + 12 + chord.pitch(mode, n.deg)),
                         vel: 80,
                         frames: frames(n.len),
                         arp: None,
@@ -2380,7 +2718,7 @@ impl Composer {
                     inst: Inst::Arp,
                     // Climb the scale to just under the octave, so the
                     // modulation resolves it.
-                    midi: clamp_midi(tonic + 12 + mode.pitch(7 - n + k)),
+                    midi: clamp_midi(tonic + 12 + chord.pitch(mode, 7 - n + k)),
                     vel: (70.0 + 48.0 * grow) as u8,
                     frames: frames(1),
                     arp: None,
@@ -2437,7 +2775,14 @@ impl Composer {
         let steps = meter.steps();
         let (degree, lifted, seventh) = OUTRO[outro_bar.min(OUTRO.len() - 1)];
         self.lift = if lifted { LIFT_STEP } else { 0 };
-        let chord = Chord::with(degree, if seventh { Ext::Seventh } else { Ext::Triad });
+        // The one seventh in the table is the V that lands the piece back
+        // home, and it is a real dominant: this is the last cadence of the
+        // song, and a minor v7 does not close anything.
+        let chord = if seventh {
+            Chord::dom(degree, Ext::Seventh)
+        } else {
+            Chord::new(degree)
+        };
         let tonic = self.root + ctx.transpose + self.lift;
         // The pivot needs a flat seventh; harmonic minor's leading tone
         // would land a semitone off home. Softening the mode also suits a
@@ -2454,7 +2799,7 @@ impl Composer {
             out.push(NoteEvent {
                 at: at(0.0),
                 inst: if last { Inst::Bell } else { Inst::WaveOrgan },
-                midi: clamp_midi(tonic + mode.pitch(chord.degree)),
+                midi: clamp_midi(tonic + chord.pitch(mode, chord.degree)),
                 vel: if last { 92 } else { 80 },
                 frames: frames(steps as u8),
                 arp: Some(arp),
@@ -2463,7 +2808,7 @@ impl Composer {
             out.push(NoteEvent {
                 at: at(0.0),
                 inst: Inst::Organ,
-                midi: clamp_midi(tonic + 12 + mode.pitch(chord.degree)),
+                midi: clamp_midi(tonic + 12 + chord.pitch(mode, chord.degree)),
                 vel: 78,
                 frames: frames(steps as u8),
                 arp: Some(arp),
@@ -2473,7 +2818,7 @@ impl Composer {
         out.push(NoteEvent {
             at: at(0.0),
             inst: Inst::Bass,
-            midi: clamp_midi(tonic - 12 + mode.pitch(chord.degree)),
+            midi: clamp_midi(tonic - 12 + chord.pitch(mode, chord.degree)),
             vel: 108,
             frames: frames(steps as u8),
             arp: None,
@@ -2585,6 +2930,13 @@ fn bass_pattern(pat: usize, root: i32, meter: Meter) -> Vec<(u8, u8, i32)> {
         3 => (0..steps / spb)
             .map(|i| (i * spb, spb, root + [0, 4, 7, 4][i as usize % 4]))
             .collect(),
+        // Offbeats only, straight through: the beat itself belongs to the
+        // kick, whose body is the note there. A bass that plays under the
+        // kick as well as between it does not sound twice as heavy, it
+        // sounds like one long note with a click on it.
+        5 => (0..steps / spb)
+            .map(|i| (i * spb + spb / 2, spb / 2, root))
+            .collect(),
         // Arpeggiated sixteenths.
         _ => (0..steps)
             .map(|i| (i, 1u8, root + [0, 2, 4, 7][i as usize % 4]))
@@ -2596,6 +2948,22 @@ fn bass_pattern(pat: usize, root: i32, meter: Meter) -> Vec<(u8, u8, i32)> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// Material on the house groove, which is what every test that is
+    /// not about the groove is asking for.
+    fn material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) -> Material {
+        build_material(seed, profile, meter, smoothness, Groove::Normal)
+    }
+
+    fn material_with(
+        seed: u64,
+        profile: Profile,
+        meter: Meter,
+        smoothness: f32,
+        groove: Groove,
+    ) -> Material {
+        build_material(seed, profile, meter, smoothness, groove)
+    }
 
     fn run(profile: Profile, intensity: f32, bars: u32) -> Vec<NoteEvent> {
         let mut c = Composer::new(0xBEEF);
@@ -2628,7 +2996,7 @@ mod tests {
     fn a_piece_uses_at_most_eight_rhythm_cells() {
         for p in [Profile::Ambient, Profile::SoloCalm, Profile::VsIntense] {
             for m in METERS {
-                let mat = build_material(12345, p, m, default_smoothness(p));
+                let mat = material(12345, p, m, default_smoothness(p));
                 assert!(
                     mat.rhythms_used.len() <= 8,
                     "{p:?} {} used {} rhythm cells",
@@ -2643,7 +3011,7 @@ mod tests {
     #[test]
     fn every_phrase_ends_on_a_cadence() {
         for meter in METERS {
-            let m = build_material(
+            let m = material(
                 999,
                 Profile::SoloCalm,
                 meter,
@@ -2661,7 +3029,7 @@ mod tests {
     fn strong_beats_are_chord_tones() {
         let mut checked = 0;
         for meter in METERS {
-            let m = build_material(
+            let m = material(
                 555,
                 Profile::SoloCalm,
                 meter,
@@ -2718,7 +3086,7 @@ mod tests {
         // The form must revisit sections: eighty bars of music from
         // twenty-four bars of material keeps new material inside the
         // ~35% budget real songs sit in.
-        let m = build_material(
+        let m = material(
             7,
             Profile::VsIntense,
             Meter::Four,
@@ -2745,7 +3113,7 @@ mod tests {
             for profile in Profile::ALL {
                 for seed in [1u64, 7, 99, 808, 12345, 31337, 0xDEAD_BEEF] {
                     for smooth in [0.0, 0.5, 1.0] {
-                        let m = build_material(seed, profile, meter, smooth);
+                        let m = material(seed, profile, meter, smooth);
                         for s in &m.sections {
                             for notes in &s.melody {
                                 let covered: u32 = notes.iter().map(|n| n.len as u32).sum();
@@ -2927,7 +3295,7 @@ mod tests {
         let mut total = 0.0;
         let mut bars = 0.0;
         for seed in 0..60u64 {
-            let m = build_material(seed, profile, Meter::Four, default_smoothness(profile));
+            let m = material(seed, profile, Meter::Four, default_smoothness(profile));
             for s in &m.sections {
                 for notes in &s.melody {
                     total += notes.len() as f32;
@@ -3166,7 +3534,7 @@ mod tests {
         // to come out with, whichever shape it lands on.
         for profile in Profile::ALL {
             for seed in 0..40u64 {
-                let m = build_material(seed, profile, Meter::Four, default_smoothness(profile));
+                let m = material(seed, profile, Meter::Four, default_smoothness(profile));
                 let roles = &m.roles;
                 let what = format!("{profile:?} seed {seed}");
                 assert_eq!(roles.len(), m.form.len(), "{what}: a block with no role");
@@ -3204,7 +3572,7 @@ mod tests {
         let mut shapes = HashSet::new();
         let mut lengths = HashSet::new();
         for seed in 0..40u64 {
-            let m = build_material(
+            let m = material(
                 seed,
                 Profile::VsIntense,
                 Meter::Four,
@@ -3226,7 +3594,7 @@ mod tests {
         let chordy = |p: Profile| {
             let mut total = 0.0;
             for seed in 0..40u64 {
-                let m = build_material(seed, p, Meter::Four, default_smoothness(p));
+                let m = material(seed, p, Meter::Four, default_smoothness(p));
                 total += m.roles.iter().filter(|r| **r == BlockRole::Chords).count() as f32
                     / m.roles.len() as f32;
             }
@@ -3262,7 +3630,7 @@ mod tests {
             let mut extended = 0;
             let mut total = 0;
             for seed in 0..40u64 {
-                let m = build_material(seed, profile, Meter::Four, default_smoothness(profile));
+                let m = material(seed, profile, Meter::Four, default_smoothness(profile));
                 for s in &m.sections {
                     for c in &s.chords {
                         total += 1;
@@ -3290,7 +3658,7 @@ mod tests {
         // arrival; colour must not be sprinkled onto either.
         for profile in Profile::ALL {
             for seed in 0..30u64 {
-                let m = build_material(seed, profile, Meter::Four, default_smoothness(profile));
+                let m = material(seed, profile, Meter::Four, default_smoothness(profile));
                 for s in &m.sections {
                     assert_eq!(s.chords[3].degree, 4);
                     assert_eq!(s.chords[3].ext, Ext::Seventh);
@@ -3553,7 +3921,9 @@ mod tests {
 
     #[test]
     fn calm_is_slower_than_versus_and_both_stay_minor() {
-        assert!(tempo_range(Profile::SoloCalm).1 < tempo_range(Profile::VsIntense).0);
+        let calm = tempo_range(Profile::SoloCalm, Groove::Normal);
+        let versus = tempo_range(Profile::VsIntense, Groove::Normal);
+        assert!(calm.1 < versus.0);
         // Everything that plays during a match is minor, whichever lane
         // of the palette the piece rolled; only the fanfare is allowed
         // to be cheerful.
@@ -3624,8 +3994,9 @@ mod tests {
             let mut c = Composer::new(seed);
             c.set_profile(Profile::VsIntense, 0.9);
             let m = c.mode;
-            // Same piece, same intensity, same answer.
-            assert_eq!(mode_target(c.profile, 0.9, c.mode_variant), m);
+            // Same piece, same intensity, same answer — whether the mode
+            // came off the ladder or was pinned by the progression.
+            assert_eq!(c.piece_mode(0.9), m);
             if !seen.contains(&m) {
                 seen.push(m);
             }
@@ -3636,6 +4007,231 @@ mod tests {
         );
     }
 
+    /// A piece on the hard-bass groove, planned for `bars`.
+    fn hard_bass(
+        seed: u64,
+        profile: Profile,
+        intensity: f32,
+        bars: u32,
+    ) -> (Composer, Vec<NoteEvent>) {
+        let mut c = Composer::new(seed);
+        c.set_profile(profile, intensity);
+        c.force_groove(Some(Groove::HardBass));
+        let ctx = Context {
+            profile,
+            intensity,
+            elapsed: 600.0,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        for _ in 0..bars {
+            c.plan_bar(&ctx, &mut out);
+        }
+        (c, out)
+    }
+
+    #[test]
+    fn the_maru_sa_changes_come_out_as_the_chords_they_name() {
+        // In A minor: Am7 C7 FM7 E7, twice, and home on the last bar.
+        // Written as pitch classes above the tonic, which is the only
+        // form that can catch a borrowed third going missing.
+        let m = material_with(
+            0xD0BA,
+            Profile::VsIntense,
+            Meter::Four,
+            0.5,
+            Groove::HardBass,
+        );
+        assert!(m.marusa, "the hard-bass groove did not take the changes");
+        let spell = |c: &Chord| {
+            let root = MARUSA_MODE.pitch(c.degree);
+            let mut pcs: Vec<i32> = std::iter::once(root)
+                .chain(c.arp(MARUSA_MODE).iter().map(|o| root + *o as i32))
+                .map(|p| p.rem_euclid(12))
+                .collect();
+            pcs.sort_unstable();
+            pcs.dedup();
+            pcs
+        };
+        for s in &m.sections {
+            for half in 0..2 {
+                assert_eq!(spell(&s.chords[half * 4]), vec![0, 3, 7, 10], "i7");
+                assert_eq!(spell(&s.chords[half * 4 + 1]), vec![1, 3, 7, 10], "bIII7");
+                assert_eq!(spell(&s.chords[half * 4 + 2]), vec![0, 3, 7, 8], "bVIM7");
+            }
+            // The half cadence is a real dominant: a major third (11 = the
+            // leading tone) where the key has a minor one.
+            assert_eq!(spell(&s.chords[3]), vec![2, 5, 7, 11], "V7");
+            // And the last bar is home, plain.
+            assert_eq!(spell(&s.chords[7]), vec![0, 3, 7], "i");
+        }
+    }
+
+    #[test]
+    fn a_piece_on_those_changes_stays_in_the_one_mode_that_spells_them() {
+        // The maru-sa loop needs a minor sixth; Dorian and the bright
+        // modes do not have one, so the intensity ladder has to stand
+        // down for these pieces. It must stand down *completely* — a mode
+        // that changed at the next phrase boundary would take the
+        // progression apart mid-piece.
+        let (mut c, _) = hard_bass(0xD0BA, Profile::VsIntense, 0.1, 8);
+        assert!(c.material.marusa);
+        for intensity in [0.0f32, 0.35, 0.7, 1.0] {
+            assert_eq!(c.piece_mode(intensity), MARUSA_MODE);
+        }
+        // A piece that did not take them keeps its ladder.
+        c.force_groove(Some(Groove::Normal));
+        if !c.material.marusa {
+            assert_eq!(c.piece_mode(0.9), mode_target(c.profile, 0.9, c.mode_variant));
+        }
+    }
+
+    #[test]
+    fn the_hard_bass_groove_leaves_the_beat_to_the_kick() {
+        for meter in METERS {
+            let (mut c, _) = hard_bass(0x8A55, Profile::VsIntense, 0.8, 0);
+            c.force_meter(meter);
+            let ctx = Context {
+                profile: Profile::VsIntense,
+                intensity: 0.8,
+                elapsed: 600.0,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            // One block, so no breakdown or chord block gets in the way.
+            for _ in 0..BARS_PER_SECTION {
+                c.plan_bar(&ctx, &mut out);
+            }
+            let spb = samples_per_step(c.bpm);
+            let step_of = |e: &NoteEvent| {
+                let bar = (spb * meter.steps() as f64) as u64;
+                ((e.at % bar) as f64 / spb).round() as u32 % meter.steps()
+            };
+            let beat = meter.steps_per_beat();
+
+            let kicks: Vec<u32> = out
+                .iter()
+                .filter(|e| e.inst.is_kick())
+                .map(step_of)
+                .collect();
+            assert!(!kicks.is_empty());
+            for b in 0..meter.beats() {
+                assert!(kicks.contains(&(b * beat)), "no kick on beat {b}");
+            }
+            // The bass answers between the kicks and never under them.
+            let bass: Vec<u32> = out
+                .iter()
+                .filter(|e| e.inst == Inst::Bass)
+                .map(step_of)
+                .collect();
+            assert!(bass.len() >= meter.beats() as usize);
+            for step in &bass {
+                assert!(
+                    !step.is_multiple_of(beat),
+                    "the bass landed on the beat at step {step} in {}",
+                    meter.name()
+                );
+            }
+            // Nothing swings; a shuffled sixteenth under this is a
+            // different genre.
+            assert_eq!(
+                arrange(Profile::VsIntense, &ctx, Inst::Pluck, Groove::HardBass).swing,
+                0.5
+            );
+        }
+    }
+
+    #[test]
+    fn release_cut_piano_fills_the_sixteenths_without_ringing() {
+        let (c, out) = hard_bass(0x9111, Profile::VsIntense, 0.7, BARS_PER_SECTION);
+        let piano: Vec<&NoteEvent> = out.iter().filter(|e| e.inst == Inst::CutPiano).collect();
+        assert!(
+            piano.len() >= 6 * BARS_PER_SECTION as usize,
+            "only {} cut-piano notes in eight bars",
+            piano.len()
+        );
+        // Nothing is held: the longest of them is one sixteenth, and the
+        // instrument's own envelope is over inside five frames whatever
+        // it is handed.
+        let step = frames_per_step(c.bpm).ceil() as u16;
+        assert!(piano.iter().all(|e| e.frames <= step.max(2)));
+        assert!(crate::inst_def(Inst::CutPiano).vol.loop_at.is_none());
+        assert!(crate::inst_def(Inst::CutPiano).vol.v.len() <= 6);
+        // And it is a figure, not a wall: some sixteenths are empty.
+        let steps = c.meter.steps();
+        assert!(piano.len() < steps as usize * BARS_PER_SECTION as usize);
+    }
+
+    #[test]
+    fn only_the_profiles_that_want_a_beat_ever_roll_the_hard_groove() {
+        let mut seen: Vec<(Profile, bool)> = Vec::new();
+        for profile in Profile::ALL {
+            let mut hard = false;
+            let mut normal = false;
+            for seed in 0..40u64 {
+                let mut c = Composer::new(seed);
+                c.set_profile(profile, 0.5);
+                match c.groove() {
+                    Groove::HardBass => hard = true,
+                    Groove::Normal => normal = true,
+                }
+                // The groove and the kit agree, always.
+                assert_eq!(
+                    c.kit == Kit::Hard,
+                    c.groove() == Groove::HardBass,
+                    "{profile:?} rolled {:?} with {:?}",
+                    c.groove(),
+                    c.kit
+                );
+            }
+            assert!(normal, "{profile:?} never writes an ordinary piece");
+            seen.push((profile, hard));
+        }
+        for (profile, hard) in seen {
+            assert_eq!(
+                hard,
+                hard_bass_chance(profile) > 0.0,
+                "{profile:?} disagrees with its own odds"
+            );
+        }
+    }
+
+    #[test]
+    fn pinning_the_groove_rebuilds_the_piece_around_it() {
+        let mut c = Composer::new(0x6EED);
+        c.set_profile(Profile::VsIntense, 0.6);
+        let loose = (c.bpm, c.kit, c.groove());
+
+        c.force_groove(Some(Groove::HardBass));
+        assert_eq!(c.groove(), Groove::HardBass);
+        assert!(c.pumps());
+        assert_eq!(c.kit, Kit::Hard);
+        // The odd meters are counted in sixteenths and get pulled back,
+        // the same way every other tempo here does.
+        let (lo, hi) = HARD_BASS_BPM;
+        let scale = c.meter.tempo_scale();
+        assert!(
+            (lo * scale..=hi * scale).contains(&c.bpm),
+            "{} BPM is not hard bass in {}",
+            c.bpm,
+            c.meter.name()
+        );
+
+        // A pin survives the next piece too.
+        c.set_profile(Profile::SoloCalm, 0.3);
+        assert_eq!(c.groove(), Groove::HardBass);
+        assert_eq!(c.kit, Kit::Hard);
+
+        // And letting it go hands the piece back exactly what its own roll
+        // would have given it — same piece, so the same draws.
+        let mut c = Composer::new(0x6EED);
+        c.set_profile(Profile::VsIntense, 0.6);
+        c.force_groove(Some(Groove::HardBass));
+        c.force_groove(None);
+        assert_eq!((c.bpm, c.kit, c.groove()), loose);
+        assert_eq!(c.pumps(), loose.2 == Groove::HardBass);
+    }
+
     #[test]
     fn versus_kicks_on_every_beat() {
         let ctx = Context {
@@ -3644,7 +4240,7 @@ mod tests {
             elapsed: 600.0,
             ..Default::default()
         };
-        assert!(arrange(Profile::VsIntense, &ctx, Inst::Pluck).four_floor);
+        assert!(arrange(Profile::VsIntense, &ctx, Inst::Pluck, Groove::Normal).four_floor);
 
         // Check it in the emitted score, not just the flag — and in every
         // meter, since "four on the floor" means three in a waltz.
@@ -3763,7 +4359,7 @@ mod tests {
                 elapsed,
                 ..Default::default()
             };
-            arrange(Profile::SoloCalm, &ctx, Inst::Pluck)
+            arrange(Profile::SoloCalm, &ctx, Inst::Pluck, Groove::Normal)
         };
         let opening = at(0.0);
         assert!(!opening.perc && !opening.lead);
@@ -3782,15 +4378,20 @@ mod tests {
             ..Default::default()
         };
         // Nothing but the foundation at the start of a match.
-        let early = arrange(Profile::VsIntense, &ctx(0.0, 0.1, false), Inst::Pluck);
+        let early = arrange(Profile::VsIntense, &ctx(0.0, 0.1, false), Inst::Pluck, Groove::Normal);
         assert!(early.counter.is_none() && early.saw.is_none() && !early.perc);
         // Everything by the time it has been running a while and the
         // stack is high.
-        let late = arrange(Profile::VsIntense, &ctx(120.0, 0.9, false), Inst::Pluck);
+        let late = arrange(
+            Profile::VsIntense,
+            &ctx(120.0, 0.9, false),
+            Inst::Pluck,
+            Groove::Normal,
+        );
         assert!(late.counter.is_some() && late.saw.is_some() && late.pad.is_some());
         assert!(late.shaker && late.perc && late.lead);
         // The zone strips it back to a held chord over the bass.
-        let zone = arrange(Profile::VsIntense, &ctx(120.0, 0.9, true), Inst::Pluck);
+        let zone = arrange(Profile::VsIntense, &ctx(120.0, 0.9, true), Inst::Pluck, Groove::Normal);
         assert!(!zone.lead && !zone.perc && !zone.shaker);
         assert!(zone.counter.is_none() && zone.saw.is_none());
         assert!(zone.harmony && zone.pad.is_some());
@@ -3802,6 +4403,10 @@ mod tests {
     fn the_final_chorus_changes_key_and_goes_all_in() {
         let mut c = Composer::new(0x5A5A);
         c.set_profile(Profile::VsIntense, 0.4);
+        // "Every voice" includes the console's own noise channel, and the
+        // kits that put their drums on the sample channel leave it empty
+        // by design — see `a_full_arrangement_reaches_every_voice`.
+        c.force_kit(Kit::Chip);
         let ctx = Context {
             profile: Profile::VsIntense,
             intensity: 0.4,
@@ -4160,7 +4765,7 @@ mod tests {
             zone: true,
             ..Default::default()
         };
-        let a = arrange(Profile::VsIntense, &ctx, Inst::Pluck);
+        let a = arrange(Profile::VsIntense, &ctx, Inst::Pluck, Groove::Normal);
         assert!(!a.lead && !a.perc && a.harmony);
     }
 
@@ -4225,13 +4830,13 @@ mod tests {
     #[test]
     fn material_generation_is_reproducible() {
         for meter in METERS {
-            let a = build_material(
+            let a = material(
                 0xABCD,
                 Profile::SoloCalm,
                 meter,
                 default_smoothness(Profile::SoloCalm),
             );
-            let b = build_material(
+            let b = material(
                 0xABCD,
                 Profile::SoloCalm,
                 meter,
@@ -4242,3 +4847,4 @@ mod tests {
         }
     }
 }
+

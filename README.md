@@ -73,6 +73,14 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
   instrument that sings the melody — pluck, soft, sustain, piano, guitar,
   marimba or brass — so two pieces on the same preset do not arrive with
   the same voice on top. See [`crates/chiptune`](crates/chiptune)
+- **Hard bass** — where a beat is the point, a piece can roll a groove
+  built on one instead: a saturated sub kick on every beat with the whole
+  mix ducking out of its way, the bass answering on the offbeats with a
+  sawtooth donk an octave up, chord stabs between them, and release-cut
+  piano scattered over the sixteenths. Those pieces usually take the
+  `IVM7 III7 vi I7` changes J-pop calls the 丸サ (maru-sa) progression,
+  whose two secondary dominants are the only chords here that borrow from
+  outside the key.
 - **Audio** — CC0 8-bit sound effects by Juhani Junkala; combo chimes climb
   a pentatonic scale as the combo counter grows
 
@@ -147,14 +155,15 @@ Settings are stored as RON at the platform config directory, e.g.
   nine-voice synthesizer (three PolyBLEP pulses, a VRC6-style sawtooth, a
   32-step wavetable, the 15-bit LFSR noise twice over, a channel of
   samples synthesized at startup, the NES's own nonlinear mixer, stereo
-  panning) plus an algorithmic composer. The whole thing is one object:
+  panning, and a kick-triggered sidechain for the pieces that pump) plus
+  an algorithmic composer. The whole thing is one object:
   hand `Director` the gameplay parameters, ask it for samples.
   `cargo run -p bevytris-chiptune --release --example render --
   --profile vs --seed 42 --secs 60 --ramp` writes a WAV without launching
   the game, running exactly the code the game runs.
   `--lead piano|guitar|marimba|brass|...` and `--smooth 0..1` audition the
   melody instrument and how stepwise the line is; both are also rows in
-  the in-game MUSIC room.
+  the in-game MUSIC room, as is `--groove normal|hard`.
   `--chords strum|held` auditions how the chord blocks play their chord.
 
 ### Reproducing a piece of music

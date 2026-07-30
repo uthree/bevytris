@@ -125,6 +125,13 @@ pub enum Inst {
     Echo,
     /// Fast chord arpeggio in sixteenths.
     Arp,
+    /// Release-cut piano: a hammer strike with the tail sawn off, so a
+    /// sixteenth-note figure comes out as a spray of separate hits rather
+    /// than as a chord smearing into itself. The sound is a sampler
+    /// convention — take a piano, set the release to nothing — and it is
+    /// what lets a piano part sit *inside* a fast beat instead of on top
+    /// of it.
+    CutPiano,
     /// Buzzy sawtooth lead.
     SawLead,
     /// Sawtooth doubling the bass an octave up, for weight.
@@ -148,6 +155,11 @@ pub enum Inst {
     Crash,
     /// Sampled kick with a real pitch-dropping body.
     PcmKick,
+    /// The hard-bass kick: the same pitch drop taken lower and longer and
+    /// then driven into saturation, so it reads as one continuous thump
+    /// rather than as a click with a tone under it. On a four-on-the-floor
+    /// bar it *is* the bass line.
+    HardKick,
     /// Sampled snare — noise over two tuned tones.
     PcmSnare,
     /// Sampled handclap.
@@ -176,13 +188,16 @@ impl Inst {
             Inst::Organ | Inst::Stab | Inst::Pad | Inst::ChordMid | Inst::StrumMid => {
                 Voice::Harmony
             }
-            Inst::Echo | Inst::Arp | Inst::ChordLo | Inst::StrumLo => Voice::Counter,
+            Inst::Echo | Inst::Arp | Inst::CutPiano | Inst::ChordLo | Inst::StrumLo => {
+                Voice::Counter
+            }
             Inst::SawLead | Inst::SawBass => Voice::Saw,
             Inst::Bell | Inst::Glass | Inst::WaveOrgan | Inst::WaveBass => Voice::Wave,
             Inst::Bass => Voice::Bass,
             Inst::Kick | Inst::Snare => Voice::Perc,
             Inst::Hat | Inst::Shaker | Inst::Crash => Voice::Hat,
             Inst::PcmKick
+            | Inst::HardKick
             | Inst::PcmSnare
             | Inst::Clap
             | Inst::Tom
@@ -218,10 +233,10 @@ impl Inst {
         self.voice() == Voice::Lead && !self.is_chord_voice()
     }
 
-    /// True for either kit's kick — the composer swaps them per piece, so
+    /// True for any kit's kick — the composer swaps them per piece, so
     /// nothing downstream should name one directly.
     pub fn is_kick(self) -> bool {
-        matches!(self, Inst::Kick | Inst::PcmKick)
+        matches!(self, Inst::Kick | Inst::PcmKick | Inst::HardKick)
     }
 
     /// True for either kit's backbeat voice, clap included.
@@ -238,6 +253,7 @@ impl Inst {
             Inst::Tom => 3,
             Inst::Riser => 4,
             Inst::Impact => 5,
+            Inst::HardKick => 6,
             _ => 0,
         }
     }
@@ -667,6 +683,24 @@ const ARP: InstDef = InstDef {
     noise_short: false,
     wave: 0,
 };
+/// The piano macro with the sustain taken out: full volume for one frame,
+/// gone inside five. Everything that says "piano" is in the attack — the
+/// hammer's momentary sharpness and the duty walk that darkens it — so
+/// cutting the tail costs the note nothing but its length, which is the
+/// whole trick.
+const CUT_PIANO: InstDef = InstDef {
+    vol: m(&[15, 13, 9, 5, 2], None),
+    duty: 0,
+    duty_seq: &[0, 1, 2],
+    attack: &[0.4, 0.14],
+    vib_delay: STEADY.0,
+    vib_depth: STEADY.1,
+    vib_rate: STEADY.2,
+    fall: STEADY.3,
+    noise_idx: 0,
+    noise_short: false,
+    wave: 0,
+};
 const SAW_LEAD: InstDef = InstDef {
     vol: m(&[13, 14, 13, 12, 12, 11, 11, 10], Some(4)),
     duty: 0,
@@ -815,6 +849,7 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
         Inst::Pad => &PAD,
         Inst::Echo => &ECHO,
         Inst::Arp => &ARP,
+        Inst::CutPiano => &CUT_PIANO,
         Inst::SawLead => &SAW_LEAD,
         Inst::SawBass => &SAW_BASS,
         Inst::Bell => &BELL,
@@ -827,14 +862,18 @@ pub fn inst_def(i: Inst) -> &'static InstDef {
         Inst::Hat => &HAT,
         Inst::Shaker => &SHAKER,
         Inst::Crash => &CRASH,
-        Inst::PcmKick | Inst::PcmSnare | Inst::Clap | Inst::Tom | Inst::Riser | Inst::Impact => {
-            &SAMPLED
-        }
+        Inst::PcmKick
+        | Inst::HardKick
+        | Inst::PcmSnare
+        | Inst::Clap
+        | Inst::Tom
+        | Inst::Riser
+        | Inst::Impact => &SAMPLED,
     }
 }
 
 /// Every instrument, for tests and for the offline renderer.
-pub const ALL_INSTRUMENTS: [Inst; 36] = [
+pub const ALL_INSTRUMENTS: [Inst; 38] = [
     Inst::Pluck,
     Inst::Sustain,
     Inst::Soft,
@@ -853,6 +892,7 @@ pub const ALL_INSTRUMENTS: [Inst; 36] = [
     Inst::Pad,
     Inst::Echo,
     Inst::Arp,
+    Inst::CutPiano,
     Inst::SawLead,
     Inst::SawBass,
     Inst::Bell,
@@ -866,6 +906,7 @@ pub const ALL_INSTRUMENTS: [Inst; 36] = [
     Inst::Shaker,
     Inst::Crash,
     Inst::PcmKick,
+    Inst::HardKick,
     Inst::PcmSnare,
     Inst::Clap,
     Inst::Tom,
@@ -926,7 +967,7 @@ mod tests {
 
     #[test]
     fn every_instrument_is_defined_and_listed() {
-        assert_eq!(ALL_INSTRUMENTS.len(), 36);
+        assert_eq!(ALL_INSTRUMENTS.len(), 38);
         for i in ALL_INSTRUMENTS {
             let d = inst_def(i);
             assert!(!d.vol.v.is_empty(), "{i:?} has no volume macro");
@@ -951,7 +992,7 @@ mod tests {
             }
             assert!(d.wave < 4, "{i:?} points at a missing wavetable");
             assert!(d.noise_idx < 16);
-            assert!(i.sample() < 6, "{i:?} points at a missing sample");
+            assert!(i.sample() < 7, "{i:?} points at a missing sample");
             assert_eq!(
                 i.is_drum(),
                 matches!(i.voice(), Voice::Perc | Voice::Hat | Voice::Sample)

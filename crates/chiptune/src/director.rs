@@ -59,6 +59,7 @@ pub struct Director {
     /// pinned across the next piece too.
     pin_meter: Option<crate::compose::Meter>,
     pin_kit: Option<crate::compose::Kit>,
+    pin_groove: Option<crate::compose::Groove>,
     pin_smooth: Option<f32>,
     pin_lead: Option<crate::Inst>,
     pin_style: Option<crate::compose::ChordStyle>,
@@ -81,6 +82,7 @@ impl Director {
             seed,
             pin_meter: None,
             pin_kit: None,
+            pin_groove: None,
             pin_smooth: None,
             pin_lead: None,
             pin_style: None,
@@ -163,6 +165,17 @@ impl Director {
         }
     }
 
+    /// Hold what the piece is built around rhythmically across re-rolls.
+    /// This one re-rolls the piece: the groove decides the tempo, the kit
+    /// and often the progression.
+    pub fn pin_groove(&mut self, groove: Option<crate::compose::Groove>) {
+        if groove != self.pin_groove {
+            self.pin_groove = groove;
+            self.apply_pins();
+            self.repiece();
+        }
+    }
+
     /// Hold how stepwise the melodies are across re-rolls: 0 leaps the
     /// most this writes, 1 is very nearly stepwise. `None` hands each
     /// profile back its own default.
@@ -192,6 +205,10 @@ impl Director {
     }
 
     fn apply_pins(&mut self) {
+        // The groove goes first: it rolls a tempo, a kit and a
+        // progression of its own, and a kit pinned by hand has to win
+        // over the one the groove would have chosen.
+        self.composer.force_groove(self.pin_groove);
         if let Some(m) = self.pin_meter {
             self.composer.force_meter(m);
         }
@@ -302,6 +319,11 @@ impl Director {
     fn plan(&mut self) {
         let start = self.bar.len();
         self.composer.plan_bar(&self.ctx, &mut self.bar);
+        // The one thing the composer has to say to the synthesizer that
+        // is not a note. Set per bar rather than per piece because that
+        // is where the composer is guaranteed to have caught up with a
+        // change of profile.
+        self.synth.set_pump(self.composer.pumps());
         self.modulated |= self.composer.take_modulated();
         // If nobody is draining the feed, keep the newest rather than
         // growing without bound.
@@ -505,8 +527,13 @@ mod tests {
         }
         let mut notes = Vec::new();
         d.drain_new_notes(&mut notes);
-        // Nothing is scheduled in the past by more than a bar.
+        // Nothing is scheduled in the past by more than a bar — a backlog
+        // would arrive as one burst of notes whose moment has gone. Four
+        // seconds is longer than any bar this writes.
         let pos = d.pos();
-        assert!(notes.iter().all(|n| n.at <= pos));
+        let bar = crate::SAMPLE_RATE as u64 * 4;
+        assert!(notes.iter().all(|n| n.at + bar >= pos));
+        // And nothing further ahead than the window it plans into.
+        assert!(notes.iter().all(|n| n.at <= pos + PLAN_AHEAD + bar));
     }
 }

@@ -102,11 +102,33 @@ pub enum Ext {
     Ninth,
 }
 
-/// We never spell chords absolutely: `degree` plus the mode is enough.
+/// How a chord colours its own thirds, where the mode is not the whole
+/// story.
+///
+/// Everything else here is diatonic on purpose: a chord is a stack of
+/// thirds read through the mode, which is what lets the danger level
+/// darken the scale without touching a single stored note. The secondary
+/// dominant is the one idiom that cannot be said that way. Its major third
+/// and minor seventh are borrowed from outside the key, and they are the
+/// entire reason it pulls — a `V7` in Aeolian is a minor seventh chord and
+/// pulls nowhere at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Quality {
+    /// Whatever the mode says.
+    #[default]
+    Mode,
+    /// A major third, and a flat seventh if the chord has a seventh.
+    Dominant,
+}
+
+/// We never spell chords absolutely: `degree` plus the mode is enough —
+/// plus, for the two chords that borrow from outside the key, a
+/// [`Quality`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Chord {
     pub degree: i32,
     pub ext: Ext,
+    pub quality: Quality,
 }
 
 impl Chord {
@@ -114,11 +136,56 @@ impl Chord {
         Chord {
             degree,
             ext: Ext::Triad,
+            quality: Quality::Mode,
         }
     }
 
     pub const fn with(degree: i32, ext: Ext) -> Self {
-        Chord { degree, ext }
+        Chord {
+            degree,
+            ext,
+            quality: Quality::Mode,
+        }
+    }
+
+    /// A secondary dominant on `degree`: major third, flat seventh,
+    /// whatever the mode would otherwise have said.
+    pub const fn dom(degree: i32, ext: Ext) -> Self {
+        Chord {
+            degree,
+            ext,
+            quality: Quality::Dominant,
+        }
+    }
+
+    /// Semitones above the tonic for `degree`, with this chord's own
+    /// colouring applied.
+    ///
+    /// Anything sounding *against* this chord should read pitch through
+    /// here rather than through [`Mode::pitch`] — not only the chord
+    /// voices but the melody too. A tune that lands on the diatonic third
+    /// while the chord underneath it plays a raised one is not a
+    /// suspension, it is a wrong note.
+    pub fn pitch(&self, mode: Mode, degree: i32) -> i32 {
+        mode.pitch(degree) + self.colour(mode, degree)
+    }
+
+    /// Semitones `degree` moves by, given what this chord is doing to its
+    /// own thirds. Octave-invariant: the alteration is a property of the
+    /// degree's place in the chord, so it applies wherever it is sung.
+    fn colour(&self, mode: Mode, degree: i32) -> i32 {
+        if self.quality != Quality::Dominant {
+            return 0;
+        }
+        let root = mode.pitch(self.degree);
+        match (degree - self.degree).rem_euclid(7) {
+            // The third is what makes it dominant, seventh or no seventh.
+            2 => root + 4 - mode.pitch(self.degree + 2),
+            // The seventh is only there to be flattened if the chord has
+            // one; on a plain triad this degree is a passing note.
+            6 if self.ext != Ext::Triad => root + 10 - mode.pitch(self.degree + 6),
+            _ => 0,
+        }
     }
 
     /// Scale degrees of the triad, relative to the tonic.
@@ -198,7 +265,7 @@ impl Chord {
         let take = if n == 4 { &ladder[1..4] } else { &ladder[0..3] };
         let mut out = [0i8; 3];
         for (o, deg) in out.iter_mut().zip(take) {
-            *o = (mode.pitch(*deg) - root) as i8;
+            *o = (self.pitch(mode, *deg) - root) as i8;
         }
         out
     }
@@ -421,6 +488,56 @@ mod ext_tests {
         // top three of that.
         let ninth = Chord::with(0, Ext::Ninth).arp(mode);
         assert_eq!(ninth, [7, 10, 14]);
+    }
+
+    #[test]
+    fn a_secondary_dominant_borrows_its_third_and_its_seventh() {
+        // The two chords the maru-sa progression needs, spelled in A
+        // minor: the V7 that Aeolian would otherwise write as Em7, and
+        // the bIII7 whose flat seventh is a semitone outside the key.
+        let v7 = Chord::dom(4, Ext::Seventh);
+        // Root, major third, fifth, flat seventh — E G# B D.
+        assert_eq!(v7.arp(Mode::Aeolian), [4, 7, 10]);
+        assert_eq!(v7.pitch(Mode::Aeolian, 4), 7);
+        assert_eq!(v7.pitch(Mode::Aeolian, 6), 11, "the third stayed minor");
+        // Aeolian already spells this seventh flat, so nothing moves.
+        assert_eq!(v7.pitch(Mode::Aeolian, 10), 17);
+        // A diatonic v7 is the thing being fixed: same degrees, no pull.
+        assert_eq!(Chord::with(4, Ext::Seventh).arp(Mode::Aeolian), [3, 7, 10]);
+
+        // C7 in A minor: the seventh is Bb, which Aeolian spells as B.
+        let flat_three = Chord::dom(2, Ext::Seventh);
+        assert_eq!(flat_three.arp(Mode::Aeolian), [4, 7, 10]);
+        assert_eq!(flat_three.pitch(Mode::Aeolian, 8), 13);
+
+        // The colouring follows the degree into any octave.
+        for oct in [-14, -7, 0, 7, 14] {
+            assert_eq!(v7.pitch(Mode::Aeolian, 6 + oct), 11 + oct / 7 * 12);
+        }
+    }
+
+    #[test]
+    fn colouring_leaves_every_other_chord_exactly_as_it_was() {
+        // The whole model rests on `Chord::pitch` being `Mode::pitch` for
+        // anything that has not explicitly borrowed a third.
+        for mode in [Mode::Ionian, Mode::Aeolian, Mode::Dorian, Mode::Phrygian] {
+            for degree in 0..7 {
+                for ext in [Ext::Triad, Ext::Seventh, Ext::Ninth] {
+                    let c = Chord::with(degree, ext);
+                    for d in -7..14 {
+                        assert_eq!(c.pitch(mode, d), mode.pitch(d));
+                    }
+                }
+                // A dominant triad borrows a third but has no seventh to
+                // flatten, so the degree below the octave is left alone.
+                let triad = Chord::dom(degree, Ext::Triad);
+                assert_eq!(
+                    triad.pitch(mode, degree + 6),
+                    mode.pitch(degree + 6),
+                    "a triad flattened a seventh it does not have"
+                );
+            }
+        }
     }
 
     #[test]

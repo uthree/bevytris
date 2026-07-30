@@ -33,7 +33,7 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 
 use bevytris_chiptune::Inst;
-use bevytris_chiptune::compose::{Context, Info, Kit, Meter, Profile};
+use bevytris_chiptune::compose::{Context, Groove, Info, Kit, Meter, Profile};
 use bevytris_chiptune::director::Director;
 use bevytris_chiptune::{NoteEvent, SAMPLE_RATE, SAMPLES_PER_FRAME};
 
@@ -57,6 +57,9 @@ pub struct Wanted {
     /// its own. Only the listening room sets these.
     pub meter: Option<Meter>,
     pub kit: Option<Kit>,
+    /// What the piece is built around rhythmically; `None` lets each
+    /// piece roll its own.
+    pub groove: Option<Groove>,
     /// How stepwise the melodies are, 0..=1; `None` uses the profile's
     /// own default.
     pub smooth: Option<f32>,
@@ -275,6 +278,8 @@ pub struct Jukebox {
     /// `None` means "whatever this piece rolled".
     pub meter: Option<Meter>,
     pub kit: Option<Kit>,
+    /// The rhythmic style; `None` = whatever this piece rolled.
+    pub groove: Option<Groove>,
     /// How stepwise the melodies are, 0..=1; `None` = the profile default.
     pub smooth: Option<f32>,
     /// Melody instrument; `None` = whatever the piece rolled.
@@ -291,6 +296,7 @@ impl Jukebox {
             profile: Profile::VsIntense,
             meter: None,
             kit: None,
+            groove: None,
             smooth: None,
             lead: None,
             intensity: 0.45,
@@ -324,6 +330,7 @@ impl Plugin for MusicPlugin {
             seed,
             meter: None,
             kit: None,
+            groove: None,
             smooth: None,
             lead: None,
         }));
@@ -528,6 +535,7 @@ fn drive_music(
             want.seed = jukebox.seed;
             want.meter = jukebox.meter;
             want.kit = jukebox.kit;
+            want.groove = jukebox.groove;
             want.smooth = jukebox.smooth;
             want.lead = jukebox.lead;
         } else {
@@ -677,6 +685,7 @@ mod tests {
                 seed: 1234,
                 meter: None,
                 kit: None,
+                groove: None,
                 smooth: None,
                 lead: None,
             })),
@@ -911,6 +920,7 @@ mod tests {
                     seed: 0x1234_5678,
                     meter: None,
                     kit: None,
+                    groove: None,
                     smooth: None,
                     lead: None,
                 })),

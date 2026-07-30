@@ -8,11 +8,16 @@
 //! `--smooth 0..1` (or `auto`) overrides how stepwise the melodies are:
 //! 0 is the widest intervals this writes, 1 is very nearly stepwise.
 //!
+//! `--groove hard` forces the hard-bass groove — four on the floor, an
+//! offbeat bass under a pumping mix, release-cut piano and, where the
+//! profile's mode allows it, the maru-sa changes. `--groove normal` forces
+//! the house style, and `auto` hands the roll back to the composer.
+//!
 //! `--ramp` sweeps the intensity from 0 to 1 across the render, which is
 //! how the tempo ladder and the layer schedule get auditioned without
 //! playing the game badly on purpose.
 
-use bevytris_chiptune::compose::{ChordStyle, Context, Kit, Meter, Profile};
+use bevytris_chiptune::compose::{ChordStyle, Context, Groove, Kit, Meter, Profile};
 use bevytris_chiptune::director::Director;
 use bevytris_chiptune::{SAMPLE_RATE, wav};
 
@@ -29,6 +34,7 @@ fn main() {
     let mut smooth: Option<f32> = None;
     let mut lead: Option<bevytris_chiptune::Inst> = None;
     let mut chords: Option<ChordStyle> = None;
+    let mut groove: Option<Groove> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -82,7 +88,8 @@ fn main() {
                 kit = Some(match next(i).as_str() {
                     "chip" | "nes" => Kit::Chip,
                     "pcm" | "sampled" => Kit::Sampled,
-                    other => panic!("unknown kit {other} (try chip or pcm)"),
+                    "hard" => Kit::Hard,
+                    other => panic!("unknown kit {other} (try chip, pcm or hard)"),
                 });
                 i += 2;
             }
@@ -123,6 +130,15 @@ fn main() {
                 };
                 i += 2;
             }
+            "--groove" => {
+                groove = match next(i).as_str() {
+                    "auto" => None,
+                    "normal" | "song" => Some(Groove::Normal),
+                    "hard" | "hardbass" => Some(Groove::HardBass),
+                    other => panic!("unknown groove {other} (try normal or hard)"),
+                };
+                i += 2;
+            }
             "--ramp" => {
                 ramp = true;
                 i += 1;
@@ -145,6 +161,7 @@ fn main() {
     director.pin_smoothness(smooth);
     director.pin_lead(lead);
     director.pin_chord_style(chords);
+    director.pin_groove(groove);
 
     let mut samples = vec![0.0f32; total * 2];
     let mut notes = Vec::new();
@@ -183,9 +200,10 @@ fn main() {
         r += f[1].abs();
     }
     println!(
-        "{} · {} kit | {} notes | peak {:.3} ({:.1} dBFS) | rms {:.3} ({:.1} dBFS) | balance {:+.1}%",
+        "{} · {} kit · {} | {} notes | peak {:.3} ({:.1} dBFS) | rms {:.3} ({:.1} dBFS) | balance {:+.1}%",
         info.label(),
         info.kit.name(),
+        info.groove.name(),
         notes.len(),
         peak,
         20.0 * peak.max(1e-9).log10(),

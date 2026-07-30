@@ -21,7 +21,7 @@ use crate::session::{
 };
 use crate::state::{AppState, GameMode, PlayState};
 use bevytris_chiptune::Inst;
-use bevytris_chiptune::compose::{Kit, Meter, Profile};
+use bevytris_chiptune::compose::{Groove, Kit, Meter, Profile};
 use rand::Rng as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1271,7 +1271,7 @@ fn setup_custom(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 struct JukeboxRow(usize);
 
-const JUKEBOX_ROWS: usize = 8;
+const JUKEBOX_ROWS: usize = 9;
 
 /// The melody instruments the LEAD row cycles through, plus AUTO.
 const JUKEBOX_LEADS: [Inst; 7] = [
@@ -1437,9 +1437,10 @@ fn jukebox_input(
         }
         2 => jukebox.meter = cycle_option(jukebox.meter, &Meter::ALL, step),
         3 => jukebox.kit = cycle_option(jukebox.kit, &Kit::ALL, step),
+        4 => jukebox.groove = cycle_option(jukebox.groove, &Groove::ALL, step),
         // AUTO sits below 0%, so stepping left off the bottom hands the
         // choice back to the preset rather than clamping at "0".
-        4 => {
+        5 => {
             jukebox.smooth = match (jukebox.smooth, step) {
                 (None, 1) => Some(0.0),
                 (None, _) => None,
@@ -1453,8 +1454,8 @@ fn jukebox_input(
                 }
             }
         }
-        5 => jukebox.lead = cycle_option(jukebox.lead, &JUKEBOX_LEADS, step),
-        6 => jukebox.intensity = (jukebox.intensity + 0.1 * step as f32).clamp(0.0, 1.0),
+        6 => jukebox.lead = cycle_option(jukebox.lead, &JUKEBOX_LEADS, step),
+        7 => jukebox.intensity = (jukebox.intensity + 0.1 * step as f32).clamp(0.0, 1.0),
         _ => jukebox.zone = !jukebox.zone,
     }
 }
@@ -1510,18 +1511,24 @@ fn refresh_jukebox(
                     .map_or(auto.to_string(), |k| k.name().to_string()),
             ),
             4 => (
+                s.jb_groove,
+                jukebox
+                    .groove
+                    .map_or(auto.to_string(), |g| g.name().to_uppercase()),
+            ),
+            5 => (
                 s.jb_smooth,
                 jukebox
                     .smooth
                     .map_or(auto.to_string(), |v| format!("{:.0}%", v * 100.0)),
             ),
-            5 => (
+            6 => (
                 s.jb_lead,
                 jukebox.lead.map_or(auto.to_string(), |i| {
                     bevytris_chiptune::compose::lead_name(i).to_uppercase()
                 }),
             ),
-            6 => (s.jb_intensity, format!("{:.0}%", jukebox.intensity * 100.0)),
+            7 => (s.jb_intensity, format!("{:.0}%", jukebox.intensity * 100.0)),
             _ => (
                 s.jb_zone,
                 if jukebox.zone { "ON" } else { "OFF" }.to_string(),
@@ -1566,8 +1573,9 @@ mod jukebox_tests {
         assert_eq!(cycle_option(Some(Meter::Four), &Meter::ALL, -1), None);
 
         // Two values behave the same way.
-        assert_eq!(cycle_option(None, &Kit::ALL, 1), Some(Kit::Chip));
-        assert_eq!(cycle_option(Some(Kit::Sampled), &Kit::ALL, 1), None);
+        assert_eq!(cycle_option(None, &Groove::ALL, 1), Some(Groove::Normal));
+        assert_eq!(cycle_option(Some(Groove::HardBass), &Groove::ALL, 1), None);
+        assert_eq!(cycle_option(Some(Kit::Sampled), &Kit::ALL, 1), Some(Kit::Hard));
     }
 
     #[test]
@@ -1575,13 +1583,14 @@ mod jukebox_tests {
         // The cursor wraps over exactly the rows the screen spawns, and
         // the extra row index is the now-playing line rather than a
         // seventh setting.
-        assert_eq!(JUKEBOX_ROWS, 8);
+        assert_eq!(JUKEBOX_ROWS, 9);
         let s = crate::i18n::EN;
         for label in [
             s.jb_seed,
             s.jb_preset,
             s.jb_meter,
             s.jb_kit,
+            s.jb_groove,
             s.jb_smooth,
             s.jb_lead,
             s.jb_intensity,
