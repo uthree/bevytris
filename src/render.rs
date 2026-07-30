@@ -416,14 +416,19 @@ pub fn setup_board_visuals(
                 // digits and dragged the eye off the stack. Here it is
                 // centred, so growth spreads both ways, and zero-padded to
                 // [`SCORE_DIGITS`], so it does not grow at all.
+                //
+                // No label. Eight padded digits directly under a playfield
+                // are not going to be mistaken for anything else, and the
+                // word was costing the space that makes them readable at a
+                // glance — which is the only way this number is ever read.
                 parent.spawn((
                     Text2d::new(String::new()),
                     TextFont {
-                        font_size: FontSize::Px(cell * 0.55),
+                        font_size: FontSize::Px(cell * 0.85),
                         ..default()
                     },
                     TextColor(Color::srgb(0.75, 0.82, 0.95)),
-                    Transform::from_xyz(0.0, -h / 2.0 - cell * 0.75, 2.0),
+                    Transform::from_xyz(0.0, -h / 2.0 - cell * 0.7, 2.0),
                     HudText::Score,
                 ));
 
@@ -764,12 +769,7 @@ fn sync_hud(
             };
             match kind {
                 HudText::Score => {
-                    let s = format!(
-                        "{} {:0width$}",
-                        locale.s().score,
-                        game.score,
-                        width = SCORE_DIGITS
-                    );
+                    let s = format!("{:0width$}", game.score, width = SCORE_DIGITS);
                     if **text != s {
                         **text = s;
                     }
