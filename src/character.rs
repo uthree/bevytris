@@ -1495,13 +1495,18 @@ struct VoiceSink {
 
 /// Speech against one-shots.
 ///
+/// Voices have their own volume setting, but the two still have to sit at a
+/// sane ratio when both are at the same number — which is what this is for.
+///
 /// The sound effects in this game are peak-normalized to -1 dBFS impacts;
 /// a spoken line is a long, low-crest-factor waveform whose *average*
 /// level is far below its peak, and macOS `say` output in particular sits
 /// well under the effects. Matching them by peak, which is what the shared
 /// `sfx_linear()` does, leaves the voice audibly quieter than the lock
 /// sound. This is the make-up gain for that, and it is applied before the
-/// per-character `voice_gain` so a pack can still trim itself.
+/// per-character `voice_gain` so a pack can still trim itself, and before
+/// the player's own `voice_volume` so turning that down turns everything
+/// down with it.
 const VOICE_MAKEUP: f32 = 2.6;
 
 /// The loudest a line may end up, after every gain in the chain. Above
@@ -1538,7 +1543,7 @@ fn play_voices(
     mut cooldown: ResMut<VoiceCooldown>,
     sinks: Query<(Entity, &VoiceSink)>,
 ) {
-    let base = settings.sfx_linear();
+    let base = settings.voice_linear();
     // Commands are deferred, so a sink spawned earlier in this same run is
     // not in the query yet. Two events for one board in one frame is
     // ordinary (a T-spin that clears nothing while garbage lands), and

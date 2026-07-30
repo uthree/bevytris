@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
-use crate::config::{Action, GameSettings};
+use crate::config::{Action, GameSettings, UiAction};
 
 /// A concrete display language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +114,17 @@ pub fn action_label(s: &Strings, action: Action) -> &'static str {
     }
 }
 
+pub fn ui_action_label(s: &Strings, action: UiAction) -> &'static str {
+    match action {
+        UiAction::Up => s.ui_up,
+        UiAction::Down => s.ui_down,
+        UiAction::Left => s.ui_left,
+        UiAction::Right => s.ui_right,
+        UiAction::Confirm => s.ui_confirm,
+        UiAction::Back => s.ui_back,
+    }
+}
+
 /// All user-facing UI text for one language. `{...}` placeholders are
 /// substituted with `str::replace` at the call site.
 pub struct Strings {
@@ -199,10 +210,17 @@ pub struct Strings {
     pub act_pause: &'static str,
     pub press_key: &'static str,
     pub press_button: &'static str,
+    pub ui_up: &'static str,
+    pub ui_down: &'static str,
+    pub ui_left: &'static str,
+    pub ui_right: &'static str,
+    pub ui_confirm: &'static str,
+    pub ui_back: &'static str,
     pub sdf_setting: &'static str,
     pub master_vol: &'static str,
     pub bgm_vol: &'static str,
     pub sfx_vol: &'static str,
+    pub voice_vol: &'static str,
     pub vsync_off: &'static str,
     pub fullscreen: &'static str,
     pub language: &'static str,
@@ -216,6 +234,7 @@ pub struct Strings {
     /// Appended to a player 2 key that player 1 also uses.
     pub key_clash: &'static str,
     pub sec_pad: &'static str,
+    pub sec_menu: &'static str,
     pub sec_handling: &'static str,
     pub sec_audio: &'static str,
     pub sec_display: &'static str,
@@ -373,20 +392,28 @@ pub const EN: Strings = Strings {
     act_pause: "Pause",
     press_key: "PRESS KEY...",
     press_button: "PRESS BUTTON...",
+    ui_up: "MENU UP",
+    ui_down: "MENU DOWN",
+    ui_left: "MENU LEFT",
+    ui_right: "MENU RIGHT",
+    ui_confirm: "CONFIRM",
+    ui_back: "BACK",
     sdf_setting: "Soft Drop",
     master_vol: "Master Vol",
     bgm_vol: "BGM Vol",
     sfx_vol: "SFX Vol",
+    voice_vol: "Voice Vol",
     vsync_off: "OFF (fast)",
     fullscreen: "Fullscreen",
     language: "Language",
     back: "BACK",
     settings_hint: "ENTER: rebind    Left/Right: adjust    ESC: back",
-    pad_hint: "GAMEPAD: menus are fixed (D-PAD/STICK move, A confirm, B back); the stick always moves the piece (up = hard drop)",
+    pad_hint: "GAMEPAD: menu buttons are under MENU CONTROLS; the stick always navigates and always moves the piece (up = hard drop), and B always backs out",
     sec_keys: "- KEY BINDINGS -",
     sec_keys2: "- PLAYER 2 KEYS (LOCAL VERSUS) -",
     key_clash: " ! ALSO 1P",
     sec_pad: "- GAMEPAD BUTTONS -",
+    sec_menu: "- MENU CONTROLS -",
     sec_handling: "- HANDLING -",
     sec_audio: "- AUDIO -",
     sec_display: "- DISPLAY & LANGUAGE -",
@@ -527,20 +554,28 @@ pub const JA: Strings = Strings {
     act_pause: "ポーズ",
     press_key: "キーを入力...",
     press_button: "ボタンを入力...",
+    ui_up: "メニュー上",
+    ui_down: "メニュー下",
+    ui_left: "メニュー左",
+    ui_right: "メニュー右",
+    ui_confirm: "決定",
+    ui_back: "戻る",
     sdf_setting: "SD倍率",
     master_vol: "主音量",
     bgm_vol: "BGM音量",
     sfx_vol: "効果音量",
+    voice_vol: "ボイス音量",
     vsync_off: "OFF (低遅延)",
     fullscreen: "フルスクリーン",
     language: "言語",
     back: "戻る",
     settings_hint: "ENTER: キー変更    ←→: 調整    ESC: 戻る",
-    pad_hint: "パッド: メニューは固定(十字/スティック移動・A決定・B戻る)。スティックは常に移動(上=ハードドロップ)",
+    pad_hint: "パッド: メニュー操作は[メニュー操作]で変更可。スティックは常にカーソル移動と操作(上=ハードドロップ)、Bは常に戻る",
     sec_keys: "- キー設定 -",
     sec_keys2: "- 2Pキー設定 (ローカル対戦) -",
     key_clash: " ! 1Pと重複",
     sec_pad: "- パッドボタン -",
+    sec_menu: "- メニュー操作 -",
     sec_handling: "- 操作感 -",
     sec_audio: "- サウンド -",
     sec_display: "- 表示・言語 -",

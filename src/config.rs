@@ -20,6 +20,57 @@ pub enum Action {
     Pause,
 }
 
+/// Navigating the menus, as opposed to playing.
+///
+/// Kept apart from [`Action`] rather than folded into it, because the two
+/// answer different questions. An `Action` has a player-2 counterpart and
+/// feeds the game simulation; a `UiAction` has neither and never reaches a
+/// board. Merging them would have given every menu direction a phantom
+/// second-player binding and put "confirm" in the middle of the list of
+/// things a piece can do.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+pub enum UiAction {
+    Up,
+    Down,
+    Left,
+    Right,
+    Confirm,
+    Back,
+}
+
+impl UiAction {
+    pub const ALL: [UiAction; 6] = [
+        UiAction::Up,
+        UiAction::Down,
+        UiAction::Left,
+        UiAction::Right,
+        UiAction::Confirm,
+        UiAction::Back,
+    ];
+
+    fn default_key(self) -> KeyCode {
+        match self {
+            UiAction::Up => KeyCode::ArrowUp,
+            UiAction::Down => KeyCode::ArrowDown,
+            UiAction::Left => KeyCode::ArrowLeft,
+            UiAction::Right => KeyCode::ArrowRight,
+            UiAction::Confirm => KeyCode::Enter,
+            UiAction::Back => KeyCode::Escape,
+        }
+    }
+
+    fn default_button(self) -> GamepadButton {
+        match self {
+            UiAction::Up => GamepadButton::DPadUp,
+            UiAction::Down => GamepadButton::DPadDown,
+            UiAction::Left => GamepadButton::DPadLeft,
+            UiAction::Right => GamepadButton::DPadRight,
+            UiAction::Confirm => GamepadButton::South,
+            UiAction::Back => GamepadButton::East,
+        }
+    }
+}
+
 impl Action {
     pub const ALL: [Action; 9] = [
         Action::MoveLeft,
@@ -384,11 +435,17 @@ struct SettingsFile {
     bindings2: HashMap<Action, String>,
     #[serde(default)]
     pad_bindings: HashMap<Action, String>,
+    #[serde(default)]
+    ui_bindings: HashMap<UiAction, String>,
+    #[serde(default)]
+    ui_pad_bindings: HashMap<UiAction, String>,
     das_ms: u32,
     arr_ms: u32,
     master_volume: u32,
     bgm_volume: u32,
     sfx_volume: u32,
+    #[serde(default = "default_voice_volume")]
+    voice_volume: u32,
     #[serde(default)]
     vsync: bool,
     #[serde(default = "default_sdf")]
@@ -406,6 +463,10 @@ struct SettingsFile {
     character: String,
 }
 
+fn default_voice_volume() -> u32 {
+    8
+}
+
 fn default_sdf() -> u32 {
     20
 }
@@ -417,6 +478,10 @@ pub const SDF_MAX: u32 = 999;
 #[derive(Resource, Debug, Clone)]
 pub struct GameSettings {
     pub bindings: HashMap<Action, KeyCode>,
+    /// Menu navigation, keyboard and pad. Escape and the left stick keep
+    /// working whatever these say — see [`GameSettings::ui_key`].
+    pub ui_bindings: HashMap<UiAction, KeyCode>,
+    pub ui_pad_bindings: HashMap<UiAction, GamepadButton>,
     /// Player 2's keyboard set for local versus. Defaults to the left
     /// hand of the keyboard so both players fit on one board without
     /// reaching across each other.
@@ -433,6 +498,11 @@ pub struct GameSettings {
     pub master_volume: u32,
     pub bgm_volume: u32,
     pub sfx_volume: u32,
+    /// Character voices, which are mixed separately from the effects even
+    /// though both are "sound": a voice pack is somebody else's taste, and
+    /// the player who wants the game loud and the character quiet has no
+    /// other way to say so.
+    pub voice_volume: u32,
     /// Off by default: vsync adds a frame or two of input latency.
     pub vsync: bool,
     /// Soft drop factor: gravity multiplier while soft-dropping.
@@ -469,9 +539,15 @@ impl Default for GameSettings {
             pad_bindings: default_pad_bindings(),
             das_ms: 160,
             arr_ms: 40,
+            ui_bindings: UiAction::ALL.iter().map(|a| (*a, a.default_key())).collect(),
+            ui_pad_bindings: UiAction::ALL
+                .iter()
+                .map(|a| (*a, a.default_button()))
+                .collect(),
             master_volume: 8,
             bgm_volume: 6,
             sfx_volume: 8,
+            voice_volume: 8,
             vsync: false,
             sdf: 20,
             fullscreen: false,
@@ -625,12 +701,48 @@ impl GameSettings {
         }
     }
 
+    pub fn ui_key(&self, action: UiAction) -> KeyCode {
+        self.ui_bindings
+            .get(&action)
+            .copied()
+            .unwrap_or_else(|| action.default_key())
+    }
+
+    pub fn ui_button(&self, action: UiAction) -> GamepadButton {
+        self.ui_pad_bindings
+            .get(&action)
+            .copied()
+            .unwrap_or_else(|| action.default_button())
+    }
+
+    /// Bind a menu key, stealing it from whichever menu action had it.
+    ///
+    /// Stealing rather than swapping, and no attempt to keep the loser
+    /// bound to something: two menu actions on one key is merely confusing,
+    /// but a menu you cannot leave is a menu you have to force-quit. That
+    /// is also why Escape and pad B are honoured unconditionally by the
+    /// menu regardless of what is stored here — the rebinding UI cannot
+    /// lock anybody out, whatever they type into it.
+    pub fn bind_ui(&mut self, action: UiAction, key: KeyCode) {
+        self.ui_bindings.retain(|_, k| *k != key);
+        self.ui_bindings.insert(action, key);
+    }
+
+    pub fn bind_ui_pad(&mut self, action: UiAction, button: GamepadButton) {
+        self.ui_pad_bindings.retain(|_, b| *b != button);
+        self.ui_pad_bindings.insert(action, button);
+    }
+
     pub fn bgm_linear(&self) -> f32 {
         (self.master_volume as f32 / 10.0) * (self.bgm_volume as f32 / 10.0)
     }
 
     pub fn sfx_linear(&self) -> f32 {
         (self.master_volume as f32 / 10.0) * (self.sfx_volume as f32 / 10.0)
+    }
+
+    pub fn voice_linear(&self) -> f32 {
+        (self.master_volume as f32 / 10.0) * (self.voice_volume as f32 / 10.0)
     }
 
     fn to_file(&self) -> SettingsFile {
@@ -650,11 +762,22 @@ impl GameSettings {
                 .iter()
                 .map(|(a, b)| (*a, pad_button_name(*b)))
                 .collect(),
+            ui_bindings: self
+                .ui_bindings
+                .iter()
+                .map(|(a, k)| (*a, key_name(*k)))
+                .collect(),
+            ui_pad_bindings: self
+                .ui_pad_bindings
+                .iter()
+                .map(|(a, b)| (*a, pad_button_name(*b)))
+                .collect(),
             das_ms: self.das_ms,
             arr_ms: self.arr_ms,
             master_volume: self.master_volume,
             bgm_volume: self.bgm_volume,
             sfx_volume: self.sfx_volume,
+            voice_volume: self.voice_volume,
             vsync: self.vsync,
             sdf: self.sdf,
             fullscreen: self.fullscreen,
@@ -727,6 +850,19 @@ impl GameSettings {
                 settings.pad_bindings.insert(*action, button);
             }
         }
+        // Menu navigation. A file written before these existed simply has
+        // none, and the defaults already in `settings` are what the menus
+        // always did — so an old file keeps behaving exactly as it did.
+        for (action, name) in &file.ui_bindings {
+            if let Some(key) = parse_key(name) {
+                settings.ui_bindings.insert(*action, key);
+            }
+        }
+        for (action, name) in &file.ui_pad_bindings {
+            if let Some(button) = parse_pad_button(name) {
+                settings.ui_pad_bindings.insert(*action, button);
+            }
+        }
         for action in Action::ALL {
             let button = settings.pad_for(action);
             let taken_by_other = Action::ALL
@@ -746,6 +882,7 @@ impl GameSettings {
         settings.master_volume = file.master_volume.min(10);
         settings.bgm_volume = file.bgm_volume.min(10);
         settings.sfx_volume = file.sfx_volume.min(10);
+        settings.voice_volume = file.voice_volume.min(10);
         settings.vsync = file.vsync;
         settings.sdf = if file.sdf >= SDF_MAX {
             SDF_MAX

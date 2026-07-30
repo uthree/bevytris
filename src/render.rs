@@ -47,6 +47,25 @@ impl Default for FrameGlow {
 #[derive(Component)]
 struct FrameBar;
 
+/// Next-queue tiles, in cells: how big one is and how far apart they sit.
+///
+/// The pitch has to exceed the box, which sounds too obvious to write down
+/// and was wrong for a long time — a 3.4-cell box every 2.4 cells overlaps
+/// its neighbour by a full cell, so the column read as one smeared panel
+/// rather than five tiles. The box in turn has to clear the widest piece: a
+/// mini is drawn at 0.55 cells and an I-piece is four of them.
+const NEXT_BOX: f32 = 2.7;
+const NEXT_PITCH: f32 = 3.0;
+const _: () = assert!(NEXT_PITCH > NEXT_BOX);
+const _: () = assert!(NEXT_BOX > 4.0 * MINI_SCALE);
+
+/// How big one cell of a piece is drawn in the hold and next boxes.
+pub const MINI_SCALE: f32 = 0.55;
+
+/// Digits the score is padded to. Wide enough that a long marathon never
+/// makes the field jump sideways, short enough to stay one glance.
+const SCORE_DIGITS: usize = 8;
+
 const FRAME_BASE_COLOR: Color = Color::srgb(0.25, 0.75, 0.95);
 /// Frame tint while the board's stack is dangerously high.
 const DANGER_FRAME_COLOR: Color = Color::srgb(1.0, 0.16, 0.12);
@@ -339,7 +358,7 @@ pub fn setup_board_visuals(
                     ));
                     for i in 0..4 {
                         parent.spawn((
-                            Sprite::from_color(Color::NONE, Vec2::splat(cell * 0.55 - 1.0)),
+                            Sprite::from_color(Color::NONE, Vec2::splat(cell * MINI_SCALE - 1.0)),
                             Transform::from_xyz(hold_x, hold_y, 2.0),
                             HoldSprite(i),
                             PreviewAnchor(Vec2::new(hold_x, hold_y)),
@@ -372,23 +391,41 @@ pub fn setup_board_visuals(
                     ));
                 }
                 for slot in 0..previews {
-                    let slot_y = h / 2.0 - cell * 1.2 - slot as f32 * cell * 2.4;
+                    let slot_y = h / 2.0 - cell * 1.2 - slot as f32 * NEXT_PITCH * cell;
                     parent.spawn((
                         Sprite::from_color(
                             Color::srgba(0.0, 0.0, 0.0, 0.85),
-                            Vec2::splat(cell * 3.4),
+                            Vec2::splat(cell * NEXT_BOX),
                         ),
                         Transform::from_xyz(next_x, slot_y, 0.7),
                     ));
                     for i in 0..4 {
                         parent.spawn((
-                            Sprite::from_color(Color::NONE, Vec2::splat(cell * 0.55 - 1.0)),
+                            Sprite::from_color(Color::NONE, Vec2::splat(cell * MINI_SCALE - 1.0)),
                             Transform::from_xyz(next_x, slot_y, 2.0),
                             NextSprite { slot, i },
                             PreviewAnchor(Vec2::new(next_x, slot_y)),
                         ));
                     }
                 }
+
+                // The score, centred under the field on a line of its own.
+                //
+                // It used to be one row of the side column, where it was the
+                // only entry whose width moved — every clear shifted the
+                // digits and dragged the eye off the stack. Here it is
+                // centred, so growth spreads both ways, and zero-padded to
+                // [`SCORE_DIGITS`], so it does not grow at all.
+                parent.spawn((
+                    Text2d::new(String::new()),
+                    TextFont {
+                        font_size: FontSize::Px(cell * 0.55),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.75, 0.82, 0.95)),
+                    Transform::from_xyz(0.0, -h / 2.0 - cell * 0.75, 2.0),
+                    HudText::Score,
+                ));
 
                 // Danger bar hugging the left edge of the field.
                 parent.spawn((
@@ -424,11 +461,7 @@ pub fn setup_board_visuals(
                 // the marathon columns for a timer and a goal countdown.
                 let hud_x = -w / 2.0 - cell * 2.8;
                 let entries: Vec<(&str, HudText)> = match *mode {
-                    GameMode::Sprint => vec![
-                        (s.time, HudText::Time),
-                        (s.left, HudText::Left),
-                        (s.score, HudText::Score),
-                    ],
+                    GameMode::Sprint => vec![(s.time, HudText::Time), (s.left, HudText::Left)],
                     // Zen has no clock to beat, so the column shows what
                     // it does have: the lifetime level, the lines feeding
                     // it, the gravity it has climbed to, and the time
@@ -437,19 +470,16 @@ pub fn setup_board_visuals(
                         (s.zen_level, HudText::ZenLevel),
                         (s.lines, HudText::Lines),
                         (s.speed, HudText::Speed),
-                        (s.score, HudText::Score),
                         (s.time, HudText::Time),
                         (s.zen_resets, HudText::ZenResets),
                     ],
                     // The zone gauge label needs the bottom edge clear.
                     _ if zone_on => vec![
-                        (s.score, HudText::Score),
                         (s.level, HudText::Level),
                         (s.lines, HudText::Lines),
                         (s.atk_in, HudText::Incoming),
                     ],
                     _ => vec![
-                        (s.score, HudText::Score),
                         (s.level, HudText::Level),
                         (s.lines, HudText::Lines),
                         (s.speed, HudText::Speed),
@@ -691,7 +721,7 @@ fn sync_previews(
 ) {
     for (session, theme, children) in &boards {
         let game = &session.game;
-        let scale = theme.cell * 0.55;
+        let scale = theme.cell * MINI_SCALE;
         for child in children.iter() {
             if let Ok((hold, anchor, mut sprite, mut tf)) = holds.get_mut(child) {
                 match game.hold {
@@ -734,7 +764,12 @@ fn sync_hud(
             };
             match kind {
                 HudText::Score => {
-                    let s = game.score.to_string();
+                    let s = format!(
+                        "{} {:0width$}",
+                        locale.s().score,
+                        game.score,
+                        width = SCORE_DIGITS
+                    );
                     if **text != s {
                         **text = s;
                     }

@@ -11,7 +11,7 @@
 use bevy::prelude::*;
 use std::collections::HashSet;
 
-use crate::config::{Action, GameSettings, bindable_pad_buttons};
+use crate::config::{Action, GameSettings, UiAction, bindable_pad_buttons};
 
 /// Fixed navigation actions (menus, overlays).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -121,29 +121,31 @@ fn poll_pads(
         let x = pad.get(GamepadAxis::LeftStickX).unwrap_or(0.0);
         let y = pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0);
 
-        // Fixed navigation: D-pad/stick directions, A confirm, B back.
+        // Menu navigation, from the player's own bindings.
         let mut set = |cond: bool, action: PadAction| {
             if cond {
                 nav.insert(action);
             }
         };
-        set(
-            pad.pressed(GamepadButton::DPadLeft) || x < -STICK_THRESHOLD,
-            PadAction::Left,
-        );
-        set(
-            pad.pressed(GamepadButton::DPadRight) || x > STICK_THRESHOLD,
-            PadAction::Right,
-        );
-        set(
-            pad.pressed(GamepadButton::DPadDown) || y < -STICK_THRESHOLD,
-            PadAction::Down,
-        );
-        set(
-            pad.pressed(GamepadButton::DPadUp) || y > STICK_THRESHOLD,
-            PadAction::Up,
-        );
-        set(pad.pressed(GamepadButton::South), PadAction::Confirm);
+        for (ui, action) in [
+            (UiAction::Left, PadAction::Left),
+            (UiAction::Right, PadAction::Right),
+            (UiAction::Down, PadAction::Down),
+            (UiAction::Up, PadAction::Up),
+            (UiAction::Confirm, PadAction::Confirm),
+            (UiAction::Back, PadAction::Back),
+        ] {
+            set(pad.pressed(settings.ui_button(ui)), action);
+        }
+        // The stick moves a cursor whatever the buttons are bound to. It is
+        // an axis rather than a button, so there is nothing here to rebind
+        // and no way for a rebinding to take it away.
+        set(x < -STICK_THRESHOLD, PadAction::Left);
+        set(x > STICK_THRESHOLD, PadAction::Right);
+        set(y < -STICK_THRESHOLD, PadAction::Down);
+        set(y > STICK_THRESHOLD, PadAction::Up);
+        // B always backs out, however it is bound elsewhere: the rebinding
+        // screen is reachable with a pad and must stay leaveable with one.
         set(pad.pressed(GamepadButton::East), PadAction::Back);
 
         // Rebindable in-game actions.
