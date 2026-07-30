@@ -52,9 +52,10 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
   - T-Spin / T-Spin Mini detection (3-corner rule + TST kick exception)
   - Back-to-Back, combos, perfect clears, guideline scoring
   - Piece spawning in rows 21–22 with immediate drop, block-out / lock-out top-out rules
-- **Configurable controls** — every action can be rebound in the Settings menu;
-  DAS / ARR / SDF handling tuning and volume sliders included, plus gamepad
-  support with a fixed layout. Settings persist to disk.
+- **Configurable controls** — every action can be rebound in the Settings menu,
+  including the menu keys and buttons themselves, and an action can answer to
+  more than one input (hold on both shoulder buttons, say). DAS / ARR / SDF
+  handling tuning and volume sliders included. Settings persist to disk.
 - **English / Japanese UI** — auto-detected from the OS language, switchable
   in the settings.
 - **Flashy presentation** — HDR bloom on everything that matters, square
@@ -119,9 +120,16 @@ R zone. If those keys are already taken by player 1's own bindings, player 2
 starts on the numpad instead. Pause is shared: one key stops both boards.
 
 Menus: arrow keys + Enter (mouse also works). All gameplay keys can be rebound
-in **SETTINGS**; press Enter on a binding row, then press the new key. Player
-2's keys have their own section, and a key both players share is flagged
-there.
+in **SETTINGS**; press Enter on a binding row, then press the new key. Right on
+a binding row adds a second (or third) input instead of replacing, and Left
+takes the last one away — so hold can sit on both shoulder buttons if that is
+what your hands want. An action always keeps at least one input, and an input
+only ever drives one action. Player 2's keys have their own section, and a key
+both players share is flagged there.
+
+The menu controls are themselves rebindable, under **MENU CONTROLS**. Escape
+and pad B back out of any menu whatever the bindings say — but only while
+nothing else is bound to them, so swapping confirm and cancel round works.
 
 Settings are stored as RON at the platform config directory, e.g.
 `~/Library/Application Support/bevytris/settings.ron` on macOS or

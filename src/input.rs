@@ -1,12 +1,16 @@
 //! Gamepad input layer: merges every connected pad's buttons and left
 //! stick into the states the game and menus read alongside the keyboard.
 //!
-//! Two kinds of state live here. Menu navigation is FIXED (D-pad/stick
-//! moves, A confirms, B backs out) so menus always work no matter how the
-//! game buttons are configured. In-game actions are REBINDABLE — each
-//! [`Action`] maps to the gamepad button chosen in the settings — with
-//! one hardwired convenience: the left stick always moves the piece
-//! (left/right/soft drop, up = hard drop), mirroring the D-pad defaults.
+//! Two kinds of state live here, and both are rebindable now. Menu
+//! navigation reads the [`UiAction`] bindings; in-game actions read the
+//! [`Action`] ones. Each maps to a *list* of buttons, so one action can
+//! answer to several.
+//!
+//! Two things stay wired in regardless. The left stick always moves the
+//! cursor and the piece, because it is an axis and there is nothing there
+//! to rebind. And B backs out of a menu — but only while B is not bound
+//! to something else, so that swapping confirm and cancel does what it
+//! says rather than leaving B doing both at once.
 
 use bevy::prelude::*;
 use std::collections::HashSet;
@@ -135,7 +139,10 @@ fn poll_pads(
             (UiAction::Confirm, PadAction::Confirm),
             (UiAction::Back, PadAction::Back),
         ] {
-            set(pad.pressed(settings.ui_button(ui)), action);
+            set(
+                settings.ui_buttons(ui).iter().any(|b| pad.pressed(*b)),
+                action,
+            );
         }
         // The stick moves a cursor whatever the buttons are bound to. It is
         // an axis rather than a button, so there is nothing here to rebind
@@ -144,13 +151,24 @@ fn poll_pads(
         set(x > STICK_THRESHOLD, PadAction::Right);
         set(y < -STICK_THRESHOLD, PadAction::Down);
         set(y > STICK_THRESHOLD, PadAction::Up);
-        // B always backs out, however it is bound elsewhere: the rebinding
-        // screen is reachable with a pad and must stay leaveable with one.
-        set(pad.pressed(GamepadButton::East), PadAction::Back);
+        // B backs out even when nothing says so, because the screen that
+        // rebinds these is reachable with a pad and has to stay leaveable
+        // with one.
+        //
+        // Only while B is otherwise free, though. It used to be
+        // unconditional, and that quietly broke the one rebinding people
+        // actually want: swap confirm and cancel and B fired both, back
+        // wins because the menu tests it first, and confirm became
+        // unreachable — unless you held A down first so its own back edge
+        // had already been consumed, which is a thing nobody should ever
+        // have to discover.
+        if !settings.ui_button_is_bound(GamepadButton::East) {
+            set(pad.pressed(GamepadButton::East), PadAction::Back);
+        }
 
         // Rebindable in-game actions.
         for action in Action::ALL {
-            if pad.pressed(settings.pad_for(action)) {
+            if settings.pads_for(action).iter().any(|b| pad.pressed(*b)) {
                 mine.insert(action);
             }
         }

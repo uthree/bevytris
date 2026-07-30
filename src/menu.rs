@@ -144,6 +144,9 @@ struct Rebinding {
     pad: bool,
     /// Capturing into player 2's key set rather than player 1's.
     player2: bool,
+    /// Adding another input to what the action already has, rather than
+    /// replacing it. Right on a binding row asks for this; Enter does not.
+    append: bool,
     just_started: bool,
 }
 
@@ -154,13 +157,48 @@ impl Rebinding {
         self.action.is_some() || self.ui.is_some()
     }
 
+    /// What the row says while it is waiting. Different wording for adding
+    /// than for replacing, because from the outside they look identical
+    /// and only one of them is about to throw away what is there.
+    fn prompt(&self, s: &Strings) -> String {
+        match (self.pad, self.append) {
+            (false, false) => s.press_key.to_string(),
+            (false, true) => s.press_key_add.to_string(),
+            (true, false) => s.press_button.to_string(),
+            (true, true) => s.press_button_add.to_string(),
+        }
+    }
+
     fn clear(&mut self) {
         self.action = None;
         self.ui = None;
         self.pad = false;
         self.player2 = false;
+        self.append = false;
         self.just_started = false;
     }
+}
+
+/// An add that could not be made: the input is the only one some other
+/// action has, and taking it would leave that action unreachable.
+///
+/// Closes the prompt rather than waiting for a different answer. Leaving
+/// it open would look identical to the prompt not having heard the press.
+fn refused(rebinding: &mut Rebinding, sfx: &mut MessageWriter<PlaySfx>) {
+    rebinding.clear();
+    sfx.write(PlaySfx::new(Sfx::MenuBack));
+}
+
+/// A binding row's value: every input the action answers to.
+fn bound_label<B: Copy, L: AsRef<str>>(inputs: &[B], label: impl Fn(B) -> L) -> String {
+    if inputs.is_empty() {
+        return "[-]".to_string();
+    }
+    inputs
+        .iter()
+        .map(|b| format!("[{}]", label(*b).as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub struct MenuPlugin;
@@ -1348,16 +1386,13 @@ fn jukebox_input(
     mut sfx: MessageWriter<PlaySfx>,
     mut next_app: ResMut<NextState<AppState>>,
 ) {
-    if keys.just_pressed(settings.ui_key(UiAction::Back))
-        || keys.just_pressed(KeyCode::Escape)
-        || pad.just_pressed(PadAction::Back)
-    {
+    if ui_back(&keys, &pad, &settings) {
         sfx.write(PlaySfx::new(Sfx::MenuBack));
         next_app.set(AppState::Title);
         return;
     }
-    let down = keys.just_pressed(settings.ui_key(UiAction::Down)) || pad.just_pressed(PadAction::Down);
-    let up = keys.just_pressed(settings.ui_key(UiAction::Up)) || pad.just_pressed(PadAction::Up);
+    let down = ui_pressed(&keys, &settings, UiAction::Down) || pad.just_pressed(PadAction::Down);
+    let up = ui_pressed(&keys, &settings, UiAction::Up) || pad.just_pressed(PadAction::Up);
     if down {
         cursor.0 = (cursor.0 + 1) % JUKEBOX_ROWS;
         sfx.write(PlaySfx::new(Sfx::MenuMove));
@@ -1368,11 +1403,11 @@ fn jukebox_input(
     }
 
     // WASD alongside the arrows, matching the up/down keys above.
-    let right = keys.just_pressed(settings.ui_key(UiAction::Right)) || pad.just_pressed(PadAction::Right);
-    let left = keys.just_pressed(settings.ui_key(UiAction::Left)) || pad.just_pressed(PadAction::Left);
+    let right = ui_pressed(&keys, &settings, UiAction::Right) || pad.just_pressed(PadAction::Right);
+    let left = ui_pressed(&keys, &settings, UiAction::Left) || pad.just_pressed(PadAction::Left);
     // Confirm re-rolls the seed wherever the cursor is: it is the thing
     // you want most often, and there is nothing else to confirm.
-    let reroll = keys.just_pressed(settings.ui_key(UiAction::Confirm))
+    let reroll = ui_pressed(&keys, &settings, UiAction::Confirm)
         || keys.just_pressed(KeyCode::KeyR)
         || pad.just_pressed(PadAction::Confirm);
     if reroll {
@@ -1678,31 +1713,33 @@ fn settings_label(
     Some(match action {
         MenuAction::Bind(a) => {
             let key = if rebinding.action == Some(a) && !rebinding.pad && !rebinding.player2 {
-                s.press_key.to_string()
+                rebinding.prompt(s)
             } else {
-                format!("[{}]", key_label(settings.key_for(a)))
+                bound_label(settings.keys_for(a), key_label)
             };
             format!("{:<12} {}", action_label(s, a), key)
         }
         MenuAction::Bind2(a) => {
             let key = if rebinding.action == Some(a) && !rebinding.pad && rebinding.player2 {
-                s.press_key.to_string()
+                rebinding.prompt(s)
             } else {
                 // A key both players share would move both boards at
                 // once, so say so rather than letting it be discovered
                 // mid-match.
-                let bound = settings.key2_for(a);
-                let shared = Action::ALL.iter().any(|p1| settings.key_for(*p1) == bound);
+                let bound = settings.keys2_for(a);
+                let shared = Action::ALL
+                    .iter()
+                    .any(|p1| settings.keys_for(*p1).iter().any(|k| bound.contains(k)));
                 let mark = if shared { s.key_clash } else { "" };
-                format!("[{}]{}", key_label(bound), mark)
+                format!("{}{}", bound_label(bound, key_label), mark)
             };
             format!("{:<12} {}", action_label(s, a), key)
         }
         MenuAction::BindPad(a) => {
             let button = if rebinding.action == Some(a) && rebinding.pad && !rebinding.player2 {
-                s.press_button.to_string()
+                rebinding.prompt(s)
             } else {
-                format!("[{}]", crate::config::pad_button_label(settings.pad_for(a)))
+                bound_label(settings.pads_for(a), crate::config::pad_button_label)
             };
             format!("{:<12} {}", action_label(s, a), button)
         }
@@ -1717,17 +1754,17 @@ fn settings_label(
         MenuAction::AdjustVoice => format!("{:<12} {}/10", s.voice_vol, settings.voice_volume),
         MenuAction::BindUi(a) => {
             let key = if rebinding.ui == Some(a) && !rebinding.pad {
-                s.press_key.to_string()
+                rebinding.prompt(s)
             } else {
-                format!("[{}]", key_label(settings.ui_key(a)))
+                bound_label(settings.ui_keys(a), key_label)
             };
             format!("{:<12} {}", ui_action_label(s, a), key)
         }
         MenuAction::BindUiPad(a) => {
             let button = if rebinding.ui == Some(a) && rebinding.pad {
-                s.press_button.to_string()
+                rebinding.prompt(s)
             } else {
-                format!("[{}]", crate::config::pad_button_label(settings.ui_button(a)))
+                bound_label(settings.ui_buttons(a), crate::config::pad_button_label)
             };
             format!("{:<12} {}", ui_action_label(s, a), button)
         }
@@ -1879,6 +1916,24 @@ fn item_count(items: &Query<(Entity, &MenuItem, &Interaction)>) -> usize {
     items.iter().count()
 }
 
+/// Was any key bound to this menu action just pressed?
+fn ui_pressed(keys: &ButtonInput<KeyCode>, settings: &GameSettings, ui: UiAction) -> bool {
+    keys.any_just_pressed(settings.ui_keys(ui).iter().copied())
+}
+
+/// Backing out, from any of the three things that mean it.
+///
+/// Escape leaves a menu whatever the bindings say, so the screen that
+/// rebinds them cannot strand anybody — but only while Escape is not
+/// bound to some other menu action. Honouring both would make that action
+/// impossible, since backing out is checked first. Same rule as pad B in
+/// `input.rs`, and it exists for the same bug.
+fn ui_back(keys: &ButtonInput<KeyCode>, pad: &PadInput, settings: &GameSettings) -> bool {
+    ui_pressed(keys, settings, UiAction::Back)
+        || (!settings.ui_key_is_bound(KeyCode::Escape) && keys.just_pressed(KeyCode::Escape))
+        || pad.just_pressed(PadAction::Back)
+}
+
 /// Where a vertical step lands in a wrapped picker grid.
 ///
 /// `(cursor + cols) % count` is the obvious version, and it is wrong twice
@@ -1940,10 +1995,10 @@ fn menu_keyboard_nav(
     };
     let grid = cols > 1;
 
-    let down = keys.just_pressed(activate.settings.ui_key(UiAction::Down)) || pad.just_pressed(PadAction::Down);
-    let up = keys.just_pressed(activate.settings.ui_key(UiAction::Up)) || pad.just_pressed(PadAction::Up);
-    let right = keys.just_pressed(activate.settings.ui_key(UiAction::Right)) || pad.just_pressed(PadAction::Right);
-    let left = keys.just_pressed(activate.settings.ui_key(UiAction::Left)) || pad.just_pressed(PadAction::Left);
+    let down = ui_pressed(&keys, &activate.settings, UiAction::Down) || pad.just_pressed(PadAction::Down);
+    let up = ui_pressed(&keys, &activate.settings, UiAction::Up) || pad.just_pressed(PadAction::Up);
+    let right = ui_pressed(&keys, &activate.settings, UiAction::Right) || pad.just_pressed(PadAction::Right);
+    let left = ui_pressed(&keys, &activate.settings, UiAction::Left) || pad.just_pressed(PadAction::Left);
 
     let mut moved = false;
     if down {
@@ -1978,13 +2033,8 @@ fn menu_keyboard_nav(
         0
     };
     let confirm =
-        keys.just_pressed(activate.settings.ui_key(UiAction::Confirm)) || pad.just_pressed(PadAction::Confirm);
-    // Escape backs out whatever Back is bound to. A menu you cannot leave
-    // is a menu you have to force-quit, and the screen that rebinds these
-    // is itself behind one.
-    let back = keys.just_pressed(activate.settings.ui_key(UiAction::Back))
-        || keys.just_pressed(KeyCode::Escape)
-        || pad.just_pressed(PadAction::Back);
+        ui_pressed(&keys, &activate.settings, UiAction::Confirm) || pad.just_pressed(PadAction::Confirm);
+    let back = ui_back(&keys, &pad, &activate.settings);
 
     if adjust == 0 && !confirm && !back {
         return;
@@ -2102,6 +2152,69 @@ fn run_menu_action(
     let Some(action) = action else { return };
 
     if adjust != 0 {
+        // Binding rows first, because they are the one kind of row where
+        // left and right do not step a value. Right opens the same capture
+        // prompt Enter does but in append mode, left takes the last extra
+        // away — so a second binding costs one keypress more than a first
+        // and needs no screen of its own.
+        let bind_row = match action {
+            MenuAction::Bind(a) => Some((Some(a), false, false)),
+            MenuAction::Bind2(a) => Some((Some(a), false, true)),
+            MenuAction::BindPad(a) => Some((Some(a), true, false)),
+            _ => None,
+        };
+        if let Some((action, pad, player2)) = bind_row {
+            let action = action.expect("bind rows always carry an action");
+            if adjust > 0 {
+                p.rebinding.clear();
+                p.rebinding.action = Some(action);
+                p.rebinding.pad = pad;
+                p.rebinding.player2 = player2;
+                p.rebinding.append = true;
+                p.rebinding.just_started = true;
+                sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            } else {
+                let dropped = match (pad, player2) {
+                    (true, _) => p.settings.drop_bind_pad(action),
+                    (false, true) => p.settings.drop_bind2(action),
+                    (false, false) => p.settings.drop_bind(action),
+                };
+                if dropped {
+                    save_settings(&p.settings);
+                    sfx.write(PlaySfx::new(Sfx::MenuBack));
+                } else {
+                    // Refusing rather than unbinding: an action nobody can
+                    // press is one the player has to come back here to fix,
+                    // assuming they work out that is what happened.
+                    sfx.write(PlaySfx::quiet(Sfx::MenuMove));
+                }
+            }
+            return;
+        }
+        if let MenuAction::BindUi(ui) | MenuAction::BindUiPad(ui) = action {
+            let pad = matches!(action, MenuAction::BindUiPad(_));
+            if adjust > 0 {
+                p.rebinding.clear();
+                p.rebinding.ui = Some(ui);
+                p.rebinding.pad = pad;
+                p.rebinding.append = true;
+                p.rebinding.just_started = true;
+                sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            } else {
+                let dropped = if pad {
+                    p.settings.drop_bind_ui_pad(ui)
+                } else {
+                    p.settings.drop_bind_ui(ui)
+                };
+                if dropped {
+                    save_settings(&p.settings);
+                    sfx.write(PlaySfx::new(Sfx::MenuBack));
+                } else {
+                    sfx.write(PlaySfx::quiet(Sfx::MenuMove));
+                }
+            }
+            return;
+        }
         let s = &mut *p.settings;
         let changed = match action {
             MenuAction::AdjustDas => {
@@ -2452,7 +2565,15 @@ fn rebind_capture(
                 }
             }
             if let Some(button) = pad.raw_just_pressed() {
-                settings.bind_ui_pad(ui, button);
+                let applied = if rebinding.append {
+                    settings.add_bind_ui_pad(ui, button)
+                } else {
+                    settings.bind_ui_pad(ui, button)
+                };
+                if !applied {
+                    refused(&mut rebinding, &mut sfx);
+                    return;
+                }
                 save_settings(&settings);
                 rebinding.clear();
                 sfx.write(PlaySfx::new(Sfx::MenuSelect));
@@ -2475,7 +2596,15 @@ fn rebind_capture(
                 return;
             }
             if crate::config::bindable_keys().contains(&input.key_code) {
-                settings.bind_ui(ui, input.key_code);
+                let applied = if rebinding.append {
+                    settings.add_bind_ui(ui, input.key_code)
+                } else {
+                    settings.bind_ui(ui, input.key_code)
+                };
+                if !applied {
+                    refused(&mut rebinding, &mut sfx);
+                    return;
+                }
                 save_settings(&settings);
                 rebinding.clear();
                 sfx.write(PlaySfx::new(Sfx::MenuSelect));
@@ -2509,7 +2638,15 @@ fn rebind_capture(
             return;
         }
         if let Some(button) = pad.raw_just_pressed() {
-            settings.bind_pad(action, button);
+            let applied = if rebinding.append {
+                settings.add_bind_pad(action, button)
+            } else {
+                settings.bind_pad(action, button)
+            };
+            if !applied {
+                refused(&mut rebinding, &mut sfx);
+                return;
+            }
             save_settings(&settings);
             rebinding.clear();
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
@@ -2535,10 +2672,15 @@ fn rebind_capture(
             return;
         }
         if crate::config::bindable_keys().contains(&input.key_code) {
-            if rebinding.player2 {
-                settings.bind2(action, input.key_code);
-            } else {
-                settings.bind(action, input.key_code);
+            let applied = match (rebinding.player2, rebinding.append) {
+                (false, false) => settings.bind(action, input.key_code),
+                (false, true) => settings.add_bind(action, input.key_code),
+                (true, false) => settings.bind2(action, input.key_code),
+                (true, true) => settings.add_bind2(action, input.key_code),
+            };
+            if !applied {
+                refused(&mut rebinding, &mut sfx);
+                return;
             }
             save_settings(&settings);
             rebinding.clear();

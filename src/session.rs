@@ -553,7 +553,8 @@ fn pause_toggle(
     mut next: ResMut<NextState<PlayState>>,
     mut sfx: MessageWriter<PlaySfx>,
 ) {
-    if keys.just_pressed(settings.key_for(Action::Pause)) || pad.action_just_pressed(Action::Pause)
+    if keys.any_just_pressed(settings.keys_for(Action::Pause).iter().copied())
+        || pad.action_just_pressed(Action::Pause)
     {
         match state.get() {
             PlayState::Running => {
@@ -582,16 +583,18 @@ struct Controls<'a> {
 }
 
 impl Controls<'_> {
-    fn key(&self, action: Action) -> KeyCode {
+    /// Every key this seat has for `action` — an action can hold more than
+    /// one, so hold on both shoulder buttons is a thing you can ask for.
+    fn keys_for(&self, action: Action) -> &[KeyCode] {
         if self.seat == 0 {
-            self.settings.key_for(action)
+            self.settings.keys_for(action)
         } else {
-            self.settings.key2_for(action)
+            self.settings.keys2_for(action)
         }
     }
 
     fn pressed(&self, action: Action) -> bool {
-        self.keys.pressed(self.key(action))
+        self.keys.any_pressed(self.keys_for(action).iter().copied())
             || match self.pad_slot {
                 Some(slot) => self.pad.slot_pressed(slot, action),
                 None => self.pad.action_pressed(action),
@@ -599,7 +602,8 @@ impl Controls<'_> {
     }
 
     fn just_pressed(&self, action: Action) -> bool {
-        self.keys.just_pressed(self.key(action))
+        self.keys
+            .any_just_pressed(self.keys_for(action).iter().copied())
             || match self.pad_slot {
                 Some(slot) => self.pad.slot_just_pressed(slot, action),
                 None => self.pad.action_just_pressed(action),

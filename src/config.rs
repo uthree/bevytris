@@ -1,9 +1,18 @@
 //! Persistent settings: key bindings, handling (DAS/ARR) and volumes.
 //! Stored as RON in the platform config directory.
+//!
+//! An action holds a *list* of inputs rather than one, so hold can sit on
+//! both shoulder buttons and the player who wants space and enter to both
+//! hard-drop can have that. Everything here maintains one invariant: a
+//! list is never empty. An action with nothing bound to it is an action
+//! the player cannot perform and, worse, cannot find again — so the
+//! functions that take an input away from one action give it something
+//! back, and the ones that remove refuse to remove the last.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -391,17 +400,17 @@ fn parse_pad_button(name: &str) -> Option<GamepadButton> {
         .find(|b| pad_button_name(*b) == name)
 }
 
-fn default_pad_bindings() -> HashMap<Action, GamepadButton> {
+fn default_pad_bindings() -> HashMap<Action, Vec<GamepadButton>> {
     let mut bindings = HashMap::new();
-    bindings.insert(Action::MoveLeft, GamepadButton::DPadLeft);
-    bindings.insert(Action::MoveRight, GamepadButton::DPadRight);
-    bindings.insert(Action::SoftDrop, GamepadButton::DPadDown);
-    bindings.insert(Action::HardDrop, GamepadButton::DPadUp);
-    bindings.insert(Action::RotateCw, GamepadButton::South);
-    bindings.insert(Action::RotateCcw, GamepadButton::East);
-    bindings.insert(Action::Hold, GamepadButton::LeftTrigger);
-    bindings.insert(Action::Zone, GamepadButton::RightTrigger2);
-    bindings.insert(Action::Pause, GamepadButton::Start);
+    bindings.insert(Action::MoveLeft, vec![GamepadButton::DPadLeft]);
+    bindings.insert(Action::MoveRight, vec![GamepadButton::DPadRight]);
+    bindings.insert(Action::SoftDrop, vec![GamepadButton::DPadDown]);
+    bindings.insert(Action::HardDrop, vec![GamepadButton::DPadUp]);
+    bindings.insert(Action::RotateCw, vec![GamepadButton::South]);
+    bindings.insert(Action::RotateCcw, vec![GamepadButton::East]);
+    bindings.insert(Action::Hold, vec![GamepadButton::LeftTrigger]);
+    bindings.insert(Action::Zone, vec![GamepadButton::RightTrigger2]);
+    bindings.insert(Action::Pause, vec![GamepadButton::Start]);
     bindings
 }
 
@@ -427,18 +436,48 @@ fn parse_key(name: &str) -> Option<KeyCode> {
     bindable_keys().into_iter().find(|k| key_name(*k) == name)
 }
 
+/// One binding as it appears in the file: either a bare name, as every
+/// version before multiple bindings wrote it, or a list.
+///
+/// Untagged, so a settings.ron from an older build still loads — which is
+/// the whole reason this type exists rather than a plain `Vec<String>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Bound {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Bound {
+    fn names(&self) -> &[String] {
+        match self {
+            Bound::One(name) => std::slice::from_ref(name),
+            Bound::Many(names) => names,
+        }
+    }
+
+    /// Written back as a bare name while there is only one, so a file that
+    /// nobody has added a second binding to reads the way it always did.
+    fn from(names: &[impl AsRef<str>]) -> Self {
+        match names {
+            [only] => Bound::One(only.as_ref().to_string()),
+            many => Bound::Many(many.iter().map(|n| n.as_ref().to_string()).collect()),
+        }
+    }
+}
+
 /// Serializable settings snapshot (what actually goes into the RON file).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SettingsFile {
-    bindings: HashMap<Action, String>,
+    bindings: HashMap<Action, Bound>,
     #[serde(default)]
-    bindings2: HashMap<Action, String>,
+    bindings2: HashMap<Action, Bound>,
     #[serde(default)]
-    pad_bindings: HashMap<Action, String>,
+    pad_bindings: HashMap<Action, Bound>,
     #[serde(default)]
-    ui_bindings: HashMap<UiAction, String>,
+    ui_bindings: HashMap<UiAction, Bound>,
     #[serde(default)]
-    ui_pad_bindings: HashMap<UiAction, String>,
+    ui_pad_bindings: HashMap<UiAction, Bound>,
     das_ms: u32,
     arr_ms: u32,
     master_volume: u32,
@@ -463,6 +502,18 @@ struct SettingsFile {
     character: String,
 }
 
+fn names<B: Copy>(inputs: &[B], name: fn(B) -> String) -> Vec<String> {
+    inputs.iter().map(|b| name(*b)).collect()
+}
+
+/// Read one action's list back out of the file, dropping anything that no
+/// longer parses. Returns None when nothing survived, so the caller can
+/// leave the default in place rather than storing an empty list.
+fn parse_bound<B>(bound: &Bound, parse: fn(&str) -> Option<B>) -> Option<Vec<B>> {
+    let parsed: Vec<B> = bound.names().iter().filter_map(|n| parse(n)).collect();
+    (!parsed.is_empty()).then_some(parsed)
+}
+
 fn default_voice_volume() -> u32 {
     8
 }
@@ -477,19 +528,19 @@ pub const SDF_MAX: u32 = 999;
 /// Live settings resource.
 #[derive(Resource, Debug, Clone)]
 pub struct GameSettings {
-    pub bindings: HashMap<Action, KeyCode>,
-    /// Menu navigation, keyboard and pad. Escape and the left stick keep
-    /// working whatever these say — see [`GameSettings::ui_key`].
-    pub ui_bindings: HashMap<UiAction, KeyCode>,
-    pub ui_pad_bindings: HashMap<UiAction, GamepadButton>,
+    pub bindings: HashMap<Action, Vec<KeyCode>>,
+    /// Menu navigation, keyboard and pad. Escape and pad B keep working as
+    /// a way out *while nothing else claims them* — see
+    /// [`GameSettings::ui_keys`].
+    pub ui_bindings: HashMap<UiAction, Vec<KeyCode>>,
+    pub ui_pad_bindings: HashMap<UiAction, Vec<GamepadButton>>,
     /// Player 2's keyboard set for local versus. Defaults to the left
     /// hand of the keyboard so both players fit on one board without
     /// reaching across each other.
-    pub bindings2: HashMap<Action, KeyCode>,
-    /// Gamepad button per action. Menu navigation (D-pad/stick, A
-    /// confirm, B back) and stick movement stay fixed; these only drive
-    /// in-game actions.
-    pub pad_bindings: HashMap<Action, GamepadButton>,
+    pub bindings2: HashMap<Action, Vec<KeyCode>>,
+    /// Gamepad buttons per action. The left stick always moves the piece
+    /// whatever these say; everything else in-game comes from here.
+    pub pad_bindings: HashMap<Action, Vec<GamepadButton>>,
     /// Delayed auto shift: hold time before auto-repeat starts (ms).
     pub das_ms: u32,
     /// Auto repeat rate: interval between auto-shifts (ms).
@@ -524,25 +575,28 @@ pub struct GameSettings {
 impl Default for GameSettings {
     fn default() -> Self {
         let mut bindings = HashMap::new();
-        bindings.insert(Action::MoveLeft, KeyCode::ArrowLeft);
-        bindings.insert(Action::MoveRight, KeyCode::ArrowRight);
-        bindings.insert(Action::SoftDrop, KeyCode::ArrowDown);
-        bindings.insert(Action::HardDrop, KeyCode::Space);
-        bindings.insert(Action::RotateCw, KeyCode::ArrowUp);
-        bindings.insert(Action::RotateCcw, KeyCode::KeyZ);
-        bindings.insert(Action::Hold, KeyCode::KeyC);
-        bindings.insert(Action::Zone, KeyCode::KeyV);
-        bindings.insert(Action::Pause, KeyCode::Escape);
+        bindings.insert(Action::MoveLeft, vec![KeyCode::ArrowLeft]);
+        bindings.insert(Action::MoveRight, vec![KeyCode::ArrowRight]);
+        bindings.insert(Action::SoftDrop, vec![KeyCode::ArrowDown]);
+        bindings.insert(Action::HardDrop, vec![KeyCode::Space]);
+        bindings.insert(Action::RotateCw, vec![KeyCode::ArrowUp]);
+        bindings.insert(Action::RotateCcw, vec![KeyCode::KeyZ]);
+        bindings.insert(Action::Hold, vec![KeyCode::KeyC]);
+        bindings.insert(Action::Zone, vec![KeyCode::KeyV]);
+        bindings.insert(Action::Pause, vec![KeyCode::Escape]);
         Self {
             bindings,
             bindings2: default_bindings2(),
             pad_bindings: default_pad_bindings(),
             das_ms: 160,
             arr_ms: 40,
-            ui_bindings: UiAction::ALL.iter().map(|a| (*a, a.default_key())).collect(),
+            ui_bindings: UiAction::ALL
+                .iter()
+                .map(|a| (*a, vec![a.default_key()]))
+                .collect(),
             ui_pad_bindings: UiAction::ALL
                 .iter()
-                .map(|a| (*a, a.default_button()))
+                .map(|a| (*a, vec![a.default_button()]))
                 .collect(),
             master_volume: 8,
             bgm_volume: 6,
@@ -584,8 +638,11 @@ const PLAYER2_LAYOUTS: [[(Action, KeyCode); 8]; 2] = [
     ],
 ];
 
-fn default_bindings2() -> HashMap<Action, KeyCode> {
-    PLAYER2_LAYOUTS[0].iter().copied().collect()
+fn default_bindings2() -> HashMap<Action, Vec<KeyCode>> {
+    PLAYER2_LAYOUTS[0]
+        .iter()
+        .map(|(a, k)| (*a, vec![*k]))
+        .collect()
 }
 
 /// Player 2's starting layout given what player 1 already uses. Two
@@ -593,84 +650,160 @@ fn default_bindings2() -> HashMap<Action, KeyCode> {
 /// move both boards — so pick the first layout that stays clear of
 /// player 1, and fall back to the left hand if none does (the per-action
 /// fixup in [`GameSettings::from_file`] then moves what still collides).
-fn fit_bindings2(p1: &HashMap<Action, KeyCode>) -> HashMap<Action, KeyCode> {
+fn fit_bindings2(p1: &HashMap<Action, Vec<KeyCode>>) -> HashMap<Action, Vec<KeyCode>> {
     PLAYER2_LAYOUTS
         .iter()
         .find(|layout| {
             layout
                 .iter()
-                .all(|(_, key)| !p1.values().any(|taken| taken == key))
+                .all(|(_, key)| !p1.values().any(|taken| taken.contains(key)))
         })
         .unwrap_or(&PLAYER2_LAYOUTS[0])
         .iter()
-        .copied()
+        .map(|(a, k)| (*a, vec![*k]))
         .collect()
 }
 
+/// Give `input` to `action`, taking it off whoever else had it.
+///
+/// `replace` is the difference between "rebind this to X" and "X does this
+/// too", and the difference matters for more than this row. Either way the
+/// input ends up exclusively this action's, because one input doing two
+/// things at once is a bug the player cannot see — it was exactly that, a
+/// pad B that both confirmed and cancelled, that made this worth
+/// generalising.
+///
+/// Replacing can always take: whoever loses their last input inherits the
+/// one this action just gave up, which is the swap the single-binding
+/// version did and keeps every action reachable. Adding has nothing to
+/// give up, so it refuses rather than stranding anyone — hence the bool.
+/// Nothing is written on a refusal.
+fn assign<A, B>(map: &mut HashMap<A, Vec<B>>, action: A, input: B, replace: bool) -> bool
+where
+    A: Copy + Eq + Hash,
+    B: Copy + Eq,
+{
+    let previous = map.get(&action).and_then(|list| list.first()).copied();
+    if !replace
+        && map
+            .iter()
+            .any(|(other, list)| *other != action && list.len() == 1 && list[0] == input)
+    {
+        return false;
+    }
+    for (other, list) in map.iter_mut() {
+        if *other == action {
+            continue;
+        }
+        let had = list.len();
+        list.retain(|held| *held != input);
+        if list.is_empty() && had > 0 && let Some(previous) = previous {
+            list.push(previous);
+        }
+    }
+    let list = map.entry(action).or_default();
+    if replace {
+        list.clear();
+    } else {
+        // Pressing the same input twice on one row is a no-op rather than
+        // a duplicate entry.
+        list.retain(|held| *held != input);
+    }
+    list.push(input);
+    true
+}
+
+/// Drop `action`'s last-added input. Refuses to drop the only one.
+fn unassign_last<A, B>(map: &mut HashMap<A, Vec<B>>, action: A) -> bool
+where
+    A: Copy + Eq + Hash,
+{
+    match map.get_mut(&action) {
+        Some(list) if list.len() > 1 => {
+            list.pop();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The inputs `action` holds.
+///
+/// Empty only if a hand-edited file emptied it and the load-time repair
+/// somehow missed it, which is why this reads rather than panics: an
+/// action nobody can press is survivable, a crash on startup is not.
+fn held<'a, A, B>(map: &'a HashMap<A, Vec<B>>, action: &A) -> &'a [B]
+where
+    A: Eq + Hash,
+{
+    map.get(action).map(Vec::as_slice).unwrap_or(&[])
+}
+
 impl GameSettings {
+    pub fn keys_for(&self, action: Action) -> &[KeyCode] {
+        held(&self.bindings, &action)
+    }
+
+    /// The first key bound to `action` — what a label shows when there is
+    /// only room for one, and what a stolen binding hands back.
     pub fn key_for(&self, action: Action) -> KeyCode {
-        *self
-            .bindings
-            .get(&action)
+        self.keys_for(action)
+            .first()
+            .copied()
             .expect("every action always has a binding")
     }
 
-    /// Player 2's key for `action`. Falls back to player 1's binding for
+    /// Player 2's keys for `action`. Falls back to player 1's bindings for
     /// anything player 2 has no separate copy of (only Pause, today).
-    pub fn key2_for(&self, action: Action) -> KeyCode {
-        self.bindings2
-            .get(&action)
-            .copied()
-            .unwrap_or_else(|| self.key_for(action))
-    }
-
-    /// Rebind one of player 2's keys, with the same swap-steal semantics
-    /// as [`GameSettings::bind`] — within player 2's own set only, so the
-    /// two players are free to overlap if someone really wants that.
-    pub fn bind2(&mut self, action: Action, key: KeyCode) {
-        let previous = self.key2_for(action);
-        if let Some((&other, _)) = self
-            .bindings2
-            .iter()
-            .find(|(a, k)| **k == key && **a != action)
-        {
-            self.bindings2.insert(other, previous);
+    pub fn keys2_for(&self, action: Action) -> &[KeyCode] {
+        match self.bindings2.get(&action) {
+            Some(list) if !list.is_empty() => list,
+            _ => self.keys_for(action),
         }
-        self.bindings2.insert(action, key);
     }
 
-    pub fn bind(&mut self, action: Action, key: KeyCode) {
-        // Steal the key from any action that currently uses it by swapping
-        // bindings, so no action is ever left unbound or duplicated.
-        let previous = self.key_for(action);
-        if let Some((&other, _)) = self
-            .bindings
-            .iter()
-            .find(|(a, k)| **k == key && **a != action)
-        {
-            self.bindings.insert(other, previous);
-        }
-        self.bindings.insert(action, key);
+    /// Rebind one of player 2's keys — within player 2's own set only, so
+    /// the two players are free to overlap if someone really wants that.
+    pub fn bind2(&mut self, action: Action, key: KeyCode) -> bool {
+        assign(&mut self.bindings2, action, key, true)
     }
 
-    pub fn pad_for(&self, action: Action) -> GamepadButton {
-        *self
-            .pad_bindings
-            .get(&action)
-            .expect("every action always has a pad binding")
+    pub fn add_bind2(&mut self, action: Action, key: KeyCode) -> bool {
+        assign(&mut self.bindings2, action, key, false)
     }
 
-    /// Same swap-steal semantics as [`GameSettings::bind`], for the pad.
-    pub fn bind_pad(&mut self, action: Action, button: GamepadButton) {
-        let previous = self.pad_for(action);
-        if let Some((&other, _)) = self
-            .pad_bindings
-            .iter()
-            .find(|(a, b)| **b == button && **a != action)
-        {
-            self.pad_bindings.insert(other, previous);
-        }
-        self.pad_bindings.insert(action, button);
+    pub fn drop_bind2(&mut self, action: Action) -> bool {
+        unassign_last(&mut self.bindings2, action)
+    }
+
+    pub fn bind(&mut self, action: Action, key: KeyCode) -> bool {
+        assign(&mut self.bindings, action, key, true)
+    }
+
+    /// Add a second (third, ..) key for `action` rather than replacing.
+    pub fn add_bind(&mut self, action: Action, key: KeyCode) -> bool {
+        assign(&mut self.bindings, action, key, false)
+    }
+
+    /// Take away the most recently added key. False if it was the only one.
+    pub fn drop_bind(&mut self, action: Action) -> bool {
+        unassign_last(&mut self.bindings, action)
+    }
+
+    pub fn pads_for(&self, action: Action) -> &[GamepadButton] {
+        held(&self.pad_bindings, &action)
+    }
+
+    pub fn bind_pad(&mut self, action: Action, button: GamepadButton) -> bool {
+        assign(&mut self.pad_bindings, action, button, true)
+    }
+
+    pub fn add_bind_pad(&mut self, action: Action, button: GamepadButton) -> bool {
+        assign(&mut self.pad_bindings, action, button, false)
+    }
+
+    pub fn drop_bind_pad(&mut self, action: Action) -> bool {
+        unassign_last(&mut self.pad_bindings, action)
     }
 
     /// Gravity multiplier the core should use while soft-dropping.
@@ -701,36 +834,53 @@ impl GameSettings {
         }
     }
 
-    pub fn ui_key(&self, action: UiAction) -> KeyCode {
-        self.ui_bindings
-            .get(&action)
-            .copied()
-            .unwrap_or_else(|| action.default_key())
+    pub fn ui_keys(&self, action: UiAction) -> &[KeyCode] {
+        held(&self.ui_bindings, &action)
     }
 
-    pub fn ui_button(&self, action: UiAction) -> GamepadButton {
-        self.ui_pad_bindings
-            .get(&action)
-            .copied()
-            .unwrap_or_else(|| action.default_button())
+    pub fn ui_buttons(&self, action: UiAction) -> &[GamepadButton] {
+        held(&self.ui_pad_bindings, &action)
     }
 
-    /// Bind a menu key, stealing it from whichever menu action had it.
+    /// Is this input already spoken for by some menu action?
     ///
-    /// Stealing rather than swapping, and no attempt to keep the loser
-    /// bound to something: two menu actions on one key is merely confusing,
-    /// but a menu you cannot leave is a menu you have to force-quit. That
-    /// is also why Escape and pad B are honoured unconditionally by the
-    /// menu regardless of what is stored here — the rebinding UI cannot
-    /// lock anybody out, whatever they type into it.
-    pub fn bind_ui(&mut self, action: UiAction, key: KeyCode) {
-        self.ui_bindings.retain(|_, k| *k != key);
-        self.ui_bindings.insert(action, key);
+    /// Asked about Escape and pad B, which the menus otherwise honour as a
+    /// way out no matter what the bindings say. That fallback has to step
+    /// aside when the player has deliberately given the input to something
+    /// else — otherwise swapping confirm and cancel leaves B doing both,
+    /// and since backing out is checked first, confirm never happens.
+    pub fn ui_key_is_bound(&self, key: KeyCode) -> bool {
+        self.ui_bindings.values().any(|list| list.contains(&key))
     }
 
-    pub fn bind_ui_pad(&mut self, action: UiAction, button: GamepadButton) {
-        self.ui_pad_bindings.retain(|_, b| *b != button);
-        self.ui_pad_bindings.insert(action, button);
+    pub fn ui_button_is_bound(&self, button: GamepadButton) -> bool {
+        self.ui_pad_bindings
+            .values()
+            .any(|list| list.contains(&button))
+    }
+
+    pub fn bind_ui(&mut self, action: UiAction, key: KeyCode) -> bool {
+        assign(&mut self.ui_bindings, action, key, true)
+    }
+
+    pub fn add_bind_ui(&mut self, action: UiAction, key: KeyCode) -> bool {
+        assign(&mut self.ui_bindings, action, key, false)
+    }
+
+    pub fn drop_bind_ui(&mut self, action: UiAction) -> bool {
+        unassign_last(&mut self.ui_bindings, action)
+    }
+
+    pub fn bind_ui_pad(&mut self, action: UiAction, button: GamepadButton) -> bool {
+        assign(&mut self.ui_pad_bindings, action, button, true)
+    }
+
+    pub fn add_bind_ui_pad(&mut self, action: UiAction, button: GamepadButton) -> bool {
+        assign(&mut self.ui_pad_bindings, action, button, false)
+    }
+
+    pub fn drop_bind_ui_pad(&mut self, action: UiAction) -> bool {
+        unassign_last(&mut self.ui_pad_bindings, action)
     }
 
     pub fn bgm_linear(&self) -> f32 {
@@ -750,27 +900,27 @@ impl GameSettings {
             bindings: self
                 .bindings
                 .iter()
-                .map(|(a, k)| (*a, key_name(*k)))
+                .map(|(a, keys)| (*a, Bound::from(&names(keys, key_name))))
                 .collect(),
             bindings2: self
                 .bindings2
                 .iter()
-                .map(|(a, k)| (*a, key_name(*k)))
+                .map(|(a, keys)| (*a, Bound::from(&names(keys, key_name))))
                 .collect(),
             pad_bindings: self
                 .pad_bindings
                 .iter()
-                .map(|(a, b)| (*a, pad_button_name(*b)))
+                .map(|(a, bs)| (*a, Bound::from(&names(bs, pad_button_name))))
                 .collect(),
             ui_bindings: self
                 .ui_bindings
                 .iter()
-                .map(|(a, k)| (*a, key_name(*k)))
+                .map(|(a, keys)| (*a, Bound::from(&names(keys, key_name))))
                 .collect(),
             ui_pad_bindings: self
                 .ui_pad_bindings
                 .iter()
-                .map(|(a, b)| (*a, pad_button_name(*b)))
+                .map(|(a, bs)| (*a, Bound::from(&names(bs, pad_button_name))))
                 .collect(),
             das_ms: self.das_ms,
             arr_ms: self.arr_ms,
@@ -789,26 +939,29 @@ impl GameSettings {
 
     fn from_file(file: SettingsFile) -> Self {
         let mut settings = Self::default();
-        for (action, name) in &file.bindings {
-            if let Some(key) = parse_key(name) {
-                settings.bindings.insert(*action, key);
+        for (action, bound) in &file.bindings {
+            if let Some(keys) = parse_bound(bound, parse_key) {
+                settings.bindings.insert(*action, keys);
             }
         }
         // Older files may predate an action (e.g. Zone); its default key
         // could then collide with a user rebinding. Give any action missing
         // from the file a key nothing else uses.
         for action in Action::ALL {
-            let key = settings.key_for(action);
-            let taken_by_other = Action::ALL
-                .iter()
-                .any(|a| *a != action && settings.key_for(*a) == key);
+            let taken_by_other = Action::ALL.iter().any(|a| {
+                *a != action
+                    && settings
+                        .keys_for(*a)
+                        .iter()
+                        .any(|k| settings.keys_for(action).contains(k))
+            });
             if taken_by_other
                 && !file.bindings.contains_key(&action)
                 && let Some(free) = bindable_keys()
                     .into_iter()
-                    .find(|k| Action::ALL.iter().all(|a| settings.key_for(*a) != *k))
+                    .find(|k| Action::ALL.iter().all(|a| !settings.keys_for(*a).contains(k)))
             {
-                settings.bindings.insert(action, free);
+                settings.bindings.insert(action, vec![free]);
             }
         }
         // Player 2's set. A file written before local versus existed has
@@ -817,9 +970,9 @@ impl GameSettings {
         if file.bindings2.is_empty() {
             settings.bindings2 = fit_bindings2(&settings.bindings);
         }
-        for (action, name) in &file.bindings2 {
-            if let Some(key) = parse_key(name) {
-                settings.bindings2.insert(*action, key);
+        for (action, bound) in &file.bindings2 {
+            if let Some(keys) = parse_bound(bound, parse_key) {
+                settings.bindings2.insert(*action, keys);
             }
         }
         // Anything the file left unspecified that still collides — with
@@ -830,51 +983,55 @@ impl GameSettings {
             if file.bindings2.contains_key(&action) {
                 continue;
             }
-            let key = settings.key2_for(action);
+            let mine = settings.keys2_for(action).to_vec();
             let clashes = Action::PLAYER2
                 .iter()
-                .any(|a| *a != action && settings.key2_for(*a) == key)
-                || Action::ALL.iter().any(|a| settings.key_for(*a) == key);
+                .any(|a| *a != action && settings.keys2_for(*a).iter().any(|k| mine.contains(k)))
+                || Action::ALL
+                    .iter()
+                    .any(|a| settings.keys_for(*a).iter().any(|k| mine.contains(k)));
             if clashes
                 && let Some(free) = bindable_keys().into_iter().find(|k| {
-                    Action::ALL.iter().all(|a| settings.key_for(*a) != *k)
-                        && Action::PLAYER2.iter().all(|a| settings.key2_for(*a) != *k)
+                    Action::ALL.iter().all(|a| !settings.keys_for(*a).contains(k))
+                        && Action::PLAYER2
+                            .iter()
+                            .all(|a| !settings.keys2_for(*a).contains(k))
                 })
             {
-                settings.bindings2.insert(action, free);
+                settings.bindings2.insert(action, vec![free]);
             }
         }
         // Pad bindings: same restore + collision fixup as the keyboard.
-        for (action, name) in &file.pad_bindings {
-            if let Some(button) = parse_pad_button(name) {
-                settings.pad_bindings.insert(*action, button);
+        for (action, bound) in &file.pad_bindings {
+            if let Some(buttons) = parse_bound(bound, parse_pad_button) {
+                settings.pad_bindings.insert(*action, buttons);
             }
         }
         // Menu navigation. A file written before these existed simply has
         // none, and the defaults already in `settings` are what the menus
         // always did — so an old file keeps behaving exactly as it did.
-        for (action, name) in &file.ui_bindings {
-            if let Some(key) = parse_key(name) {
-                settings.ui_bindings.insert(*action, key);
+        for (action, bound) in &file.ui_bindings {
+            if let Some(keys) = parse_bound(bound, parse_key) {
+                settings.ui_bindings.insert(*action, keys);
             }
         }
-        for (action, name) in &file.ui_pad_bindings {
-            if let Some(button) = parse_pad_button(name) {
-                settings.ui_pad_bindings.insert(*action, button);
+        for (action, bound) in &file.ui_pad_bindings {
+            if let Some(buttons) = parse_bound(bound, parse_pad_button) {
+                settings.ui_pad_bindings.insert(*action, buttons);
             }
         }
         for action in Action::ALL {
-            let button = settings.pad_for(action);
+            let mine = settings.pads_for(action).to_vec();
             let taken_by_other = Action::ALL
                 .iter()
-                .any(|a| *a != action && settings.pad_for(*a) == button);
+                .any(|a| *a != action && settings.pads_for(*a).iter().any(|b| mine.contains(b)));
             if taken_by_other
                 && !file.pad_bindings.contains_key(&action)
                 && let Some(free) = bindable_pad_buttons()
                     .into_iter()
-                    .find(|b| Action::ALL.iter().all(|a| settings.pad_for(*a) != *b))
+                    .find(|b| Action::ALL.iter().all(|a| !settings.pads_for(*a).contains(b)))
             {
-                settings.pad_bindings.insert(action, free);
+                settings.pad_bindings.insert(action, vec![free]);
             }
         }
         settings.das_ms = file.das_ms.clamp(0, 500);
@@ -948,14 +1105,22 @@ mod tests {
 
     /// The stock layouts: player 1 on the arrows, player 2 on the left
     /// hand. Nothing should be shared.
+    /// Every key of player 2's, against every key of player 1's.
+    fn shares_with_player1(s: &GameSettings, a: Action) -> Option<KeyCode> {
+        s.keys2_for(a)
+            .iter()
+            .copied()
+            .find(|k| Action::ALL.iter().any(|p1| s.keys_for(*p1).contains(k)))
+    }
+
     #[test]
     fn default_layouts_do_not_share_keys() {
         let s = GameSettings::default();
         for a in Action::PLAYER2 {
-            let key = s.key2_for(a);
-            assert!(
-                Action::ALL.iter().all(|p1| s.key_for(*p1) != key),
-                "{a:?} on {key:?} collides with player 1"
+            assert_eq!(
+                shares_with_player1(&s, a),
+                None,
+                "{a:?} collides with player 1"
             );
         }
     }
@@ -963,13 +1128,13 @@ mod tests {
     #[test]
     fn player2_moves_to_the_numpad_when_player_1_took_wasd() {
         let mut p1 = GameSettings::default().bindings;
-        p1.insert(Action::MoveLeft, KeyCode::KeyA);
-        p1.insert(Action::MoveRight, KeyCode::KeyD);
-        p1.insert(Action::SoftDrop, KeyCode::KeyS);
-        p1.insert(Action::RotateCw, KeyCode::KeyW);
+        p1.insert(Action::MoveLeft, vec![KeyCode::KeyA]);
+        p1.insert(Action::MoveRight, vec![KeyCode::KeyD]);
+        p1.insert(Action::SoftDrop, vec![KeyCode::KeyS]);
+        p1.insert(Action::RotateCw, vec![KeyCode::KeyW]);
         let p2 = fit_bindings2(&p1);
-        assert_eq!(p2[&Action::MoveLeft], KeyCode::Numpad4);
-        assert_eq!(p2[&Action::HardDrop], KeyCode::Numpad0);
+        assert_eq!(p2[&Action::MoveLeft], vec![KeyCode::Numpad4]);
+        assert_eq!(p2[&Action::HardDrop], vec![KeyCode::Numpad0]);
     }
 
     /// Upgrading a settings file written before local versus existed must
@@ -986,18 +1151,95 @@ mod tests {
             (Action::RotateCcw, KeyCode::KeyA),
             (Action::Hold, KeyCode::KeyS),
         ] {
-            old.bindings.insert(action, key);
+            old.bindings.insert(action, vec![key]);
         }
         let mut file = old.to_file();
         file.bindings2.clear(); // as if written by an older build
         let loaded = GameSettings::from_file(file);
         for a in Action::PLAYER2 {
-            let key = loaded.key2_for(a);
-            assert!(
-                Action::ALL.iter().all(|p1| loaded.key_for(*p1) != key),
-                "{a:?} on {key:?} collides with player 1"
+            assert_eq!(
+                shares_with_player1(&loaded, a),
+                None,
+                "{a:?} collides with player 1"
             );
         }
+    }
+
+    #[test]
+    fn an_action_can_hold_more_than_one_input() {
+        let mut s = GameSettings::default();
+        s.add_bind(Action::Hold, KeyCode::KeyL);
+        assert_eq!(s.keys_for(Action::Hold), [KeyCode::KeyC, KeyCode::KeyL]);
+        // ..and survives the round trip through the file.
+        let loaded = GameSettings::from_file(s.to_file());
+        assert_eq!(loaded.keys_for(Action::Hold), [KeyCode::KeyC, KeyCode::KeyL]);
+    }
+
+    /// A file from before this existed wrote one bare name per action, and
+    /// still has to load.
+    #[test]
+    fn a_single_name_in_the_file_still_loads() {
+        let text = r#"(
+            bindings: { MoveLeft: "Left", Hold: "C" },
+            das_ms: 160, arr_ms: 40,
+            master_volume: 8, bgm_volume: 6, sfx_volume: 8,
+        )"#;
+        let file: SettingsFile = ron::from_str(text).expect("old-shaped file should parse");
+        let loaded = GameSettings::from_file(file);
+        assert_eq!(loaded.keys_for(Action::Hold), [KeyCode::KeyC]);
+        assert_eq!(loaded.keys_for(Action::MoveLeft), [KeyCode::ArrowLeft]);
+    }
+
+    /// One input, one action. Taking a key from an action that has only
+    /// that key hands it the one the thief was using, so nothing is ever
+    /// left with nothing.
+    #[test]
+    fn stealing_an_input_never_strands_the_loser() {
+        let mut s = GameSettings::default();
+        s.bind(Action::Hold, KeyCode::KeyZ); // RotateCcw's key
+        assert_eq!(s.keys_for(Action::Hold), [KeyCode::KeyZ]);
+        assert_eq!(s.keys_for(Action::RotateCcw), [KeyCode::KeyC]);
+    }
+
+    /// Adding has nothing to trade, so it will not take an input that is
+    /// some other action's only one.
+    #[test]
+    fn adding_refuses_to_strand_another_action() {
+        let mut s = GameSettings::default();
+        assert!(
+            !s.add_bind(Action::Hold, KeyCode::KeyZ),
+            "Z is all RotateCcw has"
+        );
+        assert_eq!(s.keys_for(Action::Hold), [KeyCode::KeyC]);
+        assert_eq!(s.keys_for(Action::RotateCcw), [KeyCode::KeyZ]);
+        // Once RotateCcw has a spare, Hold is welcome to the original.
+        assert!(s.add_bind(Action::RotateCcw, KeyCode::KeyX));
+        assert!(s.add_bind(Action::Hold, KeyCode::KeyZ));
+        assert_eq!(s.keys_for(Action::Hold), [KeyCode::KeyC, KeyCode::KeyZ]);
+        assert_eq!(s.keys_for(Action::RotateCcw), [KeyCode::KeyX]);
+    }
+
+    #[test]
+    fn the_last_binding_cannot_be_dropped() {
+        let mut s = GameSettings::default();
+        assert!(!s.drop_bind(Action::Hold), "one binding is the floor");
+        s.add_bind(Action::Hold, KeyCode::KeyL);
+        assert!(s.drop_bind(Action::Hold));
+        assert_eq!(s.keys_for(Action::Hold), [KeyCode::KeyC]);
+        assert!(!s.drop_bind(Action::Hold));
+    }
+
+    /// The bug this was all for: swapping menu confirm and cancel used to
+    /// leave B doing both, and back is tested first.
+    #[test]
+    fn swapping_confirm_and_cancel_leaves_each_button_one_job() {
+        let mut s = GameSettings::default();
+        s.bind_ui_pad(UiAction::Confirm, GamepadButton::East);
+        assert_eq!(s.ui_buttons(UiAction::Confirm), [GamepadButton::East]);
+        assert_eq!(s.ui_buttons(UiAction::Back), [GamepadButton::South]);
+        // ..and B is now spoken for, so the menus' unconditional way out
+        // stands down rather than firing alongside confirm.
+        assert!(s.ui_button_is_bound(GamepadButton::East));
     }
 
     #[test]
