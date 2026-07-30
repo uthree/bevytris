@@ -13,6 +13,7 @@ use crate::core::board::BOARD_WIDTH;
 use crate::core::game::{Game, GameEvent, Leveling, MAX_TIMED_LEVEL, Stats, Zone};
 use crate::input::PadInput;
 use crate::progress::{Grade, Progress};
+use crate::render::BoardKick;
 use crate::state::{AppState, GameMode, PlayState};
 
 /// VS rounds speed up on a clock — one gravity level every this many
@@ -323,6 +324,12 @@ pub struct Countdown {
 #[derive(Resource)]
 struct RoundOverTimer(Timer);
 
+/// The whole intermission between rounds. The losing board leaves at once
+/// and takes about three quarters of a second to clear the bottom of the
+/// screen; the rest is the winner holding their pose alone before the next
+/// countdown.
+const ROUND_OVER_SECS: f32 = 4.0;
+
 /// Lines already added to the lifetime zen total this session. Zen has no
 /// finish line to bank at, so lines are handed over as they are cleared;
 /// this watermark is what keeps a restart from counting them twice.
@@ -416,7 +423,14 @@ impl Plugin for SessionPlugin {
                     .chain()
                     .run_if(in_state(PlayState::Running)),
             )
-            .add_systems(OnEnter(PlayState::RoundOver), round_over_enter)
+            .add_systems(
+                OnEnter(PlayState::RoundOver),
+                (round_over_enter, drop_losing_board),
+            )
+            .add_systems(OnEnter(PlayState::Finished), drop_losing_board)
+            // A new round reuses the board entities, so anything the last
+            // one did to them has to be undone before it starts.
+            .add_systems(OnEnter(PlayState::Countdown), recover_boards)
             .add_systems(
                 Update,
                 round_over_tick.run_if(in_state(PlayState::RoundOver)),
@@ -1023,7 +1037,10 @@ fn round_over_enter(
     last: Option<Res<LastRound>>,
     mut sfx: MessageWriter<PlaySfx>,
 ) {
-    commands.insert_resource(RoundOverTimer(Timer::from_seconds(2.8, TimerMode::Once)));
+    commands.insert_resource(RoundOverTimer(Timer::from_seconds(
+        ROUND_OVER_SECS,
+        TimerMode::Once,
+    )));
     if let Some(last) = last {
         sfx.write(if last.winner == 0 {
             PlaySfx::new(Sfx::LevelUp)
@@ -1034,6 +1051,57 @@ fn round_over_enter(
                 crisp: false,
             }
         });
+    }
+}
+
+/// Send the losing board out of the bottom of the screen.
+///
+/// Run on the way into both endings a round has: an intermission between
+/// rounds and the end of the whole match. It fires the instant the round
+/// is decided, on the same frame the stack reached the ceiling — the board
+/// falls because it just lost, so any pause between the two reads as the
+/// game thinking about it rather than as a consequence.
+///
+/// Solo has no loser to single out — the one board on screen *is* the
+/// player — so nothing drops and the field stays put under the result
+/// screen.
+fn drop_losing_board(
+    mode: Res<GameMode>,
+    result: Option<Res<SessionResult>>,
+    last: Option<Res<LastRound>>,
+    mut boards: Query<(&BoardIndex, &mut BoardKick)>,
+) {
+    if !matches!(
+        *mode,
+        GameMode::VsCpu { .. } | GameMode::ZoneBattle { .. } | GameMode::Custom
+    ) {
+        return;
+    }
+    // A decided match names its winner; an undecided one falls back to the
+    // round that just ended, which is the same question one round smaller.
+    let winner = match result.as_deref() {
+        Some(SessionResult::VsWin { winner }) => *winner,
+        _ => match last.as_deref() {
+            Some(round) => round.winner,
+            None => return,
+        },
+    };
+    let loser = 1 - winner.min(1);
+    for (index, mut kick) in &mut boards {
+        if index.0.min(1) == loser {
+            // Topple away from the middle of the screen, so the two boards
+            // never look like they are leaning into each other.
+            kick.drop_away(if loser == 1 { -0.9 } else { 0.9 });
+        }
+    }
+}
+
+/// Put every board back where it belongs. A first-to-n match reuses the
+/// same board entities from round to round, so a board that fell out of
+/// the screen last round would otherwise start the next one still falling.
+fn recover_boards(mut boards: Query<&mut BoardKick>) {
+    for mut kick in &mut boards {
+        kick.land();
     }
 }
 

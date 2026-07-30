@@ -19,7 +19,8 @@ assets/characters/<id>/
 │   ├── win.png                      optional; pose held on a win
 │   └── lose.png                     optional; pose held on a loss
 └── voices/
-    └── <kind>.wav                   all optional, see the table below
+    ├── <kind>.wav                   all optional, see the table below
+    └── count_01.wav … count_20.wav  all optional; the spoken numbers
 ```
 
 **The directory name is the id.** There is deliberately no `id` field in
@@ -74,9 +75,12 @@ The other three are pure extras and each falls back:
 
 | file | used for | falls back to |
 | --- | --- | --- |
-| `cutin.png` | drawn large *behind* the boards on a TETRIS, T-Spin Double/Triple, Perfect Clear, or a zone release clearing 5+ lines, washed with that move's colour | the standing art |
+| `cutin.png` | drawn large *behind* the boards on a TETRIS, T-Spin Double/Triple, Perfect Clear, a counter cancelling 4+ rows, or a zone release clearing 5+ lines, washed with that move's colour | the standing art |
 | `icon.png` | the character picker tile | the standing art |
-| `win.png` / `lose.png` | the pose held while the result is up, drawn *over* the field (the standing art sits behind the stack; this does not) next to the WIN/LOSE lettering | the other one, then the standing art |
+| `win.png` / `lose.png` | the pose held while the result is up, drawn *over* the field (the standing art sits behind the stack; this does not) next to the WIN/LOSE lettering, and again at the edges of the match-end result screen | the other one, then the standing art |
+
+`standing_right.png` also stands at full height beside the character picker,
+showing who the cursor is on.
 
 Aspect ratio is preserved everywhere the art is drawn as UI (the cut-in strip
 and the picker tile measure the image and scale it by height), so these do not
@@ -88,25 +92,52 @@ very wide art ends up small rather than spilling out of the frame.
 Filenames are fixed. Anything else in `voices/` is ignored. A missing file just
 means that event has no line.
 
-| file | English | Japanese |
-| --- | --- | --- |
-| `ready.wav` | Here we go | いくよー |
-| `clear.wav` | Nice | いいね |
-| `tetris.wav` | Tetris! | テトリス！ |
-| `tspin.wav` | T spin! | ティースピン！ |
-| `perfect_clear.wav` | Perfect clear! | パーフェクトクリア！ |
-| `combo.wav` | Combo! | コンボ！ |
-| `attack.wav` | Take this | くらえー |
-| `damage.wav` | Ouch | いたっ |
-| `damage_heavy.wav` | That is a lot | うわ、多い！ |
-| `zone_start.wav` | Zone, activate | ゾーン、発動 |
-| `zone_finish.wav` | How was that | どうだった |
-| `win.wav` | I win! | わたしの勝ち！ |
-| `lose.wav` | No way | そんなー |
+| file | when | English | Japanese |
+| --- | --- | --- | --- |
+| `select.wav` | confirmed in the picker | Leave it to me | まかせて |
+| `ready.wav` | the countdown before a round | Here we go | いくよー |
+| `clear.wav` | an ordinary line clear | Nice | いいね |
+| `tetris.wav` | four lines at once | Tetris! | テトリス！ |
+| `tspin.wav` | any T-spin | T spin! | ティースピン！ |
+| `perfect_clear.wav` | the board left empty | Perfect clear! | パーフェクトクリア！ |
+| `combo.wav` | a streak, when the numbers below are absent | Combo! | コンボ！ |
+| `attack.wav` | a clear that sent garbage | Take this | くらえー |
+| `counter.wav` | an attack that cancelled *all* the incoming garbage | Not today! | そうはさせない！ |
+| `damage.wav` | 2–3 rows of garbage rose | Ouch | いたっ |
+| `damage_heavy.wav` | 4+ rows rose at once | That is a lot | うわ、多い！ |
+| `pinch.wav` | the stack got close to the top | This is bad | まずい、まずい |
+| `zone_ready.wav` | the zone gauge filled | Zone, ready | ゾーン、いけるよ |
+| `zone_start.wav` | the zone fired | Zone, activate | ゾーン、発動 |
+| `zone_finish.wav` | the zone released its banked lines | How was that | どうだった |
+| `win.wav` | won the round or the match | I win! | わたしの勝ち！ |
+| `lose.wav` | lost the round or the match | No way | そんなー |
 
 Taking garbage is the one event with two lines: two or three rows play
 `damage.wav`, four or more play `damage_heavy.wav`. A pack that ships only
 `damage.wav` uses it for both rather than going quiet on the big hits.
+`counter.wav` falls back to `attack.wav` and `select.wav` to `ready.wav` the
+same way, so a pack written before those existed keeps reacting.
+
+`pinch.wav` and `zone_ready.wav` deliberately have no fallback: they describe a
+state rather than an event, and an older line borrowed for them would fire at a
+moment it does not fit.
+
+### Counting
+
+`count_01.wav` … `count_20.wav` are a character counting: *one, two, three*.
+They are used twice —
+
+* each clear of a combo, from the second one (so a five-chain counts
+  `two, three, four, five`);
+* each line a zone banks, as the total climbs.
+
+Each number cuts off the one before it, and anything that actually matters — a
+tetris, a hit — cuts off the number. Past twenty the counting simply stops.
+
+A pack with no numbers is not worse off: a combo falls back to `combo.wav`
+(rationed, so it does not repeat every clear), and a zone stays quiet until it
+releases. Zero-pad the filenames; `count_3.wav` is ignored, though the loader
+will point out that it looks like a typo for `count_03.wav`.
 
 ### Audio format
 

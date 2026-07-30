@@ -53,6 +53,9 @@ use crate::state::{AppState, GameMode, PlayState};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum VoiceKind {
+    /// Confirmed in the picker. The only line a player hears before the
+    /// match, and the one that sells the character they just chose.
+    Select,
     Ready,
     Clear,
     Tetris,
@@ -60,10 +63,17 @@ pub enum VoiceKind {
     PerfectClear,
     Combo,
     Attack,
+    /// An attack that wiped out every row of incoming garbage on its way
+    /// past. Not a bigger attack — a save.
+    Counter,
     /// A couple of rows of garbage: a complaint.
     Damage,
     /// [`HEAVY_GARBAGE_ROWS`] or more at once: a different noise entirely.
     DamageHeavy,
+    /// The stack got close enough to the ceiling to be a problem.
+    Pinch,
+    /// The zone gauge just filled, so there is now something to spend.
+    ZoneReady,
     ZoneStart,
     ZoneFinish,
     Win,
@@ -71,7 +81,8 @@ pub enum VoiceKind {
 }
 
 impl VoiceKind {
-    pub const ALL: [VoiceKind; 13] = [
+    pub const ALL: [VoiceKind; 17] = [
+        VoiceKind::Select,
         VoiceKind::Ready,
         VoiceKind::Clear,
         VoiceKind::Tetris,
@@ -79,8 +90,11 @@ impl VoiceKind {
         VoiceKind::PerfectClear,
         VoiceKind::Combo,
         VoiceKind::Attack,
+        VoiceKind::Counter,
         VoiceKind::Damage,
         VoiceKind::DamageHeavy,
+        VoiceKind::Pinch,
+        VoiceKind::ZoneReady,
         VoiceKind::ZoneStart,
         VoiceKind::ZoneFinish,
         VoiceKind::Win,
@@ -89,6 +103,7 @@ impl VoiceKind {
 
     pub fn file_stem(self) -> &'static str {
         match self {
+            VoiceKind::Select => "select",
             VoiceKind::Ready => "ready",
             VoiceKind::Clear => "clear",
             VoiceKind::Tetris => "tetris",
@@ -96,8 +111,11 @@ impl VoiceKind {
             VoiceKind::PerfectClear => "perfect_clear",
             VoiceKind::Combo => "combo",
             VoiceKind::Attack => "attack",
+            VoiceKind::Counter => "counter",
             VoiceKind::Damage => "damage",
             VoiceKind::DamageHeavy => "damage_heavy",
+            VoiceKind::Pinch => "pinch",
+            VoiceKind::ZoneReady => "zone_ready",
             VoiceKind::ZoneStart => "zone_start",
             VoiceKind::ZoneFinish => "zone_finish",
             VoiceKind::Win => "win",
@@ -115,33 +133,89 @@ impl VoiceKind {
             VoiceKind::Combo => 2,
             VoiceKind::Attack => 2,
             VoiceKind::Tetris | VoiceKind::TSpin | VoiceKind::Damage => 3,
+            VoiceKind::ZoneReady => 3,
             VoiceKind::Ready
             | VoiceKind::ZoneStart
             | VoiceKind::ZoneFinish
-            | VoiceKind::DamageHeavy => 4,
+            | VoiceKind::DamageHeavy
+            | VoiceKind::Counter
+            | VoiceKind::Pinch => 4,
             VoiceKind::PerfectClear => 5,
-            VoiceKind::Win | VoiceKind::Lose => 6,
+            // Nothing else is happening at either of these moments.
+            VoiceKind::Win | VoiceKind::Lose | VoiceKind::Select => 6,
         }
     }
 
     /// The line to use when the pack does not have this one.
     ///
-    /// Only the heavy hit has one, and it is not a nicety: every pack
-    /// authored before this variant existed has a `damage.wav` and no
-    /// `damage_heavy.wav`, and going *silent* on the worst hit of a match
-    /// would make it a strictly worse pack than it was yesterday.
+    /// These are not niceties. Every pack authored before a variant
+    /// existed has none of its file, and going *silent* at a moment the
+    /// character used to react to would make the pack strictly worse than
+    /// it was yesterday. So each new line borrows the nearest old one:
+    /// less specific, still a reaction.
+    ///
+    /// [`VoiceKind::Pinch`] and [`VoiceKind::ZoneReady`] deliberately have
+    /// none. They mark states rather than events, and an old line
+    /// borrowed for them would fire at a moment it does not describe —
+    /// yelping "ouch" at a tall stack nobody hit you with.
     pub fn fallback(self) -> Option<VoiceKind> {
         match self {
             VoiceKind::DamageHeavy => Some(VoiceKind::Damage),
+            VoiceKind::Counter => Some(VoiceKind::Attack),
+            VoiceKind::Select => Some(VoiceKind::Ready),
             _ => None,
         }
     }
+}
+
+/// One thing a character can be asked to say.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VoiceLine {
+    /// A named reaction.
+    Kind(VoiceKind),
+    /// A number, spoken: the n-th clear of a combo, or the n-th line a
+    /// zone has banked.
+    ///
+    /// `instead` is what to say for a pack that ships no numbers, so
+    /// counting is an upgrade to a pack rather than a replacement for it.
+    Count { n: u32, instead: Option<VoiceKind> },
+}
+
+impl VoiceLine {
+    fn priority(self) -> u8 {
+        match self {
+            VoiceLine::Kind(kind) => kind.priority(),
+            // Chatter-level, which is what makes counting work: each
+            // number cuts the one before it (equal priority replaces), and
+            // anything that actually matters — a tetris, a hit — cuts the
+            // count.
+            VoiceLine::Count { .. } => 2,
+        }
+    }
+}
+
+/// How high a character counts. Twenty covers every combo and every zone
+/// bank a real match produces; past that the numbers run out and the
+/// moment speaks for itself.
+pub const COUNT_MAX: u32 = 20;
+
+/// The file a spoken number lives in. Zero-padded so a pack's `voices/`
+/// folder sorts the way it reads.
+fn count_stem(n: u32) -> String {
+    format!("count_{n:02}")
 }
 
 /// Rows of garbage that make a hit worth its own voice line. Four is a
 /// tetris' worth arriving at once — the point where the stack you were
 /// building stops being the stack you have.
 const HEAVY_GARBAGE_ROWS: u32 = 4;
+
+/// Rows a counter has to absorb to be worth remarking on, and to be worth
+/// stopping the screen for. Deliberately the same shape as the damage
+/// thresholds above: cancelling two rows is the mirror of taking two, and
+/// cancelling a tetris' worth is the mirror of eating one.
+const COUNTER_ROWS: u32 = 2;
+const COUNTER_CUTIN_ROWS: u32 = HEAVY_GARBAGE_ROWS;
 
 /// The moves worth stopping the screen for, in the order they outrank each
 /// other.
@@ -150,6 +224,8 @@ pub enum CutInKind {
     Tetris,
     TSpinDouble,
     TSpinTriple,
+    /// A tetris' worth of incoming garbage cancelled outright.
+    Counter,
     ZoneRelease,
     PerfectClear,
 }
@@ -160,8 +236,9 @@ impl CutInKind {
             CutInKind::Tetris => 1,
             CutInKind::TSpinDouble => 2,
             CutInKind::TSpinTriple => 3,
-            CutInKind::ZoneRelease => 4,
-            CutInKind::PerfectClear => 5,
+            CutInKind::Counter => 4,
+            CutInKind::ZoneRelease => 5,
+            CutInKind::PerfectClear => 6,
         }
     }
 
@@ -172,6 +249,9 @@ impl CutInKind {
         match self {
             CutInKind::Tetris => Color::srgb(0.35, 0.85, 1.0),
             CutInKind::TSpinDouble | CutInKind::TSpinTriple => Color::srgb(0.85, 0.45, 1.0),
+            // Warm, and nothing else here is: a counter is the one cut-in
+            // earned by what the *opponent* did.
+            CutInKind::Counter => Color::srgb(1.0, 0.5, 0.25),
             CutInKind::ZoneRelease => Color::srgb(1.0, 0.82, 0.35),
             CutInKind::PerfectClear => Color::srgb(1.0, 0.95, 0.6),
         }
@@ -231,7 +311,13 @@ pub struct Character {
     pub result: [Option<String>; 2],
     /// Square-ish art for the picker tile.
     pub icon: Option<String>,
+    /// Indexed by [`VoiceKind`] discriminant.
     pub voices: Vec<Option<String>>,
+    /// The spoken numbers, `counts[n - 1]` for "n". Separate from
+    /// `voices` because it is a range rather than a list: adding a
+    /// nineteenth `VoiceKind` for the word "nineteen" would say nothing
+    /// about the game and everything about the enum.
+    pub counts: Vec<Option<String>>,
     pub portrait_alpha: f32,
     pub voice_gain: f32,
     /// Problems found while loading this character, for the picker to
@@ -243,6 +329,30 @@ impl Character {
     pub fn voice(&self, kind: VoiceKind) -> Option<&str> {
         self.clip(kind)
             .or_else(|| kind.fallback().and_then(|to| self.clip(to)))
+    }
+
+    /// The clip for a line, and whether it is a *counted* one.
+    ///
+    /// The caller needs both: a spoken number is one of a rapid sequence
+    /// and must not be rationed, while the named line it falls back to is
+    /// ordinary chatter and must be. Resolving the fallback is the only
+    /// place that difference is knowable.
+    fn line_clip(&self, line: VoiceLine) -> Option<(&str, bool)> {
+        match line {
+            VoiceLine::Kind(kind) => self.voice(kind).map(|path| (path, false)),
+            VoiceLine::Count { n, instead } => match self.count(n) {
+                Some(path) => Some((path, true)),
+                None => instead
+                    .and_then(|kind| self.voice(kind))
+                    .map(|path| (path, false)),
+            },
+        }
+    }
+
+    fn count(&self, n: u32) -> Option<&str> {
+        self.counts
+            .get(n.checked_sub(1)? as usize)
+            .and_then(|v| v.as_deref())
     }
 
     fn clip(&self, kind: VoiceKind) -> Option<&str> {
@@ -429,6 +539,7 @@ fn finalize(id: &str, meta: CharacterMeta, issues: &mut Vec<String>) -> Characte
         result: [None, None],
         icon: None,
         voices: vec![None; VoiceKind::ALL.len()],
+        counts: vec![None; COUNT_MAX as usize],
         portrait_alpha: clamp_or(meta.portrait_alpha, PORTRAIT_ALPHA_DEFAULT, 0.05, 0.45),
         voice_gain: clamp_or(meta.voice_gain, 1.0, 0.2, 2.0),
         issues: Vec::new(),
@@ -561,11 +672,22 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// The voice file this name was probably meant to be.
-fn nearest_voice_name(stem: &str) -> Option<&'static str> {
+/// Every file name a `voices/` folder may hold, named lines and spoken
+/// numbers alike.
+fn voice_file_stems() -> Vec<String> {
     VoiceKind::ALL
         .iter()
-        .map(|k| k.file_stem())
+        .map(|k| k.file_stem().to_string())
+        .chain((1..=COUNT_MAX).map(count_stem))
+        .collect()
+}
+
+/// The voice file this name was probably meant to be. `count_3.wav` for
+/// `count_03.wav` is the single likeliest slip a pack can make, which is
+/// why the numbers are in the candidate list too.
+fn nearest_voice_name(stem: &str) -> Option<String> {
+    voice_file_stems()
+        .into_iter()
         .filter(|name| edit_distance(stem, name) <= 2)
         .min_by_key(|name| edit_distance(stem, name))
 }
@@ -575,37 +697,55 @@ fn nearest_voice_name(stem: &str) -> Option<&'static str> {
 /// Split out from the systems so the mapping itself is testable: this is
 /// the table that decides what a character is *for*, and getting it wrong
 /// is silent.
-fn voice_for(event: &GameEvent, two_boards: bool) -> Option<VoiceKind> {
-    Some(match event {
+fn voice_for(event: &GameEvent, two_boards: bool) -> Option<VoiceLine> {
+    let named = |kind| Some(VoiceLine::Kind(kind));
+    match event {
         GameEvent::Cleared(c) => {
             if c.perfect_clear {
-                VoiceKind::PerfectClear
+                named(VoiceKind::PerfectClear)
             } else if matches!(c.kind, ClearKind::TSpin | ClearKind::TSpinMini) {
-                VoiceKind::TSpin
+                named(VoiceKind::TSpin)
             } else if c.lines >= 4 {
-                VoiceKind::Tetris
-            } else if c.combo >= 2 {
-                // `combo` counts from zero, so this is the third clear of
-                // a streak — the point where it is worth remarking on.
-                VoiceKind::Combo
+                named(VoiceKind::Tetris)
+            } else if c.combo >= 1 {
+                // `combo` counts from zero, so this is the second clear of
+                // a streak: "two". A pack with no numbers says its combo
+                // line instead, which is what it did before counting
+                // existed.
+                Some(VoiceLine::Count {
+                    n: c.combo + 1,
+                    instead: Some(VoiceKind::Combo),
+                })
             } else if two_boards && c.attack > 0 {
-                VoiceKind::Attack
+                named(VoiceKind::Attack)
             } else {
-                VoiceKind::Clear
+                named(VoiceKind::Clear)
             }
         }
-        GameEvent::TSpinNoLines { .. } => VoiceKind::TSpin,
-        GameEvent::GarbageRose { rows } if *rows >= HEAVY_GARBAGE_ROWS => VoiceKind::DamageHeavy,
-        GameEvent::GarbageRose { rows } if *rows >= 2 => VoiceKind::Damage,
-        GameEvent::ZoneActivated => VoiceKind::ZoneStart,
-        GameEvent::ZoneEnded { lines, .. } if *lines > 0 => VoiceKind::ZoneFinish,
-        _ => return None,
-    })
+        GameEvent::TSpinNoLines { .. } => named(VoiceKind::TSpin),
+        GameEvent::GarbageRose { rows } if *rows >= HEAVY_GARBAGE_ROWS => {
+            named(VoiceKind::DamageHeavy)
+        }
+        GameEvent::GarbageRose { rows } if *rows >= 2 => named(VoiceKind::Damage),
+        GameEvent::Countered { rows } if *rows >= COUNTER_ROWS => named(VoiceKind::Counter),
+        GameEvent::ZoneReady => named(VoiceKind::ZoneReady),
+        GameEvent::ZoneActivated => named(VoiceKind::ZoneStart),
+        // Counting the bank up as it grows. There is no named line to fall
+        // back on: a pack with no numbers stays quiet here and speaks at
+        // the release, exactly as it did before.
+        GameEvent::ZoneLines { total, .. } => Some(VoiceLine::Count {
+            n: *total,
+            instead: None,
+        }),
+        GameEvent::ZoneEnded { lines, .. } if *lines > 0 => named(VoiceKind::ZoneFinish),
+        _ => None,
+    }
 }
 
 fn cutin_for(event: &GameEvent) -> Option<CutInKind> {
     match event {
         GameEvent::Cleared(c) => Some(cutin_for_clear(c)?),
+        GameEvent::Countered { rows } if *rows >= COUNTER_CUTIN_ROWS => Some(CutInKind::Counter),
         GameEvent::ZoneEnded { lines, .. } if *lines >= ZONE_CUTIN_LINES => {
             Some(CutInKind::ZoneRelease)
         }
@@ -796,23 +936,33 @@ fn load_character(dir: &Path, id: &str, issues: &mut Vec<String>) -> Option<Char
     // complaint — but a file that looks like a *misspelled* voice is worth
     // saying out loud, because it is indistinguishable from silence.
     let voices = dir.join("voices");
-    for (i, kind) in VoiceKind::ALL.iter().enumerate() {
-        let file = format!("{}.wav", kind.file_stem());
+    let take = |stem: &str, own: &mut Vec<String>| {
+        let file = format!("{stem}.wav");
         let path = voices.join(&file);
         if !path.exists() {
-            continue;
+            return None;
         }
         match wav_ok(&path) {
-            Ok(()) => character.voices[i] = Some(asset_path(id, "voices", &file)),
-            Err(why) => own.push(format!("{id}/voices/{file}: {why}")),
+            Ok(()) => Some(asset_path(id, "voices", &file)),
+            Err(why) => {
+                own.push(format!("{id}/voices/{file}: {why}"));
+                None
+            }
         }
+    };
+    for (i, kind) in VoiceKind::ALL.iter().enumerate() {
+        character.voices[i] = take(kind.file_stem(), &mut own);
+    }
+    for n in 1..=COUNT_MAX {
+        character.counts[(n - 1) as usize] = take(&count_stem(n), &mut own);
     }
     if let Ok(extra) = std::fs::read_dir(&voices) {
+        let known = voice_file_stems();
         for entry in extra.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             let stem = name.trim_end_matches(".wav");
-            if VoiceKind::ALL.iter().any(|k| k.file_stem() == stem) {
+            if known.iter().any(|k| k == stem) {
                 continue;
             }
             if let Some(meant) = nearest_voice_name(stem) {
@@ -911,7 +1061,12 @@ fn preload(character: &Character, server: &AssetServer, assets: &mut CharacterAs
     for path in character.result.iter().flatten() {
         assets.image(server, path);
     }
-    for path in character.voices.iter().flatten() {
+    for path in character
+        .voices
+        .iter()
+        .chain(character.counts.iter())
+        .flatten()
+    {
         assets.sound(server, path);
     }
 }
@@ -1136,10 +1291,36 @@ struct ShowCutIn {
     delay: f32,
 }
 
+/// Ask a character to say something.
 #[derive(Message)]
-struct PlayVoice {
+pub struct PlayVoice {
+    /// Which board is speaking, for the stereo placement and the
+    /// one-line-at-a-time rule.
     slot: usize,
-    kind: VoiceKind,
+    /// Who is speaking, when that is not yet a question of boards — the
+    /// picker plays a line for a character nobody has been assigned to.
+    who: Option<usize>,
+    line: VoiceLine,
+}
+
+impl PlayVoice {
+    fn on(slot: usize, kind: VoiceKind) -> Self {
+        Self {
+            slot,
+            who: None,
+            line: VoiceLine::Kind(kind),
+        }
+    }
+
+    /// A line from a named roster entry, for the picker: no match has
+    /// started, so there is no board to look the character up from.
+    pub fn from_roster(index: usize, kind: VoiceKind) -> Self {
+        Self {
+            slot: 0,
+            who: Some(index),
+            line: VoiceLine::Kind(kind),
+        }
+    }
 }
 
 fn queue_cutins(
@@ -1365,15 +1546,21 @@ fn play_voices(
     let mut spawned: [Option<(Entity, u8)>; 2] = [None, None];
     for msg in reader.read() {
         let slot = msg.slot.min(1);
-        let Some(character) = chosen.sides[slot].and_then(|i| roster.get(i)) else {
+        let Some(character) = msg
+            .who
+            .or(chosen.sides[slot])
+            .and_then(|i| roster.get(i))
+        else {
             continue;
         };
-        let Some(path) = character.voice(msg.kind) else {
+        let Some((path, counted)) = character.line_clip(msg.line) else {
             continue;
         };
-        let priority = msg.kind.priority();
-        // The small talk gets rationed; the big moments never do.
-        if priority <= 2 {
+        let priority = msg.line.priority();
+        // The small talk gets rationed; the big moments never do. A
+        // spoken number is neither: it is one of a run, and a rationed
+        // count would say "two ... six ... " with the middle missing.
+        if priority <= 2 && !counted {
             if cooldown.0[slot] > 0.0 {
                 continue;
             }
@@ -1413,7 +1600,7 @@ fn play_voices(
         // first: RUST_LOG=bevytris=debug answers it.
         debug!(
             "voice {:?} for {} on slot {slot} at {volume:.2} ({path})",
-            msg.kind, character.id
+            msg.line, character.id
         );
         let sink = commands
             .spawn((
@@ -1467,8 +1654,12 @@ fn character_events(
             .get(msg.board)
             .map(|index| index.0.min(1))
             .unwrap_or(msg.index.min(1));
-        if let Some(kind) = voice_for(&msg.event, two_boards) {
-            voices.write(PlayVoice { slot, kind });
+        if let Some(line) = voice_for(&msg.event, two_boards) {
+            voices.write(PlayVoice {
+                slot,
+                who: None,
+                line,
+            });
         }
         if let Some(kind) = cutin_for(&msg.event) {
             cutins.write(ShowCutIn {
@@ -1482,6 +1673,47 @@ fn character_events(
             });
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Being in trouble
+// ---------------------------------------------------------------------------
+
+/// How far the danger meter has to climb before a character says something
+/// about it, and how far it has to fall before they will say it again.
+///
+/// The gap between the two is the whole point. Danger is a smoothed level
+/// rather than an event, so a stack parked on a single threshold would
+/// have the character chanting about it; this way the trouble has to
+/// genuinely ease before it counts as trouble again.
+const PINCH_ON: f32 = 0.72;
+const PINCH_OFF: f32 = 0.45;
+
+/// Whether each side is currently considered to be in trouble.
+#[derive(Resource, Default)]
+struct PinchLatch([bool; 2]);
+
+fn pinch_voice(
+    danger: Res<crate::effects::DangerLevel>,
+    mut latch: ResMut<PinchLatch>,
+    boards: Query<&BoardIndex>,
+    mut voices: MessageWriter<PlayVoice>,
+) {
+    for index in &boards {
+        let slot = index.0.min(1);
+        let level = danger.0[slot];
+        if latch.0[slot] {
+            latch.0[slot] = level >= PINCH_OFF;
+        } else if level >= PINCH_ON {
+            latch.0[slot] = true;
+            voices.write(PlayVoice::on(slot, VoiceKind::Pinch));
+        }
+    }
+}
+
+/// A new round starts from a clear board, so it starts out of trouble.
+fn clear_pinch(mut latch: ResMut<PinchLatch>) {
+    *latch = PinchLatch::default();
 }
 
 /// Big WIN / LOSE lettering over a board, and the pose that goes with it.
@@ -1621,10 +1853,7 @@ fn clear_result(
 }
 
 fn ready_voice(mut voices: MessageWriter<PlayVoice>) {
-    voices.write(PlayVoice {
-        slot: 0,
-        kind: VoiceKind::Ready,
-    });
+    voices.write(PlayVoice::on(0, VoiceKind::Ready));
 }
 
 /// Win and loss are resources rather than events, so they are read on the
@@ -1639,10 +1868,10 @@ fn outcome_voice(
     };
     for slot in 0..2 {
         let won = (slot == 0) == player_won;
-        voices.write(PlayVoice {
+        voices.write(PlayVoice::on(
             slot,
-            kind: if won { VoiceKind::Win } else { VoiceKind::Lose },
-        });
+            if won { VoiceKind::Win } else { VoiceKind::Lose },
+        ));
     }
 }
 
@@ -1698,27 +1927,38 @@ fn run_demo(
     let step = demo.step;
     demo.step += 1;
     let slot = (step / 2) % 2;
-    // The voices first, then the cut-ins, then round again — so the log
-    // reads in the same order as the lists in this file.
+    // The named voices, then the numbers, then the cut-ins, then round
+    // again — so the log reads in the same order as the lists in this file.
     let voice_count = VoiceKind::ALL.len();
+    let counts = COUNT_MAX as usize;
     let cutins_all = [
         CutInKind::Tetris,
         CutInKind::TSpinDouble,
         CutInKind::TSpinTriple,
+        CutInKind::Counter,
         CutInKind::ZoneRelease,
         CutInKind::PerfectClear,
     ];
-    let cycle = voice_count + cutins_all.len();
+    let cycle = voice_count + counts + cutins_all.len();
     let at = step % cycle;
     if at < voice_count {
+        voices.write(PlayVoice::on(slot, VoiceKind::ALL[at]));
+    } else if at < voice_count + counts {
         voices.write(PlayVoice {
             slot,
-            kind: VoiceKind::ALL[at],
+            who: None,
+            // Auditioning is about hearing the files, so no fallback: a
+            // missing number should be an audible gap, not the combo line
+            // twenty times over.
+            line: VoiceLine::Count {
+                n: (at - voice_count) as u32 + 1,
+                instead: None,
+            },
         });
     } else {
         cutins.write(ShowCutIn {
             slot,
-            kind: cutins_all[at - voice_count],
+            kind: cutins_all[at - voice_count - counts],
             delay: 0.0,
         });
     }
@@ -1752,6 +1992,7 @@ impl Plugin for CharacterPlugin {
             .init_resource::<MatchCharacters>()
             .init_resource::<CutInQueue>()
             .init_resource::<VoiceCooldown>()
+            .init_resource::<PinchLatch>()
             .add_message::<PlayVoice>()
             .add_message::<ShowCutIn>()
             .add_systems(
@@ -1764,13 +2005,18 @@ impl Plugin for CharacterPlugin {
             )
             .add_systems(
                 OnEnter(PlayState::Countdown),
-                (ready_voice, clear_result, start_demo),
+                (ready_voice, clear_result, clear_pinch, start_demo),
             )
             .add_systems(OnEnter(PlayState::RoundOver), (outcome_voice, show_result))
-            .add_systems(OnEnter(PlayState::Finished), (outcome_voice, show_result))
+            // No `show_result` here. A decided match puts the result
+            // overlay up immediately, and that screen carries the poses
+            // itself — swapping them onto the boards underneath as well
+            // would draw each character twice, once dimmed behind the
+            // overlay and once on it.
+            .add_systems(OnEnter(PlayState::Finished), outcome_voice)
             .add_systems(
                 Update,
-                character_events.run_if(in_state(PlayState::Running)),
+                (character_events, pinch_voice).run_if(in_state(PlayState::Running)),
             )
             // Everything else is ungated, matching the other transients:
             // a line or a cut-in already in flight finishes rather than
@@ -2009,10 +2255,13 @@ mod tests {
 
     #[test]
     fn a_misspelled_voice_is_named() {
-        assert_eq!(nearest_voice_name("tetriss"), Some("tetris"));
-        assert_eq!(nearest_voice_name("wins"), Some("win"));
-        assert_eq!(nearest_voice_name("t_spin"), Some("tspin"));
-        assert_eq!(nearest_voice_name("background_music"), None);
+        let meant = |stem| nearest_voice_name(stem);
+        assert_eq!(meant("tetriss").as_deref(), Some("tetris"));
+        assert_eq!(meant("wins").as_deref(), Some("win"));
+        assert_eq!(meant("t_spin").as_deref(), Some("tspin"));
+        // The likeliest slip of all: dropping the zero from a number.
+        assert_eq!(meant("count_3").as_deref(), Some("count_03"));
+        assert_eq!(meant("background_music"), None);
     }
 
     #[test]
@@ -2069,6 +2318,7 @@ mod tests {
             CutInKind::Tetris,
             CutInKind::PerfectClear,
             CutInKind::TSpinDouble,
+            CutInKind::Counter,
             CutInKind::ZoneRelease,
             CutInKind::TSpinTriple,
         ];
@@ -2079,44 +2329,55 @@ mod tests {
 
     #[test]
     fn every_event_maps_to_at_most_one_voice() {
+        let named = |event: &GameEvent, two| voice_for(event, two);
         assert_eq!(
-            voice_for(&clear(4, ClearKind::Normal), true),
-            Some(VoiceKind::Tetris)
+            named(&clear(4, ClearKind::Normal), true),
+            Some(VoiceLine::Kind(VoiceKind::Tetris))
         );
         assert_eq!(
-            voice_for(&clear(1, ClearKind::TSpinMini), true),
-            Some(VoiceKind::TSpin)
+            named(&clear(1, ClearKind::TSpinMini), true),
+            Some(VoiceLine::Kind(VoiceKind::TSpin))
         );
         assert_eq!(
-            voice_for(&clear(1, ClearKind::Normal), true),
-            Some(VoiceKind::Clear)
+            named(&clear(1, ClearKind::Normal), true),
+            Some(VoiceLine::Kind(VoiceKind::Clear))
         );
         assert_eq!(
-            voice_for(&GameEvent::GarbageRose { rows: 2 }, true),
-            Some(VoiceKind::Damage)
+            named(&GameEvent::GarbageRose { rows: 2 }, true),
+            Some(VoiceLine::Kind(VoiceKind::Damage))
         );
         // One rising row is a fact of life, not an injury.
-        assert_eq!(voice_for(&GameEvent::GarbageRose { rows: 1 }, true), None);
+        assert_eq!(named(&GameEvent::GarbageRose { rows: 1 }, true), None);
         assert_eq!(
-            voice_for(&GameEvent::GarbageRose { rows: 4 }, true),
-            Some(VoiceKind::DamageHeavy)
+            named(&GameEvent::GarbageRose { rows: 4 }, true),
+            Some(VoiceLine::Kind(VoiceKind::DamageHeavy))
         );
         assert_eq!(
-            voice_for(&GameEvent::ZoneActivated, true),
-            Some(VoiceKind::ZoneStart)
+            named(&GameEvent::ZoneReady, true),
+            Some(VoiceLine::Kind(VoiceKind::ZoneReady))
         );
-        assert_eq!(voice_for(&GameEvent::ZoneEnded { lines: 0, attack: 0 }, true), None);
+        assert_eq!(
+            named(&GameEvent::ZoneActivated, true),
+            Some(VoiceLine::Kind(VoiceKind::ZoneStart))
+        );
+        assert_eq!(named(&GameEvent::ZoneEnded { lines: 0, attack: 0 }, true), None);
         // Nothing to attack in a solo mode.
         let mut attacking = clear(2, ClearKind::Normal);
         if let GameEvent::Cleared(c) = &mut attacking {
             c.attack = 2;
         }
-        assert_eq!(voice_for(&attacking, true), Some(VoiceKind::Attack));
-        assert_eq!(voice_for(&attacking, false), Some(VoiceKind::Clear));
+        assert_eq!(
+            named(&attacking, true),
+            Some(VoiceLine::Kind(VoiceKind::Attack))
+        );
+        assert_eq!(
+            named(&attacking, false),
+            Some(VoiceLine::Kind(VoiceKind::Clear))
+        );
         // Chatter that has no line to say.
-        assert_eq!(voice_for(&GameEvent::Spawned, true), None);
-        assert_eq!(voice_for(&GameEvent::SoftDropStep, true), None);
-        assert_eq!(voice_for(&GameEvent::LevelUp { level: 3 }, true), None);
+        assert_eq!(named(&GameEvent::Spawned, true), None);
+        assert_eq!(named(&GameEvent::SoftDropStep, true), None);
+        assert_eq!(named(&GameEvent::LevelUp { level: 3 }, true), None);
     }
 
     /// The whole point of the split: the size of the hit picks the line,
@@ -2125,10 +2386,120 @@ mod tests {
     fn a_big_hit_and_a_small_one_do_not_sound_the_same() {
         let voice = |rows| voice_for(&GameEvent::GarbageRose { rows }, true);
         for rows in 2..HEAVY_GARBAGE_ROWS {
-            assert_eq!(voice(rows), Some(VoiceKind::Damage), "{rows} rows");
+            assert_eq!(voice(rows), Some(VoiceLine::Kind(VoiceKind::Damage)), "{rows} rows");
         }
         for rows in [HEAVY_GARBAGE_ROWS, HEAVY_GARBAGE_ROWS + 1, 20] {
-            assert_eq!(voice(rows), Some(VoiceKind::DamageHeavy), "{rows} rows");
+            assert_eq!(
+                voice(rows),
+                Some(VoiceLine::Kind(VoiceKind::DamageHeavy)),
+                "{rows} rows"
+            );
+        }
+    }
+
+    /// A counter is only a counter once it saved you from something. One
+    /// stray row cancelled is bookkeeping, and the cut-in waits for a
+    /// tetris' worth on top of that.
+    #[test]
+    fn a_counter_has_to_be_worth_the_breath() {
+        let event = |rows| GameEvent::Countered { rows };
+        assert_eq!(voice_for(&event(1), true), None);
+        assert_eq!(
+            voice_for(&event(COUNTER_ROWS), true),
+            Some(VoiceLine::Kind(VoiceKind::Counter))
+        );
+        assert_eq!(cutin_for(&event(COUNTER_CUTIN_ROWS - 1)), None);
+        assert_eq!(
+            cutin_for(&event(COUNTER_CUTIN_ROWS)),
+            Some(CutInKind::Counter)
+        );
+    }
+
+    /// A streak is counted out loud from its second clear, and a zone's
+    /// bank from its first line — but a pack with no numbers must not go
+    /// quiet where it used to speak.
+    #[test]
+    fn a_streak_is_counted_out_loud() {
+        let combo = |n: u32| {
+            let mut e = clear(1, ClearKind::Normal);
+            if let GameEvent::Cleared(c) = &mut e {
+                c.combo = n;
+            }
+            voice_for(&e, true)
+        };
+        // The first clear of a streak is not a streak yet.
+        assert_eq!(combo(0), Some(VoiceLine::Kind(VoiceKind::Clear)));
+        assert_eq!(
+            combo(1),
+            Some(VoiceLine::Count {
+                n: 2,
+                instead: Some(VoiceKind::Combo)
+            })
+        );
+        assert_eq!(
+            combo(6),
+            Some(VoiceLine::Count {
+                n: 7,
+                instead: Some(VoiceKind::Combo)
+            })
+        );
+        // A tetris is the bigger moment even mid-streak.
+        let mut big = clear(4, ClearKind::Normal);
+        if let GameEvent::Cleared(c) = &mut big {
+            c.combo = 3;
+        }
+        assert_eq!(voice_for(&big, true), Some(VoiceLine::Kind(VoiceKind::Tetris)));
+
+        assert_eq!(
+            voice_for(&GameEvent::ZoneLines { banked: 2, total: 6 }, true),
+            Some(VoiceLine::Count {
+                n: 6,
+                instead: None
+            })
+        );
+    }
+
+    /// Counting is a run, not chatter: each number replaces the one before
+    /// it, and anything that actually matters replaces the number.
+    #[test]
+    fn a_number_gives_way_to_the_move_that_earned_it() {
+        let count = VoiceLine::Count {
+            n: 4,
+            instead: None,
+        };
+        assert_eq!(count.priority(), VoiceLine::Kind(VoiceKind::Combo).priority());
+        assert!(count.priority() < VoiceLine::Kind(VoiceKind::Tetris).priority());
+        assert!(count.priority() > VoiceLine::Kind(VoiceKind::Clear).priority());
+    }
+
+    /// Numbers are their own family: a pack that ships them gets counted,
+    /// and one that does not falls back to the line it always had.
+    #[test]
+    fn a_pack_without_numbers_still_says_something() {
+        let mut c = meta(r#"{"display_name":"a"}"#);
+        let combo = VoiceLine::Count {
+            n: 3,
+            instead: Some(VoiceKind::Combo),
+        };
+        assert_eq!(c.line_clip(combo), None);
+
+        c.voices[VoiceKind::Combo as usize] = Some(asset_path("a", "voices", "combo.wav"));
+        let (path, counted) = c.line_clip(combo).expect("the combo line");
+        assert!(path.ends_with("combo.wav"));
+        assert!(!counted, "the fallback is chatter and has to be rationed");
+
+        c.counts[2] = Some(asset_path("a", "voices", "count_03.wav"));
+        let (path, counted) = c.line_clip(combo).expect("the number");
+        assert!(path.ends_with("count_03.wav"));
+        assert!(counted);
+
+        // Past the end of the numbers, and at zero, there is nothing to say.
+        for n in [0, COUNT_MAX + 1] {
+            assert_eq!(
+                c.line_clip(VoiceLine::Count { n, instead: None }),
+                None,
+                "{n} is outside 1..={COUNT_MAX}"
+            );
         }
     }
 
@@ -2168,6 +2539,7 @@ mod tests {
         assert!(VoiceKind::Win.priority() > VoiceKind::PerfectClear.priority());
         assert!(VoiceKind::Tetris.priority() > VoiceKind::Combo.priority());
         assert!(VoiceKind::DamageHeavy.priority() > VoiceKind::Damage.priority());
+        assert!(VoiceKind::Counter.priority() > VoiceKind::Attack.priority());
         assert_eq!(VoiceKind::Clear.priority(), 1);
     }
 

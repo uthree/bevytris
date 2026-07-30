@@ -5,8 +5,9 @@
 # WHAT THIS IS FOR
 #   The game loads optional "character" packs from assets/characters/<id>/.
 #   A pack is a metadata.json plus standing portraits, an optional cut-in
-#   image and up to 13 optional voice clips.  Real characters are drawn and
-#   voiced by humans; this script fabricates two obviously-fake stand-ins
+#   image, up to 17 named voice clips and 20 spoken numbers.  Real
+#   characters are drawn and voiced by humans; this script fabricates two
+#   obviously-fake stand-ins
 #   ("alice", English/Samantha, and "bob", Japanese/Kyoko) so the loading,
 #   layout, font and audio code can be developed and eyeballed without any
 #   real art existing yet.
@@ -92,9 +93,10 @@ CUTIN_H=512
 ICON_W=256
 ICON_H=256
 
-# The thirteen voice kinds, with the English and Japanese line for each.
-# "kind|english|japanese" — bash 3.2 has no associative arrays.
+# The seventeen named voice kinds, with the English and Japanese line for
+# each.  "kind|english|japanese" — bash 3.2 has no associative arrays.
 VOICE_LINES='
+select|Leave it to me|まかせて
 ready|Here we go|いくよー
 clear|Nice|いいね
 tetris|Tetris!|テトリス！
@@ -102,12 +104,40 @@ tspin|T spin!|ティースピン！
 perfect_clear|Perfect clear!|パーフェクトクリア！
 combo|Combo!|コンボ！
 attack|Take this|くらえー
+counter|Not today!|そうはさせない！
 damage|Ouch|いたっ
 damage_heavy|That is a lot|うわ、多い！
+pinch|This is bad|まずい、まずい
+zone_ready|Zone, ready|ゾーン、いけるよ
 zone_start|Zone, activate|ゾーン、発動
 zone_finish|How was that|どうだった
 win|I win!|わたしの勝ち！
 lose|No way|そんなー
+'
+
+# The spoken numbers, for counting a combo or a zone's banked lines.
+# "n|english|japanese", and the file is count_NN.wav (zero-padded).
+COUNT_LINES='
+1|one|いち
+2|two|に
+3|three|さん
+4|four|よん
+5|five|ご
+6|six|ろく
+7|seven|なな
+8|eight|はち
+9|nine|きゅう
+10|ten|じゅう
+11|eleven|じゅういち
+12|twelve|じゅうに
+13|thirteen|じゅうさん
+14|fourteen|じゅうよん
+15|fifteen|じゅうご
+16|sixteen|じゅうろく
+17|seventeen|じゅうなな
+18|eighteen|じゅうはち
+19|nineteen|じゅうきゅう
+20|twenty|にじゅう
 '
 
 # ---------------------------------------------------------------------------
@@ -526,14 +556,22 @@ make_character() {
   done
   /bin/rm -f "$tmp_svg"
 
-  local entry kind en ja line
+  local kind en ja line
   echo "$VOICE_LINES" | while IFS='|' read -r kind en ja; do
     [ -n "$kind" ] || continue
     if [ "$lang" = "ja" ]; then line="$ja"; else line="$en"; fi
     speak "$voice" "$line" "$dir/voices/$kind.wav"
   done
+  echo "$COUNT_LINES" | while IFS='|' read -r kind en ja; do
+    [ -n "$kind" ] || continue
+    if [ "$lang" = "ja" ]; then line="$ja"; else line="$en"; fi
+    speak "$voice" "$line" "$(printf '%s/voices/count_%02d.wav' "$dir" "$kind")"
+  done
 
-  echo "  $id: metadata.json, 6 images, $(echo "$VOICE_LINES" | grep -c '|') voices ($voice)"
+  local named counts
+  named="$(echo "$VOICE_LINES" | grep -c '|')"
+  counts="$(echo "$COUNT_LINES" | grep -c '|')"
+  echo "  $id: metadata.json, 6 images, $named voices + $counts numbers ($voice)"
 }
 
 make_all() {

@@ -62,7 +62,28 @@ pub struct BoardKick {
     vel: Vec2,
     rot: f32,
     rot_vel: f32,
+    /// Set when this board's owner has lost the round: it falls out of
+    /// the bottom of the screen and does not come back.
+    ///
+    /// It lives here rather than in a component of its own because the
+    /// spring above is the single writer of the board's transform, and two
+    /// systems taking turns at one `Transform` is a bug waiting for a
+    /// schedule change to find it.
+    drop: Option<BoardDrop>,
 }
+
+/// A board on its way off the bottom of the screen.
+struct BoardDrop {
+    y: f32,
+    vel: f32,
+    rot: f32,
+    rot_vel: f32,
+}
+
+/// How the drop moves: a shove downward, gravity after it, and a slow
+/// topple so the board reads as falling rather than scrolling.
+const DROP_PUSH: f32 = -60.0;
+const DROP_GRAVITY: f32 = -2200.0;
 
 impl BoardKick {
     pub fn new(home: Vec3) -> Self {
@@ -72,6 +93,7 @@ impl BoardKick {
             vel: Vec2::ZERO,
             rot: 0.0,
             rot_vel: 0.0,
+            drop: None,
         }
     }
 
@@ -83,6 +105,26 @@ impl BoardKick {
     /// Twist the board (rad/s angular velocity change; +z = CCW).
     pub fn spin(&mut self, w: f32) {
         self.rot_vel += w;
+    }
+
+    /// Drop this board out of the frame. `tilt` is the direction it
+    /// topples in (rad/s); calling twice does nothing, so a system that
+    /// runs on every frame of the intermission is safe to write.
+    pub fn drop_away(&mut self, tilt: f32) {
+        if self.drop.is_some() {
+            return;
+        }
+        self.drop = Some(BoardDrop {
+            y: 0.0,
+            vel: DROP_PUSH,
+            rot: 0.0,
+            rot_vel: tilt,
+        });
+    }
+
+    /// Cancel a drop and put the board back on its home position.
+    pub fn land(&mut self) {
+        self.drop = None;
     }
 }
 
@@ -105,8 +147,21 @@ fn update_board_kick(time: Res<Time>, mut boards: Query<(&mut BoardKick, &mut Tr
         kick.rot_vel += rot_acc * dt;
         kick.rot = (kick.rot + kick.rot_vel * dt).clamp(-0.045, 0.045);
 
-        tf.translation = kick.home + kick.offset.extend(0.0);
-        tf.rotation = Quat::from_rotation_z(kick.rot);
+        // The fall is added on top of the spring rather than replacing it,
+        // so a board knocked sideways on the hit that killed it keeps that
+        // wobble on the way down.
+        let (fall, tilt) = match &mut kick.drop {
+            Some(drop) => {
+                drop.vel += DROP_GRAVITY * dt;
+                drop.y += drop.vel * dt;
+                drop.rot += drop.rot_vel * dt;
+                (drop.y, drop.rot)
+            }
+            None => (0.0, 0.0),
+        };
+
+        tf.translation = kick.home + kick.offset.extend(0.0) + Vec3::Y * fall;
+        tf.rotation = Quat::from_rotation_z(kick.rot + tilt);
     }
 }
 

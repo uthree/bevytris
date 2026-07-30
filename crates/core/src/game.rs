@@ -139,6 +139,12 @@ pub enum GameEvent {
     GarbageRose {
         rows: u32,
     },
+    /// An attack cancelled the *last* of the queued garbage: the wall that
+    /// was about to rise is gone entirely. `rows` is how much was wiped
+    /// out, which is the measure of how close a call it was.
+    Countered {
+        rows: u32,
+    },
     /// The zone gauge just reached full charge.
     ZoneReady,
     /// The zone super move started.
@@ -478,7 +484,7 @@ impl Game {
         self.board.clear_zone_rows();
         let mut attack = lines + zone_bonus(lines);
         attack = (attack as f32 * self.attack_multiplier()).floor() as u32;
-        attack = self.cancel_incoming(attack);
+        attack = self.counter_with(attack).0;
         self.stats.attack_sent += attack;
         self.score += (150 * lines * lines * self.level) as u64;
         self.events.push(GameEvent::ZoneEnded { lines, attack });
@@ -839,8 +845,7 @@ impl Game {
         // Margin time: long rounds scale everyone's attack to force an end.
         attack = (attack as f32 * self.attack_multiplier()).floor() as u32;
         // Line clears cancel queued garbage before sending the remainder.
-        let sent = self.cancel_incoming(attack);
-        let cancelled = attack - sent;
+        let (sent, cancelled) = self.counter_with(attack);
         attack = sent;
         self.stats.attack_sent += attack;
 
@@ -880,6 +885,25 @@ impl Game {
             attack,
             score_gained: gained,
         }));
+    }
+
+    /// Spend an attack on the queued garbage before sending the rest, and
+    /// say so when it clears the queue out completely.
+    ///
+    /// Returns what is left to send and what was absorbed. Emptying the
+    /// queue is worth an event of its own because it is the one defensive
+    /// moment the player can *feel*: the garbage that was about to rise
+    /// simply never arrives, and nothing else in the event stream says
+    /// that happened — `Cleared` reports the attack that survived, which
+    /// is zero exactly when the counter was total.
+    fn counter_with(&mut self, attack: u32) -> (u32, u32) {
+        let queued = self.incoming_total();
+        let sent = self.cancel_incoming(attack);
+        let cancelled = attack - sent;
+        if cancelled > 0 && cancelled == queued {
+            self.events.push(GameEvent::Countered { rows: cancelled });
+        }
+        (sent, cancelled)
     }
 
     fn cancel_incoming(&mut self, mut attack: u32) -> u32 {
@@ -1375,6 +1399,27 @@ mod tests {
         let remaining = game.cancel_incoming(4);
         assert_eq!(remaining, 1);
         assert_eq!(game.incoming_total(), 0);
+    }
+
+    #[test]
+    fn wiping_the_queue_out_is_reported_but_denting_it_is_not() {
+        let countered = |queued: u32, attack: u32| {
+            let mut game = Game::new(1, 1);
+            game.queue_garbage(queued);
+            game.take_events();
+            game.counter_with(attack);
+            game.take_events().into_iter().find_map(|e| match e {
+                GameEvent::Countered { rows } => Some(rows),
+                _ => None,
+            })
+        };
+        // The whole queue absorbed, with the attack to spare.
+        assert_eq!(countered(3, 5), Some(3));
+        assert_eq!(countered(3, 3), Some(3));
+        // Some of it left standing: survived, not countered.
+        assert_eq!(countered(3, 2), None);
+        // Nothing was coming, so there was nothing to counter.
+        assert_eq!(countered(0, 4), None);
     }
 
     #[test]

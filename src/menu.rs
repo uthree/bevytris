@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use bevy::ui::UiGlobalTransform;
 
 use crate::audio::{PlaySfx, Sfx};
+use crate::character::{PlayVoice, VoiceKind};
 use crate::config::{Action, GameSettings, Opponent, key_label, save_settings};
 use crate::core::ai::{AiProfile, MAX_STAGE};
 use crate::i18n::{Locale, Strings, action_label};
@@ -107,6 +108,10 @@ struct CharacterFooter;
 #[derive(Component)]
 struct CharacterTitle;
 
+/// Full-height standing art of whoever the picker's cursor is on.
+#[derive(Component)]
+struct CharacterArt;
+
 /// Bottom-of-screen line describing the focused menu item (title / solo
 /// picker).
 #[derive(Component)]
@@ -175,7 +180,11 @@ impl Plugin for MenuPlugin {
                     refresh_stage_footer.run_if(
                         in_state(AppState::StageSelect).or_else(in_state(AppState::ZoneSelect)),
                     ),
-                    (refresh_character_footer, refresh_character_title)
+                    (
+                        refresh_character_footer,
+                        refresh_character_title,
+                        refresh_character_art,
+                    )
                         .run_if(in_state(AppState::CharacterSelect)),
                     refresh_menu_footer
                         .run_if(in_state(AppState::Title).or_else(in_state(AppState::SoloSelect))),
@@ -663,6 +672,61 @@ fn setup_character_select(
                 ));
             }
         });
+
+    // The picker's tiles are thumbnails; this is the character. It stands
+    // in the left margin at full height, facing the grid, and swaps as the
+    // cursor moves.
+    //
+    // A root of its own rather than a child of the column above: the
+    // column is a centred flex layout and a portrait this size would move
+    // everything in it. A negative z keeps it behind the tiles, so on a
+    // window too narrow for both it is the art that gives way, never the
+    // thing being read.
+    if let Some(art) = roster
+        .get(cursor.0)
+        .and_then(|c| c.standing_for(0))
+        .map(|path| asset_server.load::<Image>(path.to_string()))
+    {
+        commands.spawn((
+            ImageNode::new(art),
+            CharacterArt,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(12),
+                bottom: px(0),
+                height: percent(76),
+                max_width: px(260),
+                ..default()
+            },
+            GlobalZIndex(-1),
+            Pickable::IGNORE,
+            DespawnOnExit(AppState::CharacterSelect),
+        ));
+    }
+}
+
+/// Swap the standing art as the cursor moves. Spawned only when the roster
+/// has something to show, so a build with no characters simply has no node
+/// here and this does nothing.
+fn refresh_character_art(
+    cursor: Res<MenuCursor>,
+    roster: Res<crate::character::CharacterRoster>,
+    asset_server: Res<AssetServer>,
+    mut art: Query<&mut ImageNode, With<CharacterArt>>,
+) {
+    if !cursor.is_changed() {
+        return;
+    }
+    let Ok(mut node) = art.single_mut() else {
+        return;
+    };
+    let Some(path) = roster.get(cursor.0).and_then(|c| c.standing_for(0)) else {
+        return;
+    };
+    let wanted = asset_server.load::<Image>(path.to_string());
+    if node.image != wanted {
+        node.image = wanted;
+    }
 }
 
 /// True while the picker is on its second pass, choosing for the other
@@ -1898,6 +1962,7 @@ struct MenuActivateParams<'w> {
     picker_return: ResMut<'w, PickerReturn>,
     roster: Res<'w, crate::character::CharacterRoster>,
     characters: ResMut<'w, crate::character::MatchCharacters>,
+    voices: MessageWriter<'w, PlayVoice>,
 }
 
 /// Head for the character picker, remembering where to come back to.
@@ -2156,6 +2221,12 @@ fn run_menu_action(
                 return;
             }
             sfx.write(PlaySfx::new(Sfx::MenuSelect));
+            // Whoever was just chosen introduces themselves. This is the
+            // only line a player hears before a match, and it is played
+            // for the roster entry rather than a board because no board
+            // has been handed out yet.
+            p.voices
+                .write(PlayVoice::from_roster(index, VoiceKind::Select));
             if picking_opponent(&p.mode, &p.characters) {
                 p.characters.sides[1] = Some(index);
                 p.next_app.set(AppState::Playing);
@@ -2446,6 +2517,9 @@ fn setup_result_overlay(
     mode: Res<GameMode>,
     settings: Res<GameSettings>,
     locale: Res<Locale>,
+    roster: Res<crate::character::CharacterRoster>,
+    characters: Res<crate::character::MatchCharacters>,
+    asset_server: Res<AssetServer>,
     players: Query<&GameSession, With<PrimaryPlayer>>,
 ) {
     let t = locale.s();
@@ -2538,6 +2612,53 @@ fn setup_result_overlay(
     commands
         .spawn((overlay_root(), DespawnOnExit(PlayState::Finished)))
         .with_children(|parent| {
+            // The two characters, in their winning and losing poses, at
+            // the edges of the result screen.
+            //
+            // They go on the overlay rather than being left on the boards
+            // underneath because this screen dims everything behind it —
+            // a pose down there is a pose the player only half sees, at
+            // the exact moment it is finally about them. (`show_result`
+            // deliberately does not run for a decided match for the same
+            // reason: these are those poses, not a second copy of them.)
+            //
+            // Spawned first and positioned absolutely, so the numbers stay
+            // centred and stay on top of the art rather than beside it.
+            for slot in 0..2 {
+                let Some(character) = characters.sides[slot].and_then(|i| roster.get(i)) else {
+                    continue;
+                };
+                let won = match result.as_deref() {
+                    Some(SessionResult::VsWin { winner }) => *winner == slot,
+                    // A solo run has one face on screen and one outcome to
+                    // wear: a finished race is a win, a top-out is not.
+                    Some(SessionResult::RaceDone) => true,
+                    _ => false,
+                };
+                let Some(art) = character
+                    .result_art(slot, won)
+                    .map(|path| asset_server.load::<Image>(path.to_string()))
+                else {
+                    continue;
+                };
+                parent.spawn((
+                    // Held back a little from full brightness. The art is
+                    // above the overlay's dim and everything the player is
+                    // actually reading is text drawn over the top of it;
+                    // at full strength the poses win that fight.
+                    ImageNode::new(art).with_color(Color::srgba(1.0, 1.0, 1.0, 0.88)),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: if slot == 0 { px(0) } else { Val::Auto },
+                        right: if slot == 0 { Val::Auto } else { px(0) },
+                        bottom: px(0),
+                        height: percent(78),
+                        max_width: px(232),
+                        ..default()
+                    },
+                    Pickable::IGNORE,
+                ));
+            }
             parent.spawn(overlay_text(&headline, 64.0, color));
             if let Some(clear) = stage_clear.as_deref() {
                 parent.spawn(overlay_text(t.rank, 20.0, Color::srgb(0.6, 0.7, 0.8)));
@@ -2662,6 +2783,7 @@ mod picker_tests {
         app.add_plugins((MinimalPlugins, StatesPlugin));
         app.insert_state(screen);
         app.add_message::<PlaySfx>();
+        app.add_message::<PlayVoice>();
         app.add_message::<AppExit>();
         app.init_resource::<GameMode>()
             .init_resource::<Rebinding>()
