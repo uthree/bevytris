@@ -5,6 +5,13 @@ handful of voice clips. Characters never affect gameplay — no stats, no
 abilities. Everything except `metadata.json` is optional, and a pack with only
 a `metadata.json` must still load.
 
+Six ship with the game — `mint`, `rosa`, `amber`, `vio`, `cobalt` and `ash`.
+`scripts/make_characters.sh` holds the whole cast (designs, prompts, voice
+assignments) and rebuilds any of it. Their art is original and carries the
+repository's licence; their voices are borrowed from VOICEVOX and credited.
+See [`../CREDITS.md`](../CREDITS.md), and read it before adding a pack of
+your own — the two halves answer to different terms.
+
 Each pack is one directory under `assets/characters/`:
 
 ```

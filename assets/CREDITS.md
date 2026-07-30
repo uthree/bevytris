@@ -76,68 +76,73 @@ Bevy's bundled default font (a **Fira Mono** subset © Mozilla Foundation,
 > anything in this directory.
 
 Characters are an optional drop-in folder: a name, portrait art and voice
-clips, all cosmetic. Each pack carries its own `SOURCE.md` recording where
-its art came from, and its `metadata.json` names the voice it borrowed.
+clips, all cosmetic. Six ship with the game. Each pack carries its own
+`SOURCE.md` recording where its art came from, and its `metadata.json`
+names the voice it borrowed.
+
+The two halves of a pack answer to different licences, which is the single
+most confusable thing here: **the art is ours, the voices are borrowed.**
 
 ### Voices — VOICEVOX
 
 Synthesized with **[VOICEVOX](https://voicevox.hiroshiba.jp/)**, a free
-Japanese text-to-speech engine, by `scripts/make_dummy_characters.sh`.
+Japanese text-to-speech engine.
 
 Audio generated from a VOICEVOX voice library may be used commercially and
 non-commercially **provided the character is credited wherever the audio is
 used**. Each pack writes its credit into `metadata.json`'s `author` field,
 which the character picker displays on screen.
 
-- `VOICEVOX:四国めたん`, `VOICEVOX:ずんだもん` — terms:
-  <https://voicevox.hiroshiba.jp/term/> and
-  <https://zunko.jp/con_ongen_kiyaku.html>
+| pack | voice |
+| --- | --- |
+| `mint` | `VOICEVOX:四国めたん` |
+| `rosa` | `VOICEVOX:春日部つむぎ` |
+| `amber` | `VOICEVOX:ずんだもん` |
+| `vio` | `VOICEVOX:冥鳴ひまり` |
+| `cobalt` | `VOICEVOX:九州そら` |
+| `ash` | `VOICEVOX:東北きりたん` |
+
+Terms: <https://voicevox.hiroshiba.jp/term/>, and per character via
+`curl "$VOICEVOX_URL/speaker_info?speaker_uuid=..."`, which returns each
+library's own policy text. Some characters attach further conditions — one
+requires prior contact where a company is involved — so a pack that changes
+its voice must re-read them rather than assume.
 
 Note that the engine and the voice libraries themselves are **not**
 redistributed here, and may not be; only audio generated with them.
 
-### Character designs — 東北ずん子・ずんだもんプロジェクト
+### Art — original, and under this repository's licence
 
-Where a pack depicts **ずんだもん** or another character of the
-[東北ずん子・ずんだもんプロジェクト](https://zunko.jp/), the art is an
-original drawing made for this project — a 二次創作 — and **not** a copy of
-any official or fan-made illustration file. It is used under the project's
-own guidelines: <https://zunko.jp/guideline.html>
+The six characters — `mint`, `rosa`, `amber`, `vio`, `cobalt` and `ash` —
+are **original designs made for this project**. They depict nobody else's
+characters, so nobody else's terms apply to them, and the art carries the
+repository's own licence. Each pack's `SOURCE.md` records how it was made;
+`scripts/make_characters.sh` holds the cast and can rebuild all of it.
 
-What that means for anyone reusing it:
+The art is generated with an open-weight image model. That is licensable
+because such models place their conditions on the *weights*, not the
+*outputs* — the Fair AI Public License and CreativeML OpenRAIL both state
+that outputs are not covered and that no contributor claims rights in them
+— and only outputs are redistributed here. (Generated images may not be
+copyrightable in every jurisdiction. That costs this project nothing: it
+needs the right to distribute, not the right to exclude. It does mean the
+art cannot be claimed as anyone's exclusive property.)
 
-- **Non-commercial use only.** The guidelines permit derivative works by
-  individual creators without prior approval for non-commercial use;
-  commercial use requires a separate licence contract with the rights
-  holder. bevytris is free and non-commercial, which is what makes this
-  work — and is a constraint on this repository, not just on the art.
-- No copyright notice is required by the guidelines. This section exists
-  anyway, because a reader who assumed Apache-2.0 applied would be wrong.
-- The prohibitions in the guidelines travel with the art: nothing that
-  damages the characters' image, no political or religious use, no adult
-  content, and no selling the images as products in themselves.
-
-The rights holders' own AI position is why generated art is acceptable
-here: the project **published a training-data pack in April 2023** so that
-people could build their own models, and supplied data to the opt-in,
-Fairly Trained-certified **Mitsua Likes** in December 2024. Generating
-these characters is something the rights holders actively support, not
-something they merely tolerate. Costume and colour changes are explicitly
-allowed by the guidelines; the character has to stay recognisable.
-
-### Art that depicts nobody else's characters
-
-Original characters generated for this project carry the repository's own
-licence. Open-weight image models place their conditions on the *weights*,
-not the *outputs* — the Fair AI Public License and CreativeML OpenRAIL both
-state that outputs are not covered and that no contributor claims rights in
-them — and only outputs are redistributed here. (Generated images may not
-be copyrightable in every jurisdiction; that costs this project nothing,
-since it needs the right to distribute rather than the right to exclude.)
+Originality was the point rather than an accident. Adopting an existing
+character would have meant working under that character's own terms —
+for the obvious candidates, non-commercial only, with a licence contract
+required otherwise — and pinning the whole repository to that condition
+forever. **Anyone adding a pack that depicts someone else's character
+should set `CHARACTER_DESIGN` when running `make_character_art.sh`**, which
+writes the correct, more restrictive notice into that pack's `SOURCE.md`.
+The terms for the characters whose voices are used here are at
+<https://zunko.jp/guideline.html>; note that they are *not* the same as the
+terms for the voices, which is the easiest thing in this whole area to get
+wrong.
 
 Placeholder portraits in the throwaway `alice` and `bob` fixtures are
-procedural SVG from `scripts/make_dummy_characters.sh` and carry the
-repository licence.
+procedural SVG from `scripts/make_dummy_characters.sh` and likewise carry
+the repository licence.
 
 ## Everything else
 

@@ -60,7 +60,13 @@
 #   scripts/make_character_art.sh --from <dir> <id>
 #       Skip generation.  Take <dir>/standing.png (and win.png, lose.png,
 #       cutin.png, icon.png if present) and derive the pack into
-#       assets/characters/<id>/images/.
+#       assets/characters/<id>/images/.  Anything that arrives opaque has
+#       its background cut first.
+#
+#   scripts/make_character_art.sh --generate <prompt> <negative> <seed> <out>
+#       One image out of ComfyUI, and nothing else.  Deliberately low-level:
+#       make_characters.sh owns the cast and its prompts, this owns talking
+#       to the engine, and a character's design lives in exactly one file.
 #
 # ENVIRONMENT
 #   COMFYUI_URL        where the engine is (default http://127.0.0.1:8188)
@@ -71,11 +77,6 @@
 #                      is non-commercial only; leave it unset and the art
 #                      carries this repository's own licence.  The script
 #                      cannot tell by looking, so it has to be told.
-#
-#   scripts/make_character_art.sh <id>
-#       Generate the hero images through ComfyUI, then derive as above.
-#       Needs a workflow template; scripts/comfyui/README.md says what one
-#       has to contain. Not wired up until there is one to drive it with.
 #
 # REQUIREMENTS
 #   macOS `sips` for the derivation, python3 for JSON handling, and — for
@@ -116,10 +117,6 @@ CUTIN_W=1024
 CUTIN_H=512
 ICON=256
 
-# Where the face sits in a standing portrait, as a fraction of its height.
-# The icon is a square crop centred there rather than on the middle of the
-# canvas, which on a full-body portrait would be somebody's waist.
-FACE_CENTER=0.18
 
 COMFYUI_URL="${COMFYUI_URL:-http://127.0.0.1:8188}"
 
@@ -247,21 +244,196 @@ with open(dst, 'wb') as f:
 PY
 }
 
+# cut_background <src> <dst>
+#
+# Turn the white background transparent by flooding inward from the border.
+#
+# Not a global "white becomes clear" key, which is the obvious thing and the
+# wrong thing: three of these characters wear white, and a global key puts
+# holes through their clothes. Flooding only reaches white that is *connected
+# to the edge of the canvas*, and the bold outline these designs are drawn
+# with is a closed wall the flood cannot cross. Interior white survives
+# because it is interior.
+#
+# Edge pixels get a partial alpha rather than a hard cut, so the antialiased
+# rim of the linework does not leave a white fringe against the playfield.
+#
+# This is a stand-in for a proper matting model (BiRefNet, via ComfyUI's
+# RemoveBackground) and only works because we control the art style. Art with
+# a soft or coloured background, or an open silhouette, needs the real thing.
+cut_background() {
+  python3 - "$1" "$2" <<'PY'
+import struct, sys, zlib
+from collections import deque
+
+src, dst = sys.argv[1], sys.argv[2]
+
+# How light a pixel has to be to count as background, and how much darker it
+# may get before it stops being eaten at all. Between the two, alpha ramps —
+# that band is the antialiased edge of the outline.
+SOLID = 246   # at or above this, definitely background
+EDGE = 200    # below this, definitely the drawing
+
+blob = open(src, 'rb').read()
+w, h = struct.unpack('>II', blob[16:24])
+depth, color = blob[24], blob[25]
+if depth != 8 or color not in (2, 6):
+    sys.exit(f"{src}: only 8-bit RGB/RGBA PNGs can be keyed here")
+bpp = 4 if color == 6 else 3
+
+at, idat = 8, b''
+while at < len(blob):
+    length = struct.unpack('>I', blob[at:at + 4])[0]
+    if blob[at + 4:at + 8] == b'IDAT':
+        idat += blob[at + 8:at + 8 + length]
+    at += 12 + length
+
+raw = zlib.decompress(idat)
+stride = w * bpp
+rows, prev, pos = [], bytearray(stride), 0
+for _ in range(h):
+    ftype = raw[pos]; pos += 1
+    line = bytearray(raw[pos:pos + stride]); pos += stride
+    for i in range(stride):
+        a = line[i - bpp] if i >= bpp else 0
+        b = prev[i]
+        c = prev[i - bpp] if i >= bpp else 0
+        if ftype == 1:   line[i] = (line[i] + a) & 255
+        elif ftype == 2: line[i] = (line[i] + b) & 255
+        elif ftype == 3: line[i] = (line[i] + (a + b) // 2) & 255
+        elif ftype == 4:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+    rows.append(line)
+    prev = line
+
+def lum(x, y):
+    px = rows[y][x * bpp:x * bpp + 3]
+    return (px[0] * 299 + px[1] * 587 + px[2] * 114) // 1000
+
+# Flood from every border pixel that is light enough to be background.
+alpha = bytearray(b'\xff') * (w * h)
+seen = bytearray(w * h)
+queue = deque()
+for x in range(w):
+    for y in (0, h - 1):
+        if lum(x, y) >= EDGE and not seen[y * w + x]:
+            seen[y * w + x] = 1; queue.append((x, y))
+for y in range(h):
+    for x in (0, w - 1):
+        if lum(x, y) >= EDGE and not seen[y * w + x]:
+            seen[y * w + x] = 1; queue.append((x, y))
+
+while queue:
+    x, y = queue.popleft()
+    l = lum(x, y)
+    # Fully clear in the flat background, ramping to opaque across the
+    # antialiased rim, so the cut has a soft edge instead of a stair.
+    alpha[y * w + x] = 0 if l >= SOLID else int(255 * (SOLID - l) / (SOLID - EDGE))
+    for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+        if 0 <= nx < w and 0 <= ny < h and not seen[ny * w + nx] and lum(nx, ny) >= EDGE:
+            seen[ny * w + nx] = 1
+            queue.append((nx, ny))
+
+out = bytearray()
+for y in range(h):
+    out.append(0)
+    line = rows[y]
+    for x in range(w):
+        out += bytes(line[x * bpp:x * bpp + 3]) + bytes([alpha[y * w + x]])
+
+def chunk(tag, data):
+    body = tag + data
+    return struct.pack('>I', len(data)) + body + struct.pack('>I', zlib.crc32(body))
+
+with open(dst, 'wb') as f:
+    f.write(b'\x89PNG\r\n\x1a\n')
+    f.write(chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)))
+    f.write(chunk(b'IDAT', zlib.compress(bytes(out), 6)))
+    f.write(chunk(b'IEND', b''))
+
+cleared = sum(1 for v in alpha if v == 0)
+print(f"    keyed {dst.split('/')[-1]}: {100 * cleared // (w * h)}% transparent")
+PY
+}
+
 # crop_face <src> <dst> <size>
-# A square crop around where a face is, scaled to <size>.
+# A square head-and-shoulders crop, scaled to <size>.
+#
+# Measured from where the drawing actually is rather than from the canvas.
+# A generated portrait does not sit at a predictable place in its frame —
+# one has headphones adding height, another has twintails adding width —
+# and a crop computed from the canvas puts the face somewhere different for
+# every character. The alpha channel already says where the character is,
+# so the crop follows the ink: square, as wide a fraction of the figure's
+# height as a head plus shoulders takes, and anchored at the top of it.
 crop_face() {
   local src="$1" dst="$2" size="$3"
-  local sw sh side top tmp="$dst.crop.png"
-  sw="$(png_width "$src")"
-  sh="$(png_height "$src")"
-  # As wide as the picture and as tall as it is wide, so the whole head stays
-  # in frame whatever aspect the source had.
-  side="$sw"
-  [ "$side" -gt "$sh" ] && side="$sh"
-  top="$(python3 -c "print(max(0, round($sh * $FACE_CENTER - $side / 2)))")"
-  png_crop "$src" "$tmp" 0 "$top" "$side" "$side"
+  local box tmp="$dst.crop.png"
+  box="$(python3 - "$src" <<'PY'
+import struct, sys, zlib
+
+blob = open(sys.argv[1], 'rb').read()
+w, h = struct.unpack('>II', blob[16:24])
+bpp = 4 if blob[25] == 6 else 3
+at, idat = 8, b''
+while at < len(blob):
+    n = struct.unpack('>I', blob[at:at + 4])[0]
+    if blob[at + 4:at + 8] == b'IDAT':
+        idat += blob[at + 8:at + 8 + n]
+    at += 12 + n
+raw = zlib.decompress(idat)
+stride = w * bpp
+rows, prev, pos = [], bytearray(stride), 0
+for _ in range(h):
+    f = raw[pos]; pos += 1
+    line = bytearray(raw[pos:pos + stride]); pos += stride
+    for i in range(stride):
+        a = line[i - bpp] if i >= bpp else 0
+        b = prev[i]
+        c = prev[i - bpp] if i >= bpp else 0
+        if f == 1:   line[i] = (line[i] + a) & 255
+        elif f == 2: line[i] = (line[i] + b) & 255
+        elif f == 3: line[i] = (line[i] + (a + b) // 2) & 255
+        elif f == 4:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+    rows.append(line); prev = line
+
+# Bounding box of anything meaningfully opaque.
+x0, y0, x1, y1 = w, h, -1, -1
+for y in range(h):
+    line = rows[y]
+    for x in range(w):
+        if bpp == 3 or line[x * bpp + 3] > 32:
+            if x < x0: x0 = x
+            if x > x1: x1 = x
+            if y < y0: y0 = y
+            if y > y1: y1 = y
+if x1 < 0:
+    print(f"0 0 {w} {h}")
+    raise SystemExit
+
+fw, fh = x1 - x0 + 1, y1 - y0 + 1
+# A head plus shoulders is about a third of a five-heads-tall figure. Never
+# wider than the figure itself, so a narrow character is not padded out.
+side = min(max(round(fh * 0.34), 16), max(fw, 16))
+cx = (x0 + x1) // 2
+# A little air above the hair, then straight down from there.
+print(f"{cx - side // 2} {max(0, y0 - round(side * 0.06))} {side} {side}")
+PY
+)"
+  # shellcheck disable=SC2086 -- four separate arguments, deliberately.
+  png_crop "$src" "$tmp" $box
   sips -z "$size" "$size" "$tmp" --out "$dst" >/dev/null
   /bin/rm -f "$tmp"
+}
+
+# has_alpha <file> — PNG colour type 4 (grey+A) or 6 (RGB+A).
+has_alpha() {
+  python3 -c "import sys;sys.exit(0 if open(sys.argv[1],'rb').read(26)[25] in (4,6) else 1)" "$1"
 }
 
 # png_width / png_height <file> — straight out of the IHDR, no dependencies.
@@ -282,8 +454,6 @@ if head[:8] != bytes([0x89, 80, 78, 71, 13, 10, 26, 10]) or head[12:16] != b'IHD
 w, h = struct.unpack('>II', head[16:24])
 if not (0 < w <= 4096 and 0 < h <= 4096):
     sys.exit(f"{label}: {w}x{h} is outside 1..=4096 per side")
-if head[25] not in (4, 6):
-    print(f"  note: {label} has no alpha channel — it will draw as a solid rectangle")
 PY
 }
 
@@ -299,6 +469,23 @@ derive_pack() {
     return 1
   fi
   check_png "$standing" "standing.png"
+
+  # Anything that arrived opaque gets its background cut before it is fitted,
+  # because a portrait without alpha is a white rectangle over the playfield.
+  # Working copies, so the hero images the caller supplied are left alone.
+  local work
+  work="$(mktemp -d)"
+  local file
+  for file in standing win lose cutin icon; do
+    [ -f "$src/$file.png" ] || continue
+    if has_alpha "$src/$file.png"; then
+      cp "$src/$file.png" "$work/$file.png"
+    else
+      cut_background "$src/$file.png" "$work/$file.png"
+    fi
+  done
+  src="$work"
+  standing="$src/standing.png"
 
   mkdir -p "$out"
   echo "  deriving into assets/characters/$id/images/"
@@ -345,6 +532,7 @@ derive_pack() {
     crop_face "$standing" "$out/icon.png" "$ICON"
     echo "    icon.png (face crop)"
   fi
+  /bin/rm -rf "$work"
 }
 
 # ---------------------------------------------------------------------------
@@ -472,27 +660,37 @@ PY
   curl -sS -f -m 60 "$COMFYUI_URL/view?$spec" -o "$dest/$name.png"
 }
 
-# generate <workflow-name> <dest-dir> <name> <prompt> <seed>
+# generate <prompt> <negative> <seed> <out.png>
+#
+# The generation resolution is the model's, not the pack's: SDXL is trained
+# on ~1 megapixel buckets and asking it for 512x1024 directly produces a
+# worse picture than asking for 832x1216 and fitting afterwards, which is
+# what `derive_pack` does anyway.
+GEN_W=832
+GEN_H=1216
+
 generate() {
-  local workflow="$1" dest="$2" name="$3" prompt="$4" seed="$5"
-  local template="$WORKFLOW_DIR/$workflow.json"
+  local prompt="$1" negative="$2" seed="$3" out="$4"
+  local template="$WORKFLOW_DIR/standing.json"
   if [ ! -f "$template" ]; then
     echo "make_character_art.sh: no workflow template at $template" >&2
     echo "  Export one from ComfyUI with Save (API Format) and drop it in;" >&2
     echo "  see $WORKFLOW_DIR/README.md for the placeholders it must carry." >&2
     return 1
   fi
-  local rendered="$dest/.workflow.$name.json"
+  local dest name
+  dest="$(dirname "$out")"
+  name="$(basename "$out" .png)"
   mkdir -p "$dest"
+  local rendered="$dest/.workflow.$name.json"
   render_workflow "$template" "$rendered" \
-    "PROMPT=$prompt" "SEED=$seed" "WIDTH=$STANDING_W" "HEIGHT=$STANDING_H"
+    "PROMPT=$prompt" "NEGATIVE=$negative" "SEED=$seed" "WIDTH=$GEN_W" "HEIGHT=$GEN_H"
   local id
-  id="$(comfy_submit "$rendered")" || return 1
-  echo "    queued $name as $id"
-  comfy_wait "$id" || return 1
-  comfy_collect "$id" "$dest" "$name" || return 1
+  id="$(comfy_submit "$rendered")" || { /bin/rm -f "$rendered"; return 1; }
+  comfy_wait "$id" || { /bin/rm -f "$rendered"; return 1; }
+  comfy_collect "$id" "$dest" "$name" || { /bin/rm -f "$rendered"; return 1; }
   /bin/rm -f "$rendered"
-  echo "    got $name.png"
+  echo "    generated $name.png"
 }
 
 # ---------------------------------------------------------------------------
@@ -592,7 +790,7 @@ do_from() {
 - Derived: standing_left is a mirror of standing_right; anything absent above
   was derived from standing.png by \`scripts/make_character_art.sh\`."
   echo
-  echo "Done. Remember metadata.json — scripts/make_dummy_characters.sh writes one."
+  echo "Done. A pack also needs a metadata.json and voices/ — see make_characters.sh."
 }
 
 usage() {
@@ -608,17 +806,20 @@ main() {
       [ $# -eq 2 ] || { echo "usage: make_character_art.sh --from <dir> <id>" >&2; exit 2; }
       do_from "$1" "$2"
       ;;
-    -h|--help|"") usage ;;
-    -*) echo "unknown option: $1" >&2; exit 2 ;;
-    *)
-      echo "make_character_art.sh: generation is not wired up yet." >&2
-      echo "  The plumbing is here (see generate/comfy_* in this file) but there" >&2
-      echo "  is no workflow template to drive it with, and one cannot be written" >&2
-      echo "  without knowing which model and nodes the ComfyUI end has." >&2
-      echo "  Run --check to see what is missing, or --from <dir> <id> to derive" >&2
-      echo "  a pack from art you already have." >&2
-      exit 2
+    # One image, straight out of ComfyUI. Deliberately low-level and
+    # deliberately not a whole character: make_characters.sh owns the cast
+    # and its prompts, and this owns talking to the engine. Splitting them
+    # anywhere else would put a character's design in two files.
+    --generate)
+      shift
+      [ $# -eq 4 ] || {
+        echo "usage: make_character_art.sh --generate <prompt> <negative> <seed> <out.png>" >&2
+        exit 2
+      }
+      generate "$1" "$2" "$3" "$4"
       ;;
+    -h|--help|"") usage ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 }
 
