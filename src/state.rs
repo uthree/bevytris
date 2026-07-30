@@ -49,9 +49,11 @@ pub enum GameMode {
     Single,
     /// Race: clear 40 lines as fast as possible.
     Sprint,
-    /// Endless, no failure state: gravity never rises and topping out
-    /// wipes the field instead of ending the run. Lines cleared here add
-    /// to a lifetime total that survives across sessions.
+    /// Endless, no failure state: topping out wipes the field instead of
+    /// ending the run. Gravity climbs on marathon's rule and stops at
+    /// `ZEN_MAX_LEVEL`, which is where the backdrop and the music change.
+    /// Lines cleared here add to a lifetime total that survives across
+    /// sessions.
     Zen,
     VsCpu {
         stage: u32,

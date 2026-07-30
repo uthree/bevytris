@@ -64,6 +64,7 @@ fn main() {
                     "vs" | "versus" | "intense" => Profile::VsIntense,
                     "victory" | "win" => Profile::Victory,
                     "zen" => Profile::Zen,
+                    "zenpeak" | "peak" => Profile::ZenPeak,
                     other => panic!("unknown profile {other}"),
                 };
                 i += 2;

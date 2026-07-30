@@ -150,6 +150,11 @@ pub enum Profile {
     /// can be lost, so the music has nothing to warn about — it brightens
     /// when the field is clear and only clouds over as the stack climbs.
     Zen = 4,
+    /// Zen at terminal gravity. Same bright, nothing-at-stake harmony as
+    /// [`Profile::Zen`] — the mode is still unlosable — but the floor has
+    /// dropped out from under it: a fast, four-on-the-floor pulse that
+    /// makes the last stretch of a zen run feel like the reward it is.
+    ZenPeak = 5,
 }
 
 /// Everything the composer is allowed to know about the game.
@@ -394,6 +399,7 @@ fn strum_chance(profile: Profile) -> f32 {
         Profile::Zen => 0.55,
         Profile::Ambient => 0.40,
         Profile::VsIntense => 0.45,
+        Profile::ZenPeak => 0.45,
         Profile::Victory => 0.50,
     }
 }
@@ -405,7 +411,9 @@ fn strum_chance(profile: Profile) -> f32 {
 /// *about* rather than a place it visits twice.
 fn chord_budget(profile: Profile) -> (i32, i32) {
     match profile {
-        Profile::VsIntense | Profile::Victory => (1, 2),
+        // Zen's peak is a zen piece that has started moving; it keeps the
+        // drive rather than stopping twice to admire the chords.
+        Profile::VsIntense | Profile::Victory | Profile::ZenPeak => (1, 2),
         Profile::SoloCalm | Profile::Zen | Profile::Ambient => (3, 4),
     }
 }
@@ -446,7 +454,11 @@ fn roll_roles(profile: Profile, blocks: usize, rng: &mut Rng) -> Vec<BlockRole> 
     let chords = rng.range(lo, hi) as usize;
     // A second breakdown only in the long form; in the short one it
     // costs a third of the melody.
-    let breaks = if blocks >= 12 && rng.chance(0.4) { 2 } else { 1 };
+    let breaks = if blocks >= 12 && rng.chance(0.4) {
+        2
+    } else {
+        1
+    };
     // Block 0 has to state the tune, and the last block is the final
     // chorus, which forces every layer back on anyway.
     let slots: Vec<usize> = (1..blocks - 1).collect();
@@ -515,12 +527,13 @@ impl Kit {
 }
 
 impl Profile {
-    pub const ALL: [Profile; 5] = [
+    pub const ALL: [Profile; 6] = [
         Profile::Ambient,
         Profile::SoloCalm,
         Profile::VsIntense,
         Profile::Victory,
         Profile::Zen,
+        Profile::ZenPeak,
     ];
 
     /// Short English name, for the listening screen.
@@ -531,6 +544,7 @@ impl Profile {
             Profile::VsIntense => "VERSUS",
             Profile::Victory => "VICTORY",
             Profile::Zen => "ZEN",
+            Profile::ZenPeak => "ZEN PEAK",
         }
     }
 }
@@ -547,6 +561,8 @@ fn roll_meter(profile: Profile, rng: &mut Rng) -> Meter {
         // Zen is the one place a lopsided bar is an asset: there is no
         // stack to react to on the beat, so 3/4 and 6/8 just float.
         Profile::Zen => [0.40, 0.30, 0.30],
+        // At the peak the pulse is the point, and a pulse wants four.
+        Profile::ZenPeak => [0.70, 0.10, 0.20],
     };
     [Meter::Four, Meter::Three, Meter::Six][rng.weighted(&w)]
 }
@@ -631,6 +647,8 @@ pub fn default_smoothness(profile: Profile) -> f32 {
         Profile::Zen => 0.90,
         Profile::Ambient => 0.75,
         Profile::SoloCalm => 0.70,
+        // Still a zen melody, just one with somewhere to be.
+        Profile::ZenPeak => 0.70,
         // The two that are allowed some angularity: a fanfare wants
         // fanfare intervals, and versus wants energy.
         Profile::Victory => 0.50,
@@ -675,7 +693,11 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         // The consequent phrase may take a second progression. Four bars
         // stated twice under two different cadences is the plainest thing
         // eight bars of harmony can be, and the bank is right there.
-        let answer = if rng.chance(0.45) { *rng.pick(loops) } else { base };
+        let answer = if rng.chance(0.45) {
+            *rng.pick(loops)
+        } else {
+            base
+        };
         let mut chords = [Chord::new(0); 8];
         for (i, c) in chords.iter_mut().enumerate() {
             *c = Chord::new(if i < 4 { base[i] } else { answer[i % 4] });
@@ -695,7 +717,10 @@ fn build_material(seed: u64, profile: Profile, meter: Meter, smoothness: f32) ->
         let mut melody: Vec<Vec<MelNote>> = Vec::with_capacity(8);
         for bar in 0..8 {
             let (mi, tf) = plan[bar];
-            let prev = melody.last().and_then(|b: &Vec<MelNote>| b.last()).map(|n| n.deg);
+            let prev = melody
+                .last()
+                .and_then(|b: &Vec<MelNote>| b.last())
+                .map(|n| n.deg);
             melody.push(realize(&motifs[mi], tf, chords[bar], meter, prev));
         }
 
@@ -738,6 +763,9 @@ fn extend(chords: &mut [Chord; 8], profile: Profile, rng: &mut Rng) {
         Profile::SoloCalm => (0.30, 0.10),
         Profile::Zen => (0.25, 0.12),
         Profile::Ambient => (0.20, 0.08),
+        // Bright modes plus sevenths and ninths is the dance-record
+        // sound this one is after.
+        Profile::ZenPeak => (0.60, 0.35),
     };
     for (i, c) in chords.iter_mut().enumerate() {
         // The two cadence bars are load-bearing: bar 3 keeps its dominant
@@ -1013,6 +1041,9 @@ fn tempo_range(profile: Profile) -> (f32, f32) {
         Profile::Ambient => (92.0, 104.0),
         Profile::Victory => (128.0, 138.0),
         Profile::SoloCalm => (122.0, 144.0),
+        // Roughly double zen's pulse, which is what makes the takeover
+        // read as the same mode shifting gear rather than a new one.
+        Profile::ZenPeak => (150.0, 168.0),
         Profile::VsIntense => (178.0, 206.0),
     }
 }
@@ -1025,6 +1056,7 @@ fn roll_kit(profile: Profile, rng: &mut Rng) -> Kit {
         Profile::Zen => 0.20,
         Profile::Ambient => 0.25,
         Profile::SoloCalm => 0.35,
+        Profile::ZenPeak => 0.45,
         Profile::VsIntense => 0.45,
         Profile::Victory => 0.5,
     };
@@ -1079,6 +1111,15 @@ fn mode_palette(profile: Profile, band: usize) -> &'static [Mode] {
             1 => &[Mode::Ionian, Mode::Mixolydian],
             2 => &[Mode::Mixolydian, Mode::Dorian],
             _ => &[Mode::Dorian, Mode::Aeolian],
+        },
+        // The peak keeps zen's inverted ladder — there is still nothing
+        // to lose — but leans on the two modes with a flat seventh,
+        // which is what a fast bright piece wants under it.
+        Profile::ZenPeak => match band {
+            0 => &[Mode::Lydian, Mode::Ionian],
+            1 => &[Mode::Mixolydian, Mode::Ionian],
+            2 => &[Mode::Mixolydian, Mode::Dorian],
+            _ => &[Mode::Dorian, Mode::MelodicMinor],
         },
         Profile::SoloCalm => match band {
             0 => &[Mode::Dorian, Mode::Aeolian],
@@ -1218,6 +1259,15 @@ pub fn lead_palette(profile: Profile) -> &'static [Inst] {
     match profile {
         Profile::Ambient => &[Inst::Soft, Inst::Piano, Inst::Marimba],
         Profile::Zen => &[Inst::Soft, Inst::Piano, Inst::Guitar, Inst::Marimba],
+        // Zen's mallets and strings, plus the one attack that can carry
+        // a tune at this tempo.
+        Profile::ZenPeak => &[
+            Inst::Pluck,
+            Inst::Marimba,
+            Inst::Guitar,
+            Inst::Piano,
+            Inst::Sustain,
+        ],
         Profile::SoloCalm => &[
             Inst::Soft,
             Inst::Sustain,
@@ -1275,6 +1325,10 @@ fn arrange(profile: Profile, ctx: &Context, lead: Inst) -> Arrangement {
         // A soft pulse from the start (zen still wants a tempo to play
         // to) and a melody that takes its time arriving.
         Profile::Zen => (0.0, 4.0, 10.0),
+        // This one takes over a run already in progress, at the exact
+        // moment the player notices the floor move. Anything held back
+        // would read as the music having stopped, not started.
+        Profile::ZenPeak => (0.0, 0.0, 2.0),
     };
 
     // The extra channels come in last, so the arrangement still builds
@@ -1325,6 +1379,36 @@ fn arrange(profile: Profile, ctx: &Context, lead: Inst) -> Arrangement {
             snare: false,
             swing: 0.60,
             max_prio: 0,
+        },
+        // Zen's instruments over a dance floor: the pad and the mallets
+        // stay, the drums stop being a texture and become a beat.
+        Profile::ZenPeak => Arrangement {
+            lead: t >= l_at,
+            harmony: t >= h_at,
+            perc: t >= p_at,
+            pad: Some(if i < 0.6 {
+                Inst::Glass
+            } else {
+                Inst::WaveOrgan
+            }),
+            counter: (t >= l_at + 8.0).then_some(Counter::Arp),
+            saw: (i >= 0.55).then_some(SawRole::LeadDouble),
+            shaker: i >= 0.40,
+            harm_rate: if i < 0.5 {
+                HarmRate::Beat
+            } else {
+                HarmRate::Eighth
+            },
+            lead_inst: lead,
+            harm_inst: if i < 0.6 { Inst::Pad } else { Inst::Organ },
+            bass_pat: [1, 2, 2, 3][b],
+            hat_k: [4, 8, 8, 11][b],
+            kick_k: 4,
+            four_floor: true,
+            kick_extra: [&[][..], &[14], &[7, 14], &[7, 14]][b],
+            snare: true,
+            swing: 0.52,
+            max_prio: 1,
         },
         Profile::SoloCalm => Arrangement {
             lead: t >= l_at,
@@ -2787,7 +2871,11 @@ mod tests {
         }
         assert!(leaps > 500.0, "the test barely saw a leap");
         let share = answered / leaps;
-        assert!(share > 0.6, "only {:.0}% of leaps turned back", share * 100.0);
+        assert!(
+            share > 0.6,
+            "only {:.0}% of leaps turned back",
+            share * 100.0
+        );
     }
 
     #[test]
@@ -3096,7 +3184,10 @@ mod tests {
                 for (i, r) in roles.iter().enumerate() {
                     if *r == BlockRole::Break {
                         assert!(i * 2 >= roles.len(), "{what}: early breakdown at {i}");
-                        assert!(i + 2 < roles.len(), "{what}: breakdown on the run-up at {i}");
+                        assert!(
+                            i + 2 < roles.len(),
+                            "{what}: breakdown on the run-up at {i}"
+                        );
                     }
                 }
                 // Something has to still play the tune.

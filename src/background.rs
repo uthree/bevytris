@@ -14,11 +14,15 @@
 //! * PIANOROLL — the score the auto-composer is generating right now,
 //!   scrolling past a fixed playhead.
 //!
-//! Scenes crossfade on a 40-70 s timer (random next pick). Everything
-//! breathes with [`AudioPulse`], which is fed by the synthesizer's own
-//! envelope plus every sound effect the game plays — so the visualizer
-//! bars really are the notes you are hearing. The classic falling
-//! starfield stays on across all scenes (and still lunges via
+//! One scene is rolled per match and stays for the whole of it — long
+//! enough to become the place the match happened, instead of a slideshow
+//! playing behind it. The single exception is zen reaching terminal
+//! gravity, which crossfades to a fresh scene along with the music.
+//!
+//! Everything breathes with [`AudioPulse`], which is fed by the
+//! synthesizer's own envelope plus every sound effect the game plays — so
+//! the visualizer bars really are the notes you are hearing. The classic
+//! falling starfield stays on across all scenes (and still lunges via
 //! [`StarSurge`] on big clears).
 
 use bevy::prelude::*;
@@ -28,7 +32,7 @@ use rand::Rng;
 use crate::audio::PlaySfx;
 use crate::emissive;
 use crate::music::{MusicEngine, ScoreFeed};
-use crate::session::{GameSession, PrimaryPlayer};
+use crate::session::{GameSession, PrimaryPlayer, ZenPeak};
 use crate::state::AppState;
 
 /// Pseudo-spectrum band count for the visualizer.
@@ -78,6 +82,20 @@ const FRACTAL: usize = 5;
 const SUNSET: usize = 6;
 const AUTOMATON: usize = 7;
 const PIANOROLL: usize = 8;
+
+/// Scene names, in index order — the log line, and the values
+/// `BEVYTRIS_SCENE` accepts.
+const SCENE_NAMES: [&str; SCENE_COUNT] = [
+    "formation",
+    "cyber",
+    "galaxy",
+    "visualizer",
+    "garden",
+    "fractal",
+    "sunset",
+    "automaton",
+    "pianoroll",
+];
 
 /// One color scheme shared by every scene.
 struct Palette {
@@ -197,8 +215,8 @@ const PALETTES: [Palette; 5] = [
 ];
 
 /// Which palette each scene is currently wearing. An incoming scene
-/// re-rolls its palette, so colors shift with every crossfade without
-/// ever popping mid-display.
+/// re-rolls its palette, so no two matches wear the same colors even
+/// when they roll the same scene, and nothing ever pops mid-display.
 #[derive(Resource)]
 struct ScenePalettes([usize; SCENE_COUNT]);
 
@@ -228,9 +246,47 @@ struct SceneState {
     /// Master gate: scenes only show during gameplay. Menus keep the
     /// calm starfield so the title screen stays quiet.
     master: f32,
-    timer: Timer,
-    /// Dev pin (`BEVYTRIS_SCENE=formation|cyber|galaxy|visualizer`).
+    /// Zen's peak already claimed its own scene this run; the switch
+    /// fires once, not once per frame at max level.
+    peaked: bool,
+    /// Dev pin (`BEVYTRIS_SCENE=<name>`, see [`SCENE_NAMES`]).
     pinned: bool,
+}
+
+impl SceneState {
+    /// Cut to a scene that is not the one already showing, wearing a
+    /// freshly rolled palette. `crossfade` decides whether the change is
+    /// something the player watches happen or simply the way things are
+    /// when the match starts.
+    fn switch(&mut self, palettes: &mut ScenePalettes, crossfade: bool) {
+        if self.pinned {
+            return;
+        }
+        let mut rng = rand::rng();
+        // Draw from the other scenes directly rather than re-rolling on a
+        // collision, which would double this scene's neighbour's odds.
+        let mut next = rng.random_range(0..SCENE_COUNT - 1);
+        if next >= self.active {
+            next += 1;
+        }
+        self.prev = if crossfade { self.active } else { next };
+        self.active = next;
+        self.fade = if crossfade { 0.0 } else { 1.0 };
+        let palette = rng.random_range(0..PALETTES.len());
+        palettes.0[next] = palette;
+        info!(
+            "scene: {} (palette {palette}){}",
+            SCENE_NAMES[next],
+            if crossfade { ", crossfading" } else { "" }
+        );
+    }
+}
+
+/// One scene per match, rolled as the boards spawn. Restarts come back
+/// through here too, so a retry gets its own backdrop.
+fn pick_match_scene(mut state: ResMut<SceneState>, mut palettes: ResMut<ScenePalettes>) {
+    state.peaked = false;
+    state.switch(&mut palettes, false);
 }
 
 /// Per-scene display weight (0..1), refreshed every frame, plus the
@@ -283,10 +339,11 @@ impl Plugin for BackgroundPlugin {
                 prev: start,
                 fade: 1.0,
                 master: 0.0,
-                timer: Timer::from_seconds(rand::rng().random_range(40.0..70.0), TimerMode::Once),
+                peaked: false,
                 pinned,
             })
             .add_systems(Startup, setup_background)
+            .add_systems(OnEnter(AppState::Playing), pick_match_scene)
             .add_systems(
                 Update,
                 (
@@ -1047,10 +1104,12 @@ fn update_zone_fx(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_scene_state(
     time: Res<Time>,
     app_state: Res<State<AppState>>,
     fx: Res<ZoneFx>,
+    zen_peak: Res<ZenPeak>,
     mut state: ResMut<SceneState>,
     mut weights: ResMut<SceneWeights>,
     mut palettes: ResMut<ScenePalettes>,
@@ -1075,18 +1134,11 @@ fn update_scene_state(
         state.fade = 1.0;
     }
 
-    if !listening && !state.pinned && state.timer.tick(time.delta()).is_finished() {
-        let mut rng = rand::rng();
-        let mut next = rng.random_range(0..SCENE_COUNT);
-        if next == state.active {
-            next = (next + 1) % SCENE_COUNT;
-        }
-        state.prev = state.active;
-        state.active = next;
-        state.fade = 0.0;
-        state.timer = Timer::from_seconds(rng.random_range(40.0..70.0), TimerMode::Once);
-        // The incoming scene picks a fresh color scheme.
-        palettes.0[next] = rng.random_range(0..PALETTES.len());
+    // The one mid-match change there is: zen topping out its gravity ramp
+    // hands the run a new backdrop, in step with the new music.
+    if !listening && zen_peak.0 && !state.peaked {
+        state.peaked = true;
+        state.switch(&mut palettes, true);
     }
 
     let ease = state.fade * state.fade * (3.0 - 2.0 * state.fade);
@@ -1824,5 +1876,76 @@ fn voice_hue(voice: u8) -> usize {
         v if v == Voice::Harmony as u8 || v == Voice::Wave as u8 => 1,
         v if v == Voice::Bass as u8 || v == Voice::Saw as u8 => 2,
         _ => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> SceneState {
+        SceneState {
+            active: FORMATION,
+            prev: FORMATION,
+            fade: 1.0,
+            master: 0.0,
+            peaked: false,
+            pinned: false,
+        }
+    }
+
+    /// The whole point of one scene per match: two runs in a row must not
+    /// open on the same backdrop.
+    #[test]
+    fn a_match_never_rolls_the_scene_it_just_played() {
+        let mut palettes = ScenePalettes::random();
+        let mut s = state();
+        let mut seen = [0usize; SCENE_COUNT];
+        for _ in 0..400 {
+            let before = s.active;
+            s.switch(&mut palettes, false);
+            assert_ne!(s.active, before);
+            // Nothing to fade from at a match start: the scene simply is.
+            assert_eq!(s.prev, s.active);
+            assert_eq!(s.fade, 1.0);
+            seen[s.active] += 1;
+        }
+        // And the draw really does reach all of them.
+        assert!(seen.iter().all(|&n| n > 0), "unreachable scenes: {seen:?}");
+    }
+
+    /// Zen's peak is the one change the player watches happen, so the
+    /// outgoing scene has to stay put to fade out of.
+    #[test]
+    fn the_peak_crossfades_out_of_the_scene_it_replaces() {
+        let mut palettes = ScenePalettes::random();
+        let mut s = state();
+        s.switch(&mut palettes, true);
+        assert_eq!(s.prev, FORMATION);
+        assert_ne!(s.active, FORMATION);
+        assert_eq!(s.fade, 0.0);
+    }
+
+    /// `BEVYTRIS_SCENE` pins a scene for auditioning it; nothing in a
+    /// match, zen's peak included, may take it away.
+    #[test]
+    fn a_pinned_scene_outranks_everything() {
+        let mut palettes = ScenePalettes::random();
+        let mut s = SceneState {
+            pinned: true,
+            ..state()
+        };
+        s.switch(&mut palettes, false);
+        s.switch(&mut palettes, true);
+        assert_eq!(s.active, FORMATION);
+        assert_eq!(s.prev, FORMATION);
+    }
+
+    /// The names double as the values `BEVYTRIS_SCENE` accepts, so a
+    /// scene added without one would silently become unpinnable.
+    #[test]
+    fn every_scene_has_a_name() {
+        assert_eq!(SCENE_NAMES.len(), SCENE_COUNT);
+        assert!(SCENE_NAMES.iter().all(|n| !n.is_empty()));
     }
 }

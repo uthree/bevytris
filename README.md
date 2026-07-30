@@ -8,11 +8,13 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
 
 - **Solo modes** — Marathon (classic endless, guideline gravity curve),
   Sprint (40-line race, with a persistent personal best) and **ZEN**
-- **ZEN** — endless and unlosable: gravity never rises, and topping out wipes
-  the field and carries on instead of ending the run. Every line ever cleared
-  adds to a lifetime total, and the ZEN level it feeds only goes up. Its music
-  is the slowest the composer writes, and it brightens or clouds over with the
-  height of your stack rather than warning you about it.
+- **ZEN** — endless and unlosable: topping out wipes the field and carries on
+  instead of ending the run. Gravity climbs on marathon's ten-lines-a-level
+  rule but stops at the top of the curve, and arriving there switches the
+  backdrop and hands the run a faster piece of music to finish in. Every line
+  ever cleared adds to a lifetime total, and the ZEN level it feeds only goes
+  up. Its music is the slowest the composer writes, and it brightens or clouds
+  over with the height of your stack rather than warning you about it.
 - **VS CPU mode** — a 30-stage ladder of computer opponents with distinct
   personalities (Balanced / Rusher / Thinker / Spinner), human-like blunder
   rates that fade out as stages climb, garbage attack & cancellation rules
@@ -57,15 +59,16 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
   in the settings.
 - **Flashy presentation** — HDR bloom on everything that matters, square
   glow particles, hard-drop light trails, line-clear light bars, shockwave
-  frames, screen shake, banners, confetti, and rotating procedural
-  background scenes (morphing 3D particle figures, matrix-style code rain,
-  a spiral galaxy, an audio-reactive visualizer, plants, a Sierpinski
-  carpet, a pixel sunset, Conway's Life, and a live piano roll of the
-  music) that all pulse with the game's own soundscape
+  frames, screen shake, banners, confetti, and procedural background scenes
+  (morphing 3D particle figures, matrix-style code rain, a spiral galaxy, an
+  audio-reactive visualizer, plants, a Sierpinski carpet, a pixel sunset,
+  Conway's Life, and a live piano roll of the music) that all pulse with the
+  game's own soundscape — one scene, freshly tinted, per match
 - **Generated music** — there are no music files. A nine-voice NES-style
   synthesizer and an algorithmic composer write the BGM as you play: calm
   and bright in solo modes, fast and minor in versus, slow and open in
-  zen, and thickening as the stack climbs. Every piece also rolls the
+  zen — until zen tops out its gravity ramp and the same bright harmony
+  comes back at twice the tempo — and thickening as the stack climbs. Every piece also rolls the
   instrument that sings the melody — pluck, soft, sustain, piano, guitar,
   marimba or brass — so two pieces on the same preset do not arrive with
   the same voice on top. See [`crates/chiptune`](crates/chiptune)

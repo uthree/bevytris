@@ -146,6 +146,9 @@ pub struct Strings {
     pub zen_level: &'static str,
     /// Zen HUD label: how many times this run has been wiped.
     pub zen_resets: &'static str,
+    /// HUD gravity readout once the ramp has topped out, in place of a
+    /// number that has stopped meaning anything.
+    pub speed_max: &'static str,
     pub select_stage: &'static str,
     /// Character picker: screen title, and what to do when the roster is
     /// empty. A character's own name and flavour text come from its
@@ -330,6 +333,7 @@ pub const EN: Strings = Strings {
     zen: "ZEN",
     zen_level: "ZEN LV",
     zen_resets: "RESETS",
+    speed_max: "MAX",
     select_stage: "SELECT STAGE",
     select_character: "SELECT CHARACTER",
     select_character_p2: "SELECT 2P CHARACTER",
@@ -349,7 +353,7 @@ pub const EN: Strings = Strings {
     desc_quit: "EXIT THE GAME",
     desc_marathon: "CLASSIC ENDLESS MODE - GRAVITY RISES EVERY 10 LINES",
     desc_sprint: "RACE: CLEAR {n} LINES AS FAST AS YOU CAN",
-    desc_zen: "ENDLESS AND UNLOSABLE - NO SPEED-UP, NO GAME OVER, JUST CLEARING",
+    desc_zen: "ENDLESS AND UNLOSABLE - GRAVITY CLIMBS TO A PEAK, TOPPING OUT ONLY WIPES THE FIELD",
     best_label: "BEST",
     stage_prefix: "STAGE",
     zone_prefix: "ZONE",
@@ -483,6 +487,7 @@ pub const JA: Strings = Strings {
     zen: "ゼン",
     zen_level: "ZEN LV",
     zen_resets: "リセット",
+    speed_max: "MAX",
     select_stage: "ステージ選択",
     select_character: "キャラクター選択",
     select_character_p2: "2Pのキャラクター選択",
@@ -502,7 +507,7 @@ pub const JA: Strings = Strings {
     desc_quit: "ゲームを終了",
     desc_marathon: "定番のエンドレス。10ラインごとに落下が速くなる",
     desc_sprint: "{n}ライン消去のタイムアタック",
-    desc_zen: "終わりも負けもない。加速せず、ただ消し続けるモード",
+    desc_zen: "終わりも負けもない。速度は最大まで上がり、詰んでも盤面が消えるだけ",
     best_label: "ベスト",
     stage_prefix: "ステージ",
     zone_prefix: "ZONE",

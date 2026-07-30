@@ -60,17 +60,16 @@ pub struct Zone {
 /// How `level` (and with it gravity) advances during play.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Leveling {
-    /// Marathon rule: +1 level every `LINES_PER_LEVEL` cleared lines.
+    /// Marathon (and zen) rule: +1 level every `LINES_PER_LEVEL` cleared
+    /// lines, stopping at [`Game::max_level`].
     Lines,
     /// Versus rule: the level rises with elapsed play time alone — one
     /// level every `seconds_per_level`, capped at `MAX_TIMED_LEVEL`.
     /// Cleared lines never change it, so efficient downstacking is never
     /// punished with extra gravity and stalling never keeps a match slow.
     Timed { seconds_per_level: f32 },
-    /// Sprint and zen rule: the level never moves. A race is timed, so
-    /// gravity stays constant and only execution speed matters; zen keeps
-    /// it constant because a rising floor is exactly the pressure the mode
-    /// exists to remove.
+    /// Sprint rule: the level never moves. A race is timed, so gravity
+    /// stays constant and only execution speed matters.
     Fixed,
 }
 
@@ -186,6 +185,11 @@ pub struct Game {
     pub lines: u32,
     pub level: u32,
     pub leveling: Leveling,
+    /// Ceiling for [`Leveling::Lines`]. Marathon leaves it wide open —
+    /// the number keeps climbing long after `gravity_seconds` has
+    /// flatlined — while zen stops at the top of the curve, because
+    /// arriving there is an event that mode makes something of.
+    pub max_level: u32,
     start_level: u32,
     /// -1 when the previous lock did not clear lines.
     combo: i32,
@@ -261,6 +265,7 @@ impl Game {
             lines: 0,
             level: start_level.max(1),
             leveling: Leveling::Lines,
+            max_level: u32::MAX,
             start_level: start_level.max(1),
             combo: -1,
             b2b_armed: false,
@@ -860,7 +865,7 @@ impl Game {
         // --- Lines / level -------------------------------------------------
         self.lines += lines;
         if matches!(self.leveling, Leveling::Lines) {
-            let new_level = self.start_level + self.lines / LINES_PER_LEVEL;
+            let new_level = (self.start_level + self.lines / LINES_PER_LEVEL).min(self.max_level);
             if new_level > self.level {
                 self.level = new_level;
                 self.events.push(GameEvent::LevelUp { level: new_level });
@@ -1771,6 +1776,28 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::LevelUp { .. }))
         );
+    }
+
+    #[test]
+    fn line_leveling_stops_at_max_level() {
+        // Zen climbs on the marathon rule but under a ceiling: reaching
+        // the top of the gravity curve is a moment that mode makes
+        // something of, so the number must actually stop there.
+        let mut game = Game::new(1, 1);
+        game.max_level = 5;
+        game.lines = 199; // uncapped, the next clear would mean level 21
+        fill_row(&mut game, 0, &[4]);
+        force_piece(&mut game, PieceKind::I);
+        game.rotate(true);
+        while game.active.x + 2 != 4 {
+            let dir = if game.active.x + 2 < 4 { 1 } else { -1 };
+            if !game.move_horizontal(dir) {
+                break;
+            }
+        }
+        game.hard_drop();
+        assert_eq!(game.lines, 200);
+        assert_eq!(game.level, 5);
     }
 
     #[test]

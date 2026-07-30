@@ -73,8 +73,10 @@ pub struct Progress {
     pub zen_lines: u64,
 }
 
-/// Lines per zen level. The level is cosmetic — it never touches gravity
-/// — so it can climb forever without making the mode harder.
+/// Lines per zen level. This is the *lifetime* level, carried across
+/// sessions; the gravity a run has climbed to is a separate number that
+/// stops at `session::ZEN_MAX_LEVEL`. This one never touches gravity, so
+/// it can go up forever without making the mode harder.
 pub const ZEN_LINES_PER_LEVEL: u64 = 10;
 
 /// Zen level for a lifetime line total (1-based).

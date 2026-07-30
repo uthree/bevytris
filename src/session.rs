@@ -10,7 +10,7 @@ use crate::audio::{PlaySfx, Sfx};
 use crate::config::{Action, CustomMatchConfig, GameSettings, Opponent};
 use crate::core::ai::{self, AiProfile, Plan, Step};
 use crate::core::board::BOARD_WIDTH;
-use crate::core::game::{Game, GameEvent, Leveling, Stats, Zone};
+use crate::core::game::{Game, GameEvent, Leveling, MAX_TIMED_LEVEL, Stats, Zone};
 use crate::input::PadInput;
 use crate::progress::{Grade, Progress};
 use crate::state::{AppState, GameMode, PlayState};
@@ -24,6 +24,13 @@ const VS_SECONDS_PER_LEVEL: f32 = 25.0;
 
 /// Sprint race: clear this many lines to finish.
 pub const SPRINT_GOAL_LINES: u32 = 40;
+
+/// Where zen's gravity ramp stops: the top of the guideline curve, which
+/// zen climbs on marathon's ten-lines-a-level rule. Nothing in zen can be
+/// lost, so the ceiling is not a difficulty wall but a destination —
+/// reaching it changes the backdrop and the music (see [`ZenPeak`]).
+pub const ZEN_MAX_LEVEL: u32 = MAX_TIMED_LEVEL;
+
 /// VS margin time: past this many seconds into a round, both players'
 /// attack scales up (x1.5 -> x4, see `Game::attack_multiplier`) so long
 /// rounds escalate to a finish instead of stalling.
@@ -44,12 +51,20 @@ fn stack_cheese(game: &mut Game, seed: u64, rows: u32) {
     }
 }
 
-/// A fresh board for `mode`; VS boards use the timed gravity ramp while
-/// sprint and zen pin gravity at level 1. Custom matches apply the user's
-/// rule sheet.
+/// A fresh board for `mode`: VS boards use the timed gravity ramp, zen
+/// climbs marathon's up to [`ZEN_MAX_LEVEL`], and sprint alone pins
+/// gravity at level 1. Custom matches apply the user's rule sheet.
 fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
     let start_level = match mode {
         GameMode::Custom if custom.speed_level > 0 => custom.speed_level,
+        // Dev helper: `BEVYTRIS_ZEN_LEVEL=<n>` starts a zen run part-way
+        // up the ramp, so the peak — and the backdrop and music that come
+        // with it — can be auditioned without first clearing two hundred
+        // lines.
+        GameMode::Zen => std::env::var("BEVYTRIS_ZEN_LEVEL")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .map_or(1, |level| level.clamp(1, ZEN_MAX_LEVEL)),
         _ => 1,
     };
     let mut game = Game::new(seed, start_level);
@@ -69,9 +84,13 @@ fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
         }
         GameMode::Sprint => game.leveling = Leveling::Fixed,
         GameMode::Zen => {
-            // The whole point: nothing speeds up and nothing can end the
-            // run, so there is never a reason to stop except wanting to.
-            game.leveling = Leveling::Fixed;
+            // Marathon's ramp, stopped at the top of the curve. Nothing
+            // can end the run, so the rising floor is not pressure — it
+            // is the only thing giving an endless mode a shape, and the
+            // ceiling is somewhere to arrive rather than somewhere to
+            // fail.
+            game.leveling = Leveling::Lines;
+            game.max_level = ZEN_MAX_LEVEL;
             game.endless = true;
         }
         GameMode::Custom => {
@@ -310,6 +329,27 @@ struct RoundOverTimer(Timer);
 #[derive(Resource, Default)]
 struct ZenBanked(u32);
 
+/// Zen reached [`ZEN_MAX_LEVEL`] — the run is at terminal gravity. The
+/// backdrop and the music both change on this, so it is published once
+/// here rather than re-derived on each side.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZenPeak(pub bool);
+
+/// Latch [`ZenPeak`] the moment the ramp tops out. It only ever latches
+/// on: a wipe costs the field, not the speed the run earned.
+fn watch_zen_peak(
+    mode: Res<GameMode>,
+    mut peak: ResMut<ZenPeak>,
+    boards: Query<&GameSession, With<PrimaryPlayer>>,
+) {
+    if peak.0 || *mode != GameMode::Zen {
+        return;
+    }
+    if boards.iter().any(|s| s.game.level >= ZEN_MAX_LEVEL) {
+        peak.0 = true;
+    }
+}
+
 /// Feed cleared lines into the lifetime zen total as they happen.
 fn bank_zen_lines(
     mode: Res<GameMode>,
@@ -362,10 +402,17 @@ impl Plugin for SessionPlugin {
                 countdown_tick.run_if(in_state(PlayState::Countdown)),
             )
             .init_resource::<ZenBanked>()
+            .init_resource::<ZenPeak>()
             .add_systems(OnExit(AppState::Playing), save_zen_on_exit)
             .add_systems(
                 Update,
-                (human_input, cpu_drive, tick_games, bank_zen_lines)
+                (
+                    human_input,
+                    cpu_drive,
+                    tick_games,
+                    bank_zen_lines,
+                    watch_zen_peak,
+                )
                     .chain()
                     .run_if(in_state(PlayState::Running)),
             )
@@ -393,6 +440,7 @@ fn spawn_session(mut commands: Commands, mode: Res<GameMode>, settings: Res<Game
     commands.remove_resource::<RaceResult>();
     commands.insert_resource(MatchState::new(*mode, &custom));
     commands.insert_resource(ZenBanked::default());
+    commands.insert_resource(ZenPeak::default());
 
     commands.spawn((
         GameSession {
@@ -992,6 +1040,60 @@ fn round_over_enter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One board, one mode, and the latch under test.
+    fn peak_app(mode: GameMode, level: u32) -> (App, Entity) {
+        let mut app = App::new();
+        app.insert_resource(mode)
+            .init_resource::<ZenPeak>()
+            .add_systems(Update, watch_zen_peak);
+        let mut game = Game::new(1, 1);
+        game.level = level;
+        let board = app
+            .world_mut()
+            .spawn((GameSession { game }, PrimaryPlayer))
+            .id();
+        (app, board)
+    }
+
+    fn set_level(app: &mut App, board: Entity, level: u32) {
+        app.world_mut()
+            .get_mut::<GameSession>(board)
+            .expect("board")
+            .game
+            .level = level;
+    }
+
+    fn peaked(app: &App) -> bool {
+        app.world().resource::<ZenPeak>().0
+    }
+
+    #[test]
+    fn zen_latches_its_peak_at_the_top_of_the_ramp() {
+        let (mut app, board) = peak_app(GameMode::Zen, 1);
+        app.update();
+        assert!(!peaked(&app), "a fresh run has not peaked");
+
+        set_level(&mut app, board, ZEN_MAX_LEVEL);
+        app.update();
+        assert!(peaked(&app));
+
+        // The latch only ever closes: a wipe costs the field, not the
+        // speed the run earned, and the backdrop and music that came with
+        // the peak must not flicker back either.
+        set_level(&mut app, board, 1);
+        app.update();
+        assert!(peaked(&app), "the peak came undone");
+    }
+
+    #[test]
+    fn only_zen_has_a_peak_to_reach() {
+        // Marathon runs the same leveling rule and sails straight past
+        // this number; nothing about it should change the scenery.
+        let (mut app, _) = peak_app(GameMode::Single, ZEN_MAX_LEVEL + 5);
+        app.update();
+        assert!(!peaked(&app));
+    }
 
     fn state(player_wins: u32, cpu_wins: u32, agg: MatchAggregate) -> MatchState {
         MatchState {

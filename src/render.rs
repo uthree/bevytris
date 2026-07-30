@@ -369,12 +369,14 @@ pub fn setup_board_visuals(
                         (s.left, HudText::Left),
                         (s.score, HudText::Score),
                     ],
-                    // Zen has no level to climb and no clock to beat, so
-                    // the column shows what it does have: the lifetime
-                    // level, the lines feeding it, and the time spent.
+                    // Zen has no clock to beat, so the column shows what
+                    // it does have: the lifetime level, the lines feeding
+                    // it, the gravity it has climbed to, and the time
+                    // spent.
                     GameMode::Zen => vec![
                         (s.zen_level, HudText::ZenLevel),
                         (s.lines, HudText::Lines),
+                        (s.speed, HudText::Speed),
                         (s.score, HudText::Score),
                         (s.time, HudText::Time),
                         (s.zen_resets, HudText::ZenResets),
@@ -659,6 +661,7 @@ fn sync_previews(
 
 fn sync_hud(
     mode: Res<GameMode>,
+    locale: Res<Locale>,
     progress: Res<crate::progress::Progress>,
     boards: Query<(&GameSession, &Children)>,
     mut texts: Query<(&HudText, &mut Text2d, &mut TextColor)>,
@@ -689,8 +692,14 @@ fn sync_hud(
                     }
                 }
                 HudText::Speed => {
-                    let g = 1.0 / gravity_seconds(game.level);
-                    let s = format!("{g:.1}G");
+                    // Past the top of the ramp the figure runs to four
+                    // digits and stops meaning anything; in zen, arriving
+                    // there is the whole event, so it says so.
+                    let s = if game.level >= game.max_level {
+                        locale.s().speed_max.to_string()
+                    } else {
+                        format!("{:.1}G", 1.0 / gravity_seconds(game.level))
+                    };
                     if **text != s {
                         **text = s;
                     }

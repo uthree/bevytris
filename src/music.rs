@@ -40,7 +40,7 @@ use bevytris_chiptune::{NoteEvent, SAMPLE_RATE, SAMPLES_PER_FRAME};
 use crate::audio::{Bgm, spawn_bgm_toast};
 use crate::config::GameSettings;
 use crate::effects::DangerLevel;
-use crate::session::{GameSession, PrimaryPlayer};
+use crate::session::{GameSession, PrimaryPlayer, ZenPeak};
 use crate::state::{AppState, GameMode, PlayState};
 
 /// Everything the two threads say to each other.
@@ -417,6 +417,7 @@ fn profile_for(
     play: Option<PlayState>,
     mode: GameMode,
     jukebox: Profile,
+    zen_peak: bool,
 ) -> Profile {
     match app {
         // The listening room picks its own.
@@ -425,7 +426,13 @@ fn profile_for(
             if play == Some(PlayState::Finished) {
                 Profile::Victory
             } else if mode == GameMode::Zen {
-                Profile::Zen
+                // A zen run that reached terminal gravity has earned a
+                // different piece to spend the rest of itself in.
+                if zen_peak {
+                    Profile::ZenPeak
+                } else {
+                    Profile::Zen
+                }
             } else if matches!(mode, GameMode::Single | GameMode::Sprint) {
                 Profile::SoloCalm
             } else {
@@ -443,6 +450,7 @@ fn choose_profile(
     play_state: Option<Res<State<PlayState>>>,
     mode: Res<GameMode>,
     jukebox: Res<Jukebox>,
+    zen_peak: Res<ZenPeak>,
     mut engine: ResMut<MusicEngine>,
 ) {
     let profile = profile_for(
@@ -450,6 +458,7 @@ fn choose_profile(
         play_state.map(|s| *s.get()),
         *mode,
         jukebox.profile,
+        zen_peak.0,
     );
     if profile != engine.profile {
         let was = engine.profile;
@@ -457,7 +466,12 @@ fn choose_profile(
         engine.profile_age = 0.0;
         engine.transpose = 0;
         // Only the real music is worth naming; menus change too often.
-        engine.announce = matches!(profile, Profile::SoloCalm | Profile::VsIntense);
+        // Zen's peak especially: the toast is what tells the player the
+        // music just changed on purpose.
+        engine.announce = matches!(
+            profile,
+            Profile::SoloCalm | Profile::VsIntense | Profile::ZenPeak
+        );
         info!(
             "music: {was:?} -> {profile:?} | {:?} / {:?}",
             app_state.get(),
@@ -698,7 +712,7 @@ mod tests {
                 CharacterSelect,
             ] {
                 assert_eq!(
-                    profile_for(app, None, mode, Profile::VsIntense),
+                    profile_for(app, None, mode, Profile::VsIntense, false),
                     Profile::Ambient,
                     "{app:?} should stay on menu music"
                 );
@@ -706,7 +720,7 @@ mod tests {
             // The listening room answers to its own dial, not the mode
             // sitting behind it.
             for want in Profile::ALL {
-                assert_eq!(profile_for(Jukebox, None, mode, want), want);
+                assert_eq!(profile_for(Jukebox, None, mode, want, false), want);
             }
             // A match is a match from the countdown onwards.
             for play in [
@@ -721,20 +735,38 @@ mod tests {
                     _ => Profile::VsIntense,
                 };
                 assert_eq!(
-                    profile_for(Playing, Some(play), mode, Profile::Ambient),
+                    profile_for(Playing, Some(play), mode, Profile::Ambient, false),
                     want,
                     "{mode:?}"
+                );
+                // Only zen has a second half, and only zen may hear it:
+                // every other mode ignores the flag entirely.
+                let peaked = if mode == GameMode::Zen {
+                    Profile::ZenPeak
+                } else {
+                    want
+                };
+                assert_eq!(
+                    profile_for(Playing, Some(play), mode, Profile::Ambient, true),
+                    peaked,
+                    "{mode:?} at peak"
                 );
             }
             // The result screen is a fanfare regardless of mode.
             assert_eq!(
-                profile_for(Playing, Some(PlayState::Finished), mode, Profile::Ambient),
+                profile_for(
+                    Playing,
+                    Some(PlayState::Finished),
+                    mode,
+                    Profile::Ambient,
+                    false
+                ),
                 Profile::Victory
             );
             // A restart bounces through Restarting with no PlayState at
             // all; the music must not fall back to the menu for that frame.
             assert_ne!(
-                profile_for(Restarting, None, mode, Profile::Ambient),
+                profile_for(Restarting, None, mode, Profile::Ambient, false),
                 Profile::Ambient
             );
         }

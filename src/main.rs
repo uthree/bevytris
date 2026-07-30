@@ -67,7 +67,8 @@ fn main() -> AppExit {
     // music|characters|playing skips the title menu, BEVYTRIS_MODE=sprint|zen|zone|
     // custom|vs-stage-N|vs-easy|vs-normal|vs-hard preselects the game
     // mode, BEVYTRIS_UNLOCK_ALL=1 opens all stages,
-    // BEVYTRIS_ZONE_CHARGE=1 starts zone gauges full, and
+    // BEVYTRIS_ZONE_CHARGE=1 starts zone gauges full,
+    // BEVYTRIS_ZEN_LEVEL=N starts a zen run part-way up its ramp, and
     // BEVYTRIS_SCENE=formation|cyber|galaxy|visualizer|garden|fractal|
     // sunset|automaton|pianoroll pins the background scene.
     .insert_state(match std::env::var("BEVYTRIS_SCREEN").as_deref() {
