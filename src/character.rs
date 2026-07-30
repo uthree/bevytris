@@ -1013,6 +1013,20 @@ const CUTIN_LIFE: f32 = 2.0;
 const CUTIN_FADE_IN: f32 = 0.16;
 const CUTIN_FADE_OUT: f32 = 0.45;
 
+/// The sweep across the screen, in world units, and how long the entry
+/// takes to settle.
+///
+/// A cut-in that only fades wastes the fact that most of it is behind a
+/// board: whatever the fields cover at the moment it appears is never seen
+/// at all. Moving it means the whole image passes through the gaps — the
+/// boards become a shutter the art travels behind rather than a lid over
+/// it. It enters from its owner's side, hard and fast, then keeps drifting
+/// the same way for the rest of its life; reversing at the end would undo
+/// the reveal it just paid for.
+const CUTIN_ENTER: f32 = 560.0;
+const CUTIN_ENTER_SECS: f32 = 0.34;
+const CUTIN_DRIFT_X: f32 = 260.0;
+
 /// The 1280x720 composition the camera is built around (`setup_camera`
 /// uses `ScalingMode::AutoMin` on exactly this), inset so a cut-in never
 /// runs off the edge.
@@ -1032,7 +1046,7 @@ const CUTIN_BOX: Vec2 = Vec2::new(1240.0, 690.0);
 const CUTIN_ALPHA: f32 = 0.7;
 const CUTIN_GLOW: f32 = 1.0;
 
-/// How far it drifts open while it holds. Just enough that it is moving.
+/// How far it swells while it holds. Just enough that it is breathing.
 const CUTIN_DRIFT: f32 = 0.05;
 
 /// A zone release also fires the gold line tally, which is the bigger
@@ -1049,6 +1063,11 @@ struct CutIn {
     /// value that has already been multiplied would multiply it again on
     /// every frame.
     tint: Color,
+    /// Where the sweep passes through, and which way it is going: +1 for a
+    /// character on the left board (entering from the left, moving right),
+    /// -1 for one on the right.
+    anchor: f32,
+    dir: f32,
     /// How loudly the moment on screen insists. Kept on the entity rather
     /// than in the queue resource so it cannot outlive it: the cut-in is
     /// `DespawnOnExit(AppState::Playing)`, and a flag in a resource would
@@ -1158,7 +1177,9 @@ fn spawn_cutins(
         .map(|(_, tf)| tf.translation.x)
         .unwrap_or(0.0);
     let room = (CUTIN_BOX.x - size.x).max(0.0) / 2.0;
-    let x = anchor.clamp(-room, room);
+    let anchor = anchor.clamp(-room, room);
+    // Enter from the side the character's own board is on.
+    let dir = if slot == 1 { -1.0 } else { 1.0 };
     commands.spawn((
         Sprite {
             image,
@@ -1168,11 +1189,13 @@ fn spawn_cutins(
             color: emissive(kind.tint().with_alpha(0.0), CUTIN_GLOW),
             ..default()
         },
-        Transform::from_xyz(x, 0.0, CUTIN_Z),
+        Transform::from_xyz(anchor - dir * CUTIN_ENTER, 0.0, CUTIN_Z),
         CutIn {
             life: CUTIN_LIFE,
             size,
             tint: kind.tint(),
+            anchor,
+            dir,
             priority: kind.priority(),
         },
         DespawnOnExit(AppState::Playing),
@@ -1198,10 +1221,16 @@ fn update_cutins(
         let elapsed = CUTIN_LIFE - cutin.life;
         let fade = (elapsed / CUTIN_FADE_IN).min(cutin.life / CUTIN_FADE_OUT).min(1.0);
         sprite.color = emissive(cutin.tint.with_alpha(CUTIN_ALPHA * fade), CUTIN_GLOW);
-        // Opening slowly is what keeps it from reading as a static overlay.
-        let drift = 1.0 + CUTIN_DRIFT * (elapsed / CUTIN_LIFE);
-        sprite.custom_size = Some(cutin.size * drift);
-        transform.translation.z = CUTIN_Z;
+        // Swelling slowly is what keeps it from reading as a still image.
+        let progress = elapsed / CUTIN_LIFE;
+        sprite.custom_size = Some(cutin.size * (1.0 + CUTIN_DRIFT * progress));
+        // Cubic ease-out for the entry, then a steady drift onward. The two
+        // are summed rather than sequenced so there is no seam where the
+        // slide hands over to the drift.
+        let settle = (elapsed / CUTIN_ENTER_SECS).min(1.0);
+        let remaining = (1.0 - settle).powi(3);
+        transform.translation.x =
+            cutin.anchor + cutin.dir * (CUTIN_DRIFT_X * progress - CUTIN_ENTER * remaining);
     }
 }
 

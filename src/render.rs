@@ -697,10 +697,12 @@ fn sync_hud(
                 }
                 HudText::Incoming => {
                     let n = game.incoming_total();
+                    // Just the number: the red is already the alarm, and a
+                    // trailing "!" on a numeral reads as a factorial.
                     let s = if n == 0 {
                         "-".to_string()
                     } else {
-                        format!("{n}!")
+                        n.to_string()
                     };
                     if **text != s {
                         **text = s;
