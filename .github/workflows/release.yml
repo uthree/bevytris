@@ -121,8 +121,10 @@ jobs:
             - CPU opponents plan like MisaMino / Cold Clear: beam search with soft-drop tucks,
               SRS spins and self-built T-spin doubles at higher stages
             - SRS, 7-bag, hold, T-spins, B2B, combos, guideline scoring, margin time
-            - Gamepad support with rebindable buttons, rebindable keys, DAS/ARR/SDF tuning,
-              VSync & fullscreen (F11)
+            - Everything is rebindable, menu controls included, and one action can answer
+              to several inputs — put hold on both shoulder buttons if that suits your
+              hands. Right on a binding row adds an input, left removes one
+            - Gamepad support, DAS/ARR/SDF tuning, VSync & fullscreen (F11)
             - English / Japanese UI, auto-detected from the OS (switchable in settings)
             - HDR bloom, particles, shockwaves, board inertia, Misaki pixel font
             - Chord blocks: the melody rests and all three pulse channels hold one
