@@ -56,11 +56,24 @@ beginning with `.` are skipped as hidden.
 | `ascii_name` | ASCII fallback for the 8x8 pixel font. Max 24 characters. |
 | `flavor` | One-line flavour text. |
 | `author` | Who made the pack. |
-| `portrait_alpha` | Opacity of the standing portrait behind the board. Clamped to `0.05..0.45`. |
+| `portrait_alpha` | Opacity of the standing portrait behind the board. Clamped to `0.05..0.45`. **Dense art wants far less than the 0.20 default** — see below. |
 | `voice_gain` | Per-character volume multiplier for the voice clips. Clamped to `0.2..2.0`. |
 
 Both numeric fields are clamped rather than rejected, so an out-of-range value
 degrades the look rather than dropping the character.
+
+### On `portrait_alpha`
+
+Start lower than you think. The default of `0.20` was chosen against sparse
+placeholder art; a real illustration at that value competes with the falling
+piece and wins. The six packs that ship use `0.11`.
+
+The reason is not just coverage. The portrait is drawn through
+`emissive(.., 1.15)`, which pushes it into HDR so it does not read as a grey
+sticker against the bloom-boosted background scenes — and white pushed into
+HDR *blooms*. A character in a white shirt is therefore much louder than the
+alpha alone suggests, and the effect does not scale down as fast as the
+number does. Check it against a real board rather than trusting the value.
 
 ## Which portrait goes where
 

@@ -219,6 +219,13 @@ build_voices() {
   local dir="$CHARACTERS_DIR/$id"
   mkdir -p "$dir/voices"
 
+  # portrait_alpha well under the 0.20 default, because these are dense
+  # illustrations rather than the sparse placeholder shapes that default was
+  # chosen against. The portrait is drawn through `emissive(.., 1.15)`, which
+  # pushes it into HDR so it does not read as grey next to the bloom-boosted
+  # background scenes — and white clothing pushed into HDR blooms. Four of
+  # these six wear white, so at 0.20 the character competes with the falling
+  # piece for attention and wins.
   cat > "$dir/metadata.json" <<JSON
 {
   "schema": 1,
@@ -226,7 +233,7 @@ build_voices() {
   "ascii_name": "$ascii",
   "flavor": "$flavor",
   "author": "VOICEVOX:$voice_name",
-  "portrait_alpha": 0.20,
+  "portrait_alpha": 0.11,
   "voice_gain": 1.0
 }
 JSON
