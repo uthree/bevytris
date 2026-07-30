@@ -82,6 +82,9 @@ fn pan_gains(pan: f32, width: f32) -> (f32, f32) {
 fn build_wavetables() -> [[f32; 32]; 4] {
     let q = |x: f32| (x.clamp(0.0, 1.0) * 15.0).round();
     let mut t = [[0.0f32; 32]; 4];
+    // One step of four different tables per pass, so this indexes rather
+    // than iterates: the recipes are easiest to read side by side.
+    #[allow(clippy::needless_range_loop)]
     for i in 0..32 {
         let th = std::f32::consts::TAU * i as f32 / 32.0;
         // Pure sine — the softest thing the chip can say.

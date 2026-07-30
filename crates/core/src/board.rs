@@ -193,7 +193,7 @@ impl Board {
     pub fn garbage_rows(&self) -> u32 {
         self.grid
             .iter()
-            .filter(|row| row.iter().any(|c| *c == Some(Cell::Garbage)))
+            .filter(|row| row.contains(&Some(Cell::Garbage)))
             .count() as u32
     }
 

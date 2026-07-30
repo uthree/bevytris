@@ -124,9 +124,9 @@ impl Meter {
     pub const ALL: [Meter; 3] = [Meter::Four, Meter::Three, Meter::Six];
     /// 0 = downbeat, 1 = the offbeat subdivision, 2 = everything else.
     fn prio(self, step: u8) -> u8 {
-        if step as u32 % self.steps_per_beat() == 0 {
+        if (step as u32).is_multiple_of(self.steps_per_beat()) {
             0
-        } else if step % 2 == 0 {
+        } else if step.is_multiple_of(2) {
             1
         } else {
             2
@@ -1891,7 +1891,7 @@ impl Composer {
     /// appended in time order with absolute-sample timestamps.
     pub fn plan_bar(&mut self, ctx: &Context, out: &mut Vec<NoteEvent>) {
         self.transpose = ctx.transpose;
-        let phrase_start = self.bar % BARS_PER_SECTION == 0;
+        let phrase_start = self.bar.is_multiple_of(BARS_PER_SECTION);
         if phrase_start {
             // Mode changes only at phrase boundaries; mid-bar they sound
             // like a bug rather than a modulation.

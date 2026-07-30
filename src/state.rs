@@ -44,8 +44,9 @@ pub enum PlayState {
     Finished,
 }
 
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GameMode {
+    #[default]
     Single,
     /// Race: clear 40 lines as fast as possible.
     Sprint,
@@ -68,8 +69,3 @@ pub enum GameMode {
     Custom,
 }
 
-impl Default for GameMode {
-    fn default() -> Self {
-        GameMode::Single
-    }
-}

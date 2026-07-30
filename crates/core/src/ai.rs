@@ -280,15 +280,14 @@ fn reachable_placements(board: &Board, start: ActivePiece, finesse: bool) -> Vec
 
         for (dx, step) in [(-1, Step::Left), (1, Step::Right)] {
             let cand = piece.shifted(dx, 0);
-            if board.fits(&cand) {
-                if let Some(i) = state_index(&cand, false) {
-                    if !visited[i] {
-                        visited[i] = true;
-                        let mut s = steps.clone();
-                        s.push(step);
-                        queue.push_back((cand, None, s));
-                    }
-                }
+            if board.fits(&cand)
+                && let Some(i) = state_index(&cand, false)
+                && !visited[i]
+            {
+                visited[i] = true;
+                let mut s = steps.clone();
+                s.push(step);
+                queue.push_back((cand, None, s));
             }
         }
         for (cw, step) in [(true, Step::Cw), (false, Step::Ccw)] {
@@ -297,13 +296,13 @@ fn reachable_placements(board: &Board, start: ActivePiece, finesse: bool) -> Vec
                 let cand = piece.rotated(to).shifted(dx, dy);
                 if board.fits(&cand) {
                     let spin = piece.kind == PieceKind::T;
-                    if let Some(idx) = state_index(&cand, spin) {
-                        if !visited[idx] {
-                            visited[idx] = true;
-                            let mut s = steps.clone();
-                            s.push(step);
-                            queue.push_back((cand, Some(i), s));
-                        }
+                    if let Some(idx) = state_index(&cand, spin)
+                        && !visited[idx]
+                    {
+                        visited[idx] = true;
+                        let mut s = steps.clone();
+                        s.push(step);
+                        queue.push_back((cand, Some(i), s));
                     }
                     break;
                 }
@@ -314,13 +313,13 @@ fn reachable_placements(board: &Board, start: ActivePiece, finesse: bool) -> Vec
             while board.fits(&cand.shifted(0, -1)) {
                 cand = cand.shifted(0, -1);
             }
-            if let Some(i) = state_index(&cand, false) {
-                if !visited[i] {
-                    visited[i] = true;
-                    let mut s = steps.clone();
-                    s.push(Step::Drop);
-                    queue.push_back((cand, None, s));
-                }
+            if let Some(i) = state_index(&cand, false)
+                && !visited[i]
+            {
+                visited[i] = true;
+                let mut s = steps.clone();
+                s.push(Step::Drop);
+                queue.push_back((cand, None, s));
             }
         }
     }
@@ -635,12 +634,11 @@ pub fn plan(
                 }
             }
             None => {
-                if let Some(&n) = queue.first() {
-                    if n != active.kind {
-                        if let Some(s) = spawn_state(board, n) {
-                            starts.push((s, true, 1));
-                        }
-                    }
+                if let Some(&n) = queue.first()
+                    && n != active.kind
+                    && let Some(s) = spawn_state(board, n)
+                {
+                    starts.push((s, true, 1));
                 }
             }
             _ => {}
@@ -754,11 +752,13 @@ pub fn plan(
     // Human-like blunder: sometimes commit to a decent-but-not-best spot.
     // Never blunder when the stack (plus pending garbage) is threatening.
     let mut pick = 0;
-    if profile.mistake_rate > 0.0 && danger < 12.0 && order.len() > 1 {
-        if rng.random::<f32>() < profile.mistake_rate {
-            let k = order.len().min(4);
-            pick = rng.random_range(1..k.max(2));
-        }
+    if profile.mistake_rate > 0.0
+        && danger < 12.0
+        && order.len() > 1
+        && rng.random::<f32>() < profile.mistake_rate
+    {
+        let k = order.len().min(4);
+        pick = rng.random_range(1..k.max(2));
     }
     let chosen = order[pick.min(order.len() - 1)];
     let mut plan = roots.swap_remove(chosen);

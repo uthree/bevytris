@@ -283,10 +283,11 @@ fn play_sfx(
     let muffle = player_zone_active(&sessions);
     for msg in reader.read() {
         let (mut handle, gain, speed) = bank.params(msg.sfx);
-        if muffle && !msg.crisp {
-            if let Some(wet) = muffled.0.get(&handle.id()) {
-                handle = wet.clone();
-            }
+        if muffle
+            && !msg.crisp
+            && let Some(wet) = muffled.0.get(&handle.id())
+        {
+            handle = wet.clone();
         }
         let volume = base * gain * msg.gain;
         if volume <= 0.001 {

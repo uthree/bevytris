@@ -220,7 +220,7 @@ fn spawn_burst(
                 ..default()
             },
             Transform::from_translation(center.extend(20.0))
-                .with_rotation(Quat::from_rotation_z(rng.random_range(0.0..3.14))),
+                .with_rotation(Quat::from_rotation_z(rng.random_range(0.0..std::f32::consts::PI))),
             Particle {
                 vel: Vec2::new(angle.cos(), angle.sin()) * v,
                 gravity,
@@ -246,6 +246,7 @@ struct Streak {
     collapse: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_streak(
     commands: &mut Commands,
     glow: &Handle<Image>,
@@ -440,6 +441,7 @@ fn spawn_zone_tally(
     ));
 }
 
+#[allow(clippy::type_complexity)]
 fn update_zone_tally(
     time: Res<Time>,
     mut commands: Commands,
@@ -668,10 +670,10 @@ fn map_events_to_effects(
             GameEvent::MoveBlocked { dx } => {
                 // Pressing into the wall: the board leans that way and stays
                 // leaned while the key is held (impulses repeat at ARR rate).
-                if own_input {
-                    if let Ok(mut kick) = kicks.get_mut(msg.board) {
-                        kick.impulse(Vec2::new(*dx as f32 * 85.0, 0.0));
-                    }
+                if own_input
+                    && let Ok(mut kick) = kicks.get_mut(msg.board)
+                {
+                    kick.impulse(Vec2::new(*dx as f32 * 85.0, 0.0));
                 }
             }
             GameEvent::Rotated { kicked, cw, kick } => {
@@ -681,15 +683,15 @@ fn map_events_to_effects(
                     // Board recoil only for kicked rotations (spins tucked
                     // into a slot, T-spin style) — reacting to every plain
                     // rotation reads as noise.
-                    if *kicked {
-                        if let Ok(mut k) = kicks.get_mut(msg.board) {
-                            // Reaction torque: piece spins CW, board CCW.
-                            k.spin(if *cw { 1.2 } else { -1.2 });
-                            // The wall kick shoves the piece; the board
-                            // recoils the opposite way.
-                            if kick.0 != 0 {
-                                k.impulse(Vec2::new(-kick.0 as f32 * 55.0, 0.0));
-                            }
+                    if *kicked
+                        && let Ok(mut k) = kicks.get_mut(msg.board)
+                    {
+                        // Reaction torque: piece spins CW, board CCW.
+                        k.spin(if *cw { 1.2 } else { -1.2 });
+                        // The wall kick shoves the piece; the board
+                        // recoils the opposite way.
+                        if kick.0 != 0 {
+                            k.impulse(Vec2::new(-kick.0 as f32 * 55.0, 0.0));
                         }
                     }
                 }
@@ -731,38 +733,38 @@ fn map_events_to_effects(
                     }
                 }
                 // Light trail down the columns the piece just fell through.
-                if let Some(distance) = drop_distance.remove(&msg.board) {
-                    if distance >= 3 {
-                        let cells = piece.board_cells();
-                        let color = {
-                            let (r, g, b) = piece.kind.color();
-                            Color::srgb(r, g, b)
-                        };
-                        for &(x, _) in &cells {
-                            let top = cells
-                                .iter()
-                                .filter(|c| c.0 == x)
-                                .map(|c| c.1)
-                                .max()
-                                .unwrap_or(0);
-                            let from = (top + 1).min(VISIBLE_HEIGHT - 1);
-                            let to = (top + distance).min(VISIBLE_HEIGHT - 1);
-                            if to <= from {
-                                continue;
-                            }
-                            let a = cell_world(board_tf, theme, x, from);
-                            let b = cell_world(board_tf, theme, x, to);
-                            spawn_streak(
-                                &mut commands,
-                                &bar_tex,
-                                (a + b) / 2.0,
-                                Vec2::new(theme.cell * 0.8, (b.y - a.y).abs() + theme.cell),
-                                color.with_alpha(0.55),
-                                2.4,
-                                0.22,
-                                false,
-                            );
+                if let Some(distance) = drop_distance.remove(&msg.board)
+                    && distance >= 3
+                {
+                    let cells = piece.board_cells();
+                    let color = {
+                        let (r, g, b) = piece.kind.color();
+                        Color::srgb(r, g, b)
+                    };
+                    for &(x, _) in &cells {
+                        let top = cells
+                            .iter()
+                            .filter(|c| c.0 == x)
+                            .map(|c| c.1)
+                            .max()
+                            .unwrap_or(0);
+                        let from = (top + 1).min(VISIBLE_HEIGHT - 1);
+                        let to = (top + distance).min(VISIBLE_HEIGHT - 1);
+                        if to <= from {
+                            continue;
                         }
+                        let a = cell_world(board_tf, theme, x, from);
+                        let b = cell_world(board_tf, theme, x, to);
+                        spawn_streak(
+                            &mut commands,
+                            &bar_tex,
+                            (a + b) / 2.0,
+                            Vec2::new(theme.cell * 0.8, (b.y - a.y).abs() + theme.cell),
+                            color.with_alpha(0.55),
+                            2.4,
+                            0.22,
+                            false,
+                        );
                     }
                 }
             }
@@ -1511,11 +1513,11 @@ fn zone_presentation(
 ) {
     let t = time.elapsed_secs();
     for (entity, _, session) in &boards {
-        if session.game.zone_active() {
-            if let Ok(mut glow) = glows.get_mut(entity) {
-                glow.color = Color::srgb(0.3, 0.9, 1.0);
-                glow.t = glow.t.max(0.45 + 0.3 * (t * 9.0).sin().abs());
-            }
+        if session.game.zone_active()
+            && let Ok(mut glow) = glows.get_mut(entity)
+        {
+            glow.color = Color::srgb(0.3, 0.9, 1.0);
+            glow.t = glow.t.max(0.45 + 0.3 * (t * 9.0).sin().abs());
         }
     }
     let Ok(mut node) = vignette.single_mut() else {

@@ -1307,6 +1307,8 @@ fn animate_formation(
 // CYBER: glyph rain + drifting source code
 // ---------------------------------------------------------------------------
 
+// Bevy's disjoint-query filters: complex by construction, not by choice.
+#[allow(clippy::type_complexity)]
 fn animate_cyber(
     time: Res<Time>,
     pulse: Res<AudioPulse>,
@@ -1351,7 +1353,7 @@ fn animate_cyber(
 // GALAXY: spiral of square stars + shooting stars
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn animate_galaxy(
     time: Res<Time>,
     pulse: Res<AudioPulse>,
@@ -1557,6 +1559,7 @@ fn animate_fractal(
 // SUNSET: gradient sky, setting sun, ridges and clouds
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::type_complexity)]
 fn animate_sunset(
     time: Res<Time>,
     pulse: Res<AudioPulse>,

@@ -251,7 +251,7 @@ impl Game {
         let mut bag = SevenBag::new(seed);
         let mut queue = VecDeque::with_capacity(PREVIEW_COUNT + 1);
         for _ in 0..=PREVIEW_COUNT {
-            queue.push_back(bag.next());
+            queue.push_back(bag.next_piece());
         }
         let first = queue.pop_front().expect("queue prefilled");
         let mut game = Self {
@@ -278,7 +278,8 @@ impl Game {
             soft_dropping: false,
             soft_drop_factor: SOFT_DROP_FACTOR,
             incoming: VecDeque::new(),
-            garbage_rng: StdRng::seed_from_u64(seed ^ 0x6761_7262_6167_65),
+            // "garbage" in ASCII, so a seed in a log is recognisably ours.
+            garbage_rng: StdRng::seed_from_u64(seed ^ 0x67_61_72_62_61_67_65),
             garbage_messiness: 0,
             endless: false,
             hold_enabled: true,
@@ -627,7 +628,7 @@ impl Game {
 
     fn next_from_queue(&mut self) -> PieceKind {
         let kind = self.queue.pop_front().expect("queue is never empty");
-        self.queue.push_back(self.bag.next());
+        self.queue.push_back(self.bag.next_piece());
         kind
     }
 
@@ -752,17 +753,14 @@ impl Game {
             if lines > 0 {
                 self.apply_clear(lines, rows, tspin, garbage_rows_cleared);
             } else {
-                match tspin {
-                    Some(kind) => {
-                        let mini = kind == ClearKind::TSpinMini;
-                        let base = if mini { 100 } else { 400 };
-                        self.score += (base * self.level) as u64;
-                        if !mini {
-                            self.stats.tspins += 1;
-                        }
-                        self.events.push(GameEvent::TSpinNoLines { mini });
+                if let Some(kind) = tspin {
+                    let mini = kind == ClearKind::TSpinMini;
+                    let base = if mini { 100 } else { 400 };
+                    self.score += (base * self.level) as u64;
+                    if !mini {
+                        self.stats.tspins += 1;
                     }
-                    None => {}
+                    self.events.push(GameEvent::TSpinNoLines { mini });
                 }
                 self.combo = -1;
                 self.rise_garbage();
@@ -850,15 +848,14 @@ impl Game {
         // out rows that already rose pays a little. Clean clears pay zero.
         let charge_gain = cancelled as f32 * ZONE_CHARGE_PER_CANCEL
             + garbage_rows_cleared as f32 * ZONE_CHARGE_PER_GARBAGE_LINE;
-        if charge_gain > 0.0 {
-            if let Some(zone) = &mut self.zone {
-                if zone.active.is_none() {
-                    let was_full = zone.charge >= 1.0;
-                    zone.charge = (zone.charge + charge_gain).min(1.0);
-                    if !was_full && zone.charge >= 1.0 {
-                        self.events.push(GameEvent::ZoneReady);
-                    }
-                }
+        if charge_gain > 0.0
+            && let Some(zone) = &mut self.zone
+            && zone.active.is_none()
+        {
+            let was_full = zone.charge >= 1.0;
+            zone.charge = (zone.charge + charge_gain).min(1.0);
+            if !was_full && zone.charge >= 1.0 {
+                self.events.push(GameEvent::ZoneReady);
             }
         }
 
@@ -1897,7 +1894,7 @@ mod tests {
         let before = game.stats.pieces;
         let mut locked = false;
         for i in 0..(30 * 60) {
-            game.rotate(if i % 2 == 0 { true } else { false });
+            game.rotate(i % 2 == 0);
             game.tick(1.0 / 60.0);
             if game.stats.pieces > before {
                 locked = true;

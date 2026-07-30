@@ -862,7 +862,7 @@ fn refresh_stage_footer(
     };
     let stage = (cursor.0 as u32 + 1).clamp(1, MAX_STAGE);
     let profile = AiProfile::for_stage(stage);
-    let first_to = if stage % 10 == 0 { 3 } else { 2 };
+    let first_to = if stage.is_multiple_of(10) { 3 } else { 2 };
     let status = if stage > unlocked_to {
         s.locked.to_string()
     } else {
@@ -1745,10 +1745,10 @@ fn refresh_settings_labels(
             continue;
         };
         for child in children.iter() {
-            if let Ok(mut text) = labels.get_mut(child) {
-                if **text != label {
-                    **text = label.clone();
-                }
+            if let Ok(mut text) = labels.get_mut(child)
+                && **text != label
+            {
+                **text = label.clone();
             }
         }
     }
@@ -2593,6 +2593,7 @@ fn setup_result_overlay(
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn overlay_input(
     keys: Res<ButtonInput<KeyCode>>,
     pad: Res<PadInput>,

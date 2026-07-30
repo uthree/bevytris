@@ -119,10 +119,10 @@ fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
     }
     // Dev helper: BEVYTRIS_ZONE_CHARGE=1 starts every zone gauge full so
     // zone flows can be tested without earning the charge first.
-    if std::env::var("BEVYTRIS_ZONE_CHARGE").is_ok() {
-        if let Some(zone) = &mut game.zone {
-            zone.charge = 1.0;
-        }
+    if std::env::var("BEVYTRIS_ZONE_CHARGE").is_ok()
+        && let Some(zone) = &mut game.zone
+    {
+        zone.charge = 1.0;
     }
     game
 }
@@ -924,23 +924,23 @@ fn tick_games(
 
     // Race goal detection — checked before top-out handling so a run that
     // finishes on its very last piece still counts as a finish.
-    if *mode == GameMode::Sprint {
-        if let Some((_, _, player)) = query.iter().find(|(_, i, _)| i.0 == 0) {
-            let game = &player.game;
-            if !game.game_over && game.lines >= SPRINT_GOAL_LINES {
-                match_state.agg.absorb(&game.stats);
-                let time = game.stats.time;
-                let ms = (time * 1000.0).round() as u64;
-                let new_best = progress.record_sprint(ms);
-                commands.insert_resource(RaceResult {
-                    time,
-                    new_best,
-                    best_ms: progress.best_sprint_ms.unwrap_or(ms),
-                });
-                commands.insert_resource(SessionResult::RaceDone);
-                next.set(PlayState::Finished);
-                return;
-            }
+    if *mode == GameMode::Sprint
+        && let Some((_, _, player)) = query.iter().find(|(_, i, _)| i.0 == 0)
+    {
+        let game = &player.game;
+        if !game.game_over && game.lines >= SPRINT_GOAL_LINES {
+            match_state.agg.absorb(&game.stats);
+            let time = game.stats.time;
+            let ms = (time * 1000.0).round() as u64;
+            let new_best = progress.record_sprint(ms);
+            commands.insert_resource(RaceResult {
+                time,
+                new_best,
+                best_ms: progress.best_sprint_ms.unwrap_or(ms),
+            });
+            commands.insert_resource(SessionResult::RaceDone);
+            next.set(PlayState::Finished);
+            return;
         }
     }
 
@@ -1035,6 +1035,44 @@ fn round_over_enter(
             }
         });
     }
+}
+
+/// Wait out the intermission (deliberately not skippable: round results
+/// should register before the next countdown starts), then reset both
+/// boards for the next round.
+#[allow(clippy::too_many_arguments)]
+fn round_over_tick(
+    time: Res<Time>,
+    mode: Res<GameMode>,
+    settings: Res<GameSettings>,
+    mut timer: ResMut<RoundOverTimer>,
+    mut match_state: ResMut<MatchState>,
+    mut boards: Query<(
+        &mut GameSession,
+        Option<&mut CpuControlled>,
+        Option<&mut DasState>,
+    )>,
+    mut next: ResMut<NextState<PlayState>>,
+    mut commands: Commands,
+) {
+    if !timer.0.tick(time.delta()).is_finished() {
+        return;
+    }
+
+    let seed: u64 = rand::rng().random();
+    for (mut session, cpu, das) in &mut boards {
+        session.game = new_game(seed, *mode, &settings.custom);
+        if let Some(mut cpu) = cpu {
+            cpu.reset_for_round();
+        }
+        if let Some(mut das) = das {
+            *das = DasState::default();
+        }
+    }
+    match_state.round += 1;
+    commands.remove_resource::<RoundOverTimer>();
+    commands.remove_resource::<LastRound>();
+    next.set(PlayState::Countdown);
 }
 
 #[cfg(test)]
@@ -1145,41 +1183,4 @@ mod tests {
             "sweep {sweep:?} vs close {close:?}"
         );
     }
-}
-
-/// Wait out the intermission (deliberately not skippable: round results
-/// should register before the next countdown starts), then reset both
-/// boards for the next round.
-fn round_over_tick(
-    time: Res<Time>,
-    mode: Res<GameMode>,
-    settings: Res<GameSettings>,
-    mut timer: ResMut<RoundOverTimer>,
-    mut match_state: ResMut<MatchState>,
-    mut boards: Query<(
-        &mut GameSession,
-        Option<&mut CpuControlled>,
-        Option<&mut DasState>,
-    )>,
-    mut next: ResMut<NextState<PlayState>>,
-    mut commands: Commands,
-) {
-    if !timer.0.tick(time.delta()).is_finished() {
-        return;
-    }
-
-    let seed: u64 = rand::rng().random();
-    for (mut session, cpu, das) in &mut boards {
-        session.game = new_game(seed, *mode, &settings.custom);
-        if let Some(mut cpu) = cpu {
-            cpu.reset_for_round();
-        }
-        if let Some(mut das) = das {
-            *das = DasState::default();
-        }
-    }
-    match_state.round += 1;
-    commands.remove_resource::<RoundOverTimer>();
-    commands.remove_resource::<LastRound>();
-    next.set(PlayState::Countdown);
 }

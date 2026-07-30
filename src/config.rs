@@ -679,13 +679,13 @@ impl GameSettings {
             let taken_by_other = Action::ALL
                 .iter()
                 .any(|a| *a != action && settings.key_for(*a) == key);
-            if taken_by_other && !file.bindings.contains_key(&action) {
-                if let Some(free) = bindable_keys()
+            if taken_by_other
+                && !file.bindings.contains_key(&action)
+                && let Some(free) = bindable_keys()
                     .into_iter()
                     .find(|k| Action::ALL.iter().all(|a| settings.key_for(*a) != *k))
-                {
-                    settings.bindings.insert(action, free);
-                }
+            {
+                settings.bindings.insert(action, free);
             }
         }
         // Player 2's set. A file written before local versus existed has
@@ -712,13 +712,13 @@ impl GameSettings {
                 .iter()
                 .any(|a| *a != action && settings.key2_for(*a) == key)
                 || Action::ALL.iter().any(|a| settings.key_for(*a) == key);
-            if clashes {
-                if let Some(free) = bindable_keys().into_iter().find(|k| {
+            if clashes
+                && let Some(free) = bindable_keys().into_iter().find(|k| {
                     Action::ALL.iter().all(|a| settings.key_for(*a) != *k)
                         && Action::PLAYER2.iter().all(|a| settings.key2_for(*a) != *k)
-                }) {
-                    settings.bindings2.insert(action, free);
-                }
+                })
+            {
+                settings.bindings2.insert(action, free);
             }
         }
         // Pad bindings: same restore + collision fixup as the keyboard.
@@ -732,13 +732,13 @@ impl GameSettings {
             let taken_by_other = Action::ALL
                 .iter()
                 .any(|a| *a != action && settings.pad_for(*a) == button);
-            if taken_by_other && !file.pad_bindings.contains_key(&action) {
-                if let Some(free) = bindable_pad_buttons()
+            if taken_by_other
+                && !file.pad_bindings.contains_key(&action)
+                && let Some(free) = bindable_pad_buttons()
                     .into_iter()
                     .find(|b| Action::ALL.iter().all(|a| settings.pad_for(*a) != *b))
-                {
-                    settings.pad_bindings.insert(action, free);
-                }
+            {
+                settings.pad_bindings.insert(action, free);
             }
         }
         settings.das_ms = file.das_ms.clamp(0, 500);

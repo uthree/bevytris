@@ -25,7 +25,10 @@ impl SevenBag {
         Self::new(rand::rng().random())
     }
 
-    pub fn next(&mut self) -> PieceKind {
+    /// Deal the next piece. Not `next`, and not an `Iterator`: this stream
+    /// never ends, and an `Option` that is always `Some` would be an unwrap
+    /// at every call site for nothing.
+    pub fn next_piece(&mut self) -> PieceKind {
         if self.bag.is_empty() {
             self.bag.extend_from_slice(&PieceKind::ALL);
             self.bag.shuffle(&mut self.rng);
@@ -43,7 +46,7 @@ mod tests {
     fn every_bag_contains_all_seven_pieces() {
         let mut bag = SevenBag::new(42);
         for _ in 0..20 {
-            let drawn: HashSet<PieceKind> = (0..7).map(|_| bag.next()).collect();
+            let drawn: HashSet<PieceKind> = (0..7).map(|_| bag.next_piece()).collect();
             assert_eq!(drawn.len(), 7);
         }
     }
@@ -53,7 +56,7 @@ mod tests {
         let mut a = SevenBag::new(7);
         let mut b = SevenBag::new(7);
         for _ in 0..70 {
-            assert_eq!(a.next(), b.next());
+            assert_eq!(a.next_piece(), b.next_piece());
         }
     }
 }

@@ -140,7 +140,7 @@ impl Progress {
 
     /// Record a finished sprint run; returns true on a new best time.
     pub fn record_sprint(&mut self, ms: u64) -> bool {
-        let new_best = self.best_sprint_ms.map_or(true, |best| ms < best);
+        let new_best = self.best_sprint_ms.is_none_or(|best| ms < best);
         if new_best {
             self.best_sprint_ms = Some(ms);
         }
@@ -273,8 +273,10 @@ mod tests {
 
     #[test]
     fn adding_lines_reports_only_real_level_ups() {
-        let mut p = Progress::default();
-        p.zen_lines = 8;
+        let mut p = Progress {
+            zen_lines: 8,
+            ..Default::default()
+        };
         assert!(!p.add_zen_lines(1), "8 -> 9 stays on level 1");
         assert!(p.add_zen_lines(1), "9 -> 10 is a level up");
         assert_eq!(p.zen_level(), 2);
