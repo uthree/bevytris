@@ -7,10 +7,9 @@
 #   A pack is a metadata.json plus standing portraits, an optional cut-in
 #   image, up to 17 named voice clips and 20 spoken numbers.  Real
 #   characters are drawn and voiced by humans; this script fabricates two
-#   obviously-fake stand-ins
-#   ("alice", English/Samantha, and "bob", Japanese/Kyoko) so the loading,
-#   layout, font and audio code can be developed and eyeballed without any
-#   real art existing yet.
+#   obviously-fake stand-ins ("alice", voiced by 四国めたん, and "bob", by
+#   ずんだもん) so the loading, layout, font and audio code can be developed
+#   and eyeballed without any real art existing yet.
 #
 #   The art is deliberately ugly and self-describing: every portrait states
 #   its own id, its intended facing and its own pixel size, and carries a
@@ -21,9 +20,14 @@
 # THE OUTPUT IS INTENTIONALLY GITIGNORED THROWAWAY DATA.
 #   assets/characters/alice/ and assets/characters/bob/ are listed in
 #   .gitignore on purpose.  Nothing under them is a source file: re-run this
-#   script to recreate them byte-for-byte-equivalently at any time.  Do not
-#   commit them, and do not hand-edit them — edit this script instead.
+#   script to recreate them at any time.  Do not commit them, and do not
+#   hand-edit them — edit this script instead.
 #   assets/characters/README.md *is* committed; it documents the format.
+#
+#   Note that "do not commit them" is currently a convention, not a legal
+#   requirement: the voices below carry terms a game can meet (see WHY
+#   VOICEVOX) and the art is our own.  Shipping a pack is a decision about
+#   the *art*, not the audio.
 #
 # USAGE
 #   scripts/make_dummy_characters.sh
@@ -37,9 +41,35 @@
 #       inside it.  See the fixture descriptions printed at run time.
 #
 # REQUIREMENTS
-#   macOS `sips` (SVG -> PNG at exact pixel size) and `say` (text -> WAV).
+#   macOS `sips`, to rasterise the placeholder SVGs at an exact pixel size.
+#   VOICEVOX ENGINE, for the voices — see WHY VOICEVOX below.
 #   On a machine without them (e.g. Linux CI) the script prints a notice and
 #   exits 0 rather than failing the build.
+#
+# WHY VOICEVOX
+#   The voices used to come from macOS `say`.  That was convenient and
+#   completely unshippable: Apple's system voices are licensed for use *on*
+#   a Mac, not for baking into a game someone else downloads, so every clip
+#   the script produced was one that could never leave this machine.
+#
+#   VOICEVOX states its terms plainly instead.  Audio generated from a voice
+#   library may be used commercially and non-commercially as long as the
+#   character is credited — "VOICEVOX:ずんだもん" and so on — which is a
+#   condition a game can actually meet.  The engine is a local HTTP server;
+#   nothing is uploaded and no account is involved.  It also runs on Linux
+#   and Windows, so this script is no longer macOS-only for the audio half.
+#
+#     https://voicevox.hiroshiba.jp/term/        the software terms
+#     https://zunko.jp/con_ongen_kiyaku.html     terms for the voices used here
+#
+#   Each pack records the credit line it owes in its own metadata.json, so
+#   the obligation travels with the files instead of living only in here.
+#
+#   NOTE: the *art* is still procedural placeholder SVG, deliberately.  The
+#   illustrations these characters are usually drawn with are third-party
+#   assets whose terms permit use in a finished work but not redistribution
+#   of the files themselves, which is exactly what committing them to a
+#   public repository would be.  Voices are shippable; art is not yet.
 #
 set -euo pipefail
 
@@ -71,9 +101,63 @@ fi
 # Tool detection.  Missing tools are a soft skip, not a failure.
 # ---------------------------------------------------------------------------
 HAVE_SIPS=1
-HAVE_SAY=1
 command -v sips >/dev/null 2>&1 || HAVE_SIPS=0
-command -v say >/dev/null 2>&1 || HAVE_SAY=0
+
+# VOICEVOX ENGINE speaks over HTTP.  $VOICEVOX_URL points this at an engine
+# that is already running — a Docker container, a remote box, a different
+# port — and is the whole configuration surface.
+VOICEVOX_URL="${VOICEVOX_URL:-http://127.0.0.1:50021}"
+
+# The engine bundled inside the desktop app, which is the one most people
+# have.  Only consulted when nothing is answering already.
+VOICEVOX_BUNDLED='/Applications/VOICEVOX.app/Contents/Resources/vv-engine/run'
+
+# PID of an engine *this script* started, so it is also this script's job to
+# stop it.  An engine that was already up is left exactly as it was found.
+VOICEVOX_PID=''
+
+engine_up() {
+  curl -sS -m 3 "$VOICEVOX_URL/version" >/dev/null 2>&1
+}
+
+stop_engine() {
+  if [ -n "$VOICEVOX_PID" ]; then
+    kill "$VOICEVOX_PID" 2>/dev/null || true
+    wait "$VOICEVOX_PID" 2>/dev/null || true
+    VOICEVOX_PID=''
+  fi
+}
+trap stop_engine EXIT
+
+# Return 0 with an engine reachable at $VOICEVOX_URL, 1 with none available.
+start_engine() {
+  if engine_up; then
+    echo "VOICEVOX ENGINE: already running at $VOICEVOX_URL"
+    return 0
+  fi
+  if [ ! -x "$VOICEVOX_BUNDLED" ]; then
+    return 1
+  fi
+  echo "VOICEVOX ENGINE: starting the one bundled with VOICEVOX.app"
+  "$VOICEVOX_BUNDLED" --host 127.0.0.1 --port 50021 >/dev/null 2>&1 &
+  VOICEVOX_PID=$!
+  # First start loads the models, which is not instant.
+  local i
+  for i in $(seq 1 60); do
+    if engine_up; then
+      echo "VOICEVOX ENGINE: up after ${i}s"
+      return 0
+    fi
+    # A crashed engine will never answer, so stop waiting for it.
+    if ! kill -0 "$VOICEVOX_PID" 2>/dev/null; then
+      VOICEVOX_PID=''
+      return 1
+    fi
+    sleep 1
+  done
+  stop_engine
+  return 1
+}
 
 # ---------------------------------------------------------------------------
 # Palette / typography
@@ -262,26 +346,58 @@ result_svg() {
 SVG
 }
 
-# speak <voice> <text> <outfile>
-# mono 16-bit little-endian PCM in a RIFF/WAVE container.  --data-format is
-# mandatory: without it `say` writes a format Bevy's wav decoder rejects,
-# and an .aiff container does not work at all.
+# speak <style-id> <text> <outfile>
+#
+# Two calls, which is how the engine is designed: /audio_query turns the text
+# into an editable prosody document, /synthesis renders that document.  The
+# document is passed straight through unedited — pitch and speed are the
+# character's own, and second-guessing them is how a voice pack starts
+# sounding like a robot reading a phrasebook.
+#
+# The engine returns mono 16-bit PCM in a RIFF/WAVE container at 24 kHz,
+# which is exactly what Bevy's wav decoder wants, so there is nothing to
+# convert.  `-G` puts the parameters in the query string while `-X POST`
+# keeps the method the engine expects; this is pure curl on purpose, so the
+# script gains no new dependency.
 speak() {
-  local voice="$1" line="$2" out="$3"
-  say -v "$voice" -o "$out" --data-format=LEI16@22050 "$line"
+  local style="$1" line="$2" out="$3"
+  local query="$out.query.json"
+  if ! curl -sS -f -m 30 -G \
+      --data-urlencode "text=$line" \
+      --data-urlencode "speaker=$style" \
+      -X POST "$VOICEVOX_URL/audio_query" -o "$query"; then
+    echo "make_dummy_characters.sh: audio_query failed for $line" >&2
+    /bin/rm -f "$query"
+    return 1
+  fi
+  if ! curl -sS -f -m 60 -X POST \
+      -H 'Content-Type: application/json' --data-binary "@$query" \
+      "$VOICEVOX_URL/synthesis?speaker=$style" -o "$out"; then
+    echo "make_dummy_characters.sh: synthesis failed for $line" >&2
+    /bin/rm -f "$query" "$out"
+    return 1
+  fi
+  /bin/rm -f "$query"
 }
 
-# write_metadata <dir> <display_name> <ascii_name> <flavor> <alpha> <gain>
+# write_metadata <dir> <display_name> <ascii_name> <flavor> <alpha> <gain> [credit]
 # The folder name is the id; there is deliberately no id field.
+#
+# `author` doubles as the credit line the pack owes.  VOICEVOX requires the
+# character to be named wherever the audio is used, and the picker already
+# shows this field under the focused character — so a pack that speaks with
+# a borrowed voice says whose it is, on screen, without anybody having to
+# remember to add it somewhere else.
 write_metadata() {
   local dir="$1" display_name="$2" ascii_name="$3" flavor="$4" alpha="$5" gain="$6"
+  local credit="${7:-scripts/make_dummy_characters.sh}"
   cat > "$dir/metadata.json" <<JSON
 {
   "schema": 1,
   "display_name": "$display_name",
   "ascii_name": "$ascii_name",
   "flavor": "$flavor",
-  "author": "scripts/make_dummy_characters.sh",
+  "author": "$credit",
   "portrait_alpha": $alpha,
   "voice_gain": $gain
 }
@@ -450,10 +566,12 @@ SVG
   mkdir -p "$outdir/misspelled_voice/voices"
   write_metadata "$outdir/misspelled_voice" "$good_meta_display" "MISSPELLED" \
     "has tetriss.wav, not tetris.wav" "0.2" "1.0"
-  if [ "$HAVE_SAY" -eq 1 ]; then
-    speak Samantha "Tetris!" "$outdir/misspelled_voice/voices/tetriss.wav"
+  # The fixture only needs a *valid* clip under an invalid name, so a stub
+  # is a fine substitute when there is no engine to ask.
+  if engine_up || start_engine; then
+    speak 3 "テトリス！" "$outdir/misspelled_voice/voices/tetriss.wav"
   else
-    printf 'RIFF----WAVE (stub: say unavailable)' \
+    printf 'RIFF----WAVE (stub: no VOICEVOX ENGINE available)' \
       > "$outdir/misspelled_voice/voices/tetriss.wav"
   fi
   echo "  misspelled_voice/          a valid clip at voices/tetriss.wav; tetris.wav is absent."
@@ -527,7 +645,7 @@ JSON
 # ===========================================================================
 make_character() {
   local id="$1" display_name="$2" ascii_name="$3" flavor="$4" \
-        voice="$5" lang="$6" name1="$7" name2="$8" name_font="$9" \
+        style="$5" credit="$6" name1="$7" name2="$8" name_font="$9" \
         body="${10}" accent="${11}" head="${12}" text="${13}" muted="${14}" \
         alpha="${15}" gain="${16}"
 
@@ -535,7 +653,7 @@ make_character() {
   /bin/rm -rf "$dir"
   mkdir -p "$dir/images" "$dir/voices"
 
-  write_metadata "$dir" "$display_name" "$ascii_name" "$flavor" "$alpha" "$gain"
+  write_metadata "$dir" "$display_name" "$ascii_name" "$flavor" "$alpha" "$gain" "$credit"
 
   local tmp_svg="$dir/.render.svg"
   local facing
@@ -556,29 +674,39 @@ make_character() {
   done
   /bin/rm -f "$tmp_svg"
 
-  local kind en ja line
+  # Every line is spoken in Japanese: VOICEVOX's libraries are Japanese
+  # voices, and handing one an English sentence gets it read out as
+  # katakana. The English column stays in the tables above because it is
+  # what documents what each clip is *for*.
+  local kind en ja
   echo "$VOICE_LINES" | while IFS='|' read -r kind en ja; do
     [ -n "$kind" ] || continue
-    if [ "$lang" = "ja" ]; then line="$ja"; else line="$en"; fi
-    speak "$voice" "$line" "$dir/voices/$kind.wav"
+    speak "$style" "$ja" "$dir/voices/$kind.wav"
   done
   echo "$COUNT_LINES" | while IFS='|' read -r kind en ja; do
     [ -n "$kind" ] || continue
-    if [ "$lang" = "ja" ]; then line="$ja"; else line="$en"; fi
-    speak "$voice" "$line" "$(printf '%s/voices/count_%02d.wav' "$dir" "$kind")"
+    speak "$style" "$ja" "$(printf '%s/voices/count_%02d.wav' "$dir" "$kind")"
   done
 
   local named counts
   named="$(echo "$VOICE_LINES" | grep -c '|')"
   counts="$(echo "$COUNT_LINES" | grep -c '|')"
-  echo "  $id: metadata.json, 6 images, $named voices + $counts numbers ($voice)"
+  echo "  $id: metadata.json, 6 images, $named voices + $counts numbers ($credit)"
 }
 
 make_all() {
-  if [ "$HAVE_SIPS" -eq 0 ] || [ "$HAVE_SAY" -eq 0 ]; then
-    echo "make_dummy_characters.sh: skipping — this needs macOS tools that are not here."
-    [ "$HAVE_SIPS" -eq 0 ] && echo "  missing: sips (SVG -> PNG)"
-    [ "$HAVE_SAY" -eq 0 ] && echo "  missing: say  (text -> WAV)"
+  local missing=0
+  if [ "$HAVE_SIPS" -eq 0 ]; then
+    echo "make_dummy_characters.sh: missing sips (SVG -> PNG), which is macOS-only."
+    missing=1
+  fi
+  if ! start_engine; then
+    echo "make_dummy_characters.sh: no VOICEVOX ENGINE at $VOICEVOX_URL."
+    echo "  Open VOICEVOX.app, or run the engine yourself and set VOICEVOX_URL:"
+    echo "    docker run --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest"
+    missing=1
+  fi
+  if [ "$missing" -eq 1 ]; then
     echo "  The dummy pack is throwaway test data; skipping it is not an error."
     exit 0
   fi
@@ -588,21 +716,26 @@ make_all() {
   echo "  $CHARACTERS_DIR"
   echo
 
-  # alice — English, teal.  ASCII display name.
+  # Two voices that sound nothing like each other, so a clip playing on the
+  # wrong board is audible rather than merely wrong.  The style numbers are
+  # VOICEVOX style ids; `curl $VOICEVOX_URL/speakers` lists them all.
+  #
+  # alice — 四国めたん ノーマル, teal.  ASCII display name.
   make_character alice \
     "DUMMY ALICE" "DUMMY ALICE" \
-    "Placeholder pilot. Speaks English, points right." \
-    Samantha en \
+    "テスト用のダミーキャラ。右を向いている。" \
+    2 "VOICEVOX:四国めたん" \
     "DUMMY" "ALICE" "$FONT_ASCII" \
     "#123f3a" "#39e6b8" "#1c5d55" "#f2fffb" "#9fe8d6" \
     "0.20" "1.0"
 
-  # bob — Japanese, magenta.  Non-ASCII display name on purpose: this is what
-  # exercises the game's Japanese pixel-font path and the ascii_name fallback.
+  # bob — ずんだもん ノーマル, magenta.  Non-ASCII display name on purpose:
+  # this is what exercises the game's Japanese pixel-font path and the
+  # ascii_name fallback.
   make_character bob \
     "ダミー・ボブ" "DUMMY BOB" \
-    "テスト用のダミーキャラ。日本語をしゃべる。" \
-    Kyoko ja \
+    "テスト用のダミーキャラ。左を向いている。" \
+    3 "VOICEVOX:ずんだもん" \
     "ダミー" "ボブ" "$FONT_JA" \
     "#3a1240" "#ff5cc8" "#571a5e" "#fff2fb" "#f0a8dd" \
     "0.20" "1.0"

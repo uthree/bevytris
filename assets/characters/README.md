@@ -145,17 +145,50 @@ Mono 16-bit little-endian PCM in a RIFF/WAVE container. That is what the
 `wav` feature of Bevy's audio backend decodes. Anything else — MP3, IEEE
 float samples, an AIFF container with a `.wav` extension — will not play.
 
-Recording one with the macOS `say` command (the `--data-format` flag is
-mandatory; `.aiff` output does not work):
+Sample rate is up to you; the dummy packs are 24 kHz.
+
+Beware of padding chunks. macOS `say`, for one, writes a `JUNK` block before
+`fmt `, which is legal RIFF and is skipped correctly by the decoder — but it
+does mean `fmt ` is not at byte 12. Do not hand-write a parser that assumes
+it is.
+
+### Synthesising with VOICEVOX
+
+[VOICEVOX](https://voicevox.hiroshiba.jp/) is a free Japanese text-to-speech
+engine, and it is what the dummy packs are voiced with. It runs as a local
+HTTP server — start `VOICEVOX.app`, or
 
 ```sh
-say -v Samantha -o ready.wav --data-format=LEI16@22050 "Here we go"
-say -v Kyoko    -o ready.wav --data-format=LEI16@22050 "いくよー"
+docker run --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest
 ```
 
-`say` writes a `JUNK` padding chunk before `fmt `, which is legal RIFF and is
-skipped correctly by the decoder — but it does mean `fmt ` is not at byte 12.
-Do not hand-write a parser that assumes it is.
+Two calls per clip. `/audio_query` turns text into a prosody document,
+`/synthesis` renders it, and the result is already the exact WAV format
+above:
+
+```sh
+curl -s -G --data-urlencode "text=いくよー" --data-urlencode "speaker=3" \
+  -X POST http://127.0.0.1:50021/audio_query -o q.json
+curl -s -X POST -H 'Content-Type: application/json' --data-binary @q.json \
+  "http://127.0.0.1:50021/synthesis?speaker=3" -o ready.wav
+```
+
+`speaker` is a *style* id, not a character id — one character usually has
+several. `curl -s http://127.0.0.1:50021/speakers` lists every one.
+
+**Credit is not optional.** Audio generated from a VOICEVOX voice library
+may be used commercially and non-commercially, but only if the character is
+named wherever it is used — `VOICEVOX:ずんだもん`, and one line per character
+you used. Put it in `metadata.json`'s `author` field: the picker shows that
+under the focused character, so the credit ships with the pack instead of
+depending on somebody remembering to write it down elsewhere.
+
+The precise terms differ per character. Read the one you are using:
+`curl -s "http://127.0.0.1:50021/speaker_info?speaker_uuid=<uuid>" | jq -r .policy`
+prints it, and the character's page under
+<https://voicevox.hiroshiba.jp/> links the full document. A few characters
+add conditions — 青山龍星, for instance, requires prior contact if a company
+is involved.
 
 ## Art notes
 
@@ -167,9 +200,15 @@ art; the board is drawn over the middle of it.
 
 `alice` and `bob` are generated placeholders, **not** real content:
 
-* `alice` — `DUMMY ALICE`, English (Samantha), teal.
-* `bob` — `ダミー・ボブ`, Japanese (Kyoko), magenta. Non-ASCII display name on
-  purpose, so the pixel-font and `ascii_name` fallback paths get exercised.
+* `alice` — `DUMMY ALICE`, teal, voiced by `VOICEVOX:四国めたん`.
+* `bob` — `ダミー・ボブ`, magenta, voiced by `VOICEVOX:ずんだもん`. Non-ASCII
+  display name on purpose, so the pixel-font and `ascii_name` fallback paths
+  get exercised.
+
+The art is deliberately ugly procedural SVG that states its own id, facing
+and pixel size, so a portrait drawn on the wrong side or at the wrong scale
+says so out loud. The voices are real, because there is no such thing as
+placeholder audio you can hear a bug in.
 
 They are listed in `.gitignore` and are **not** committed. Regenerate them with:
 
@@ -178,9 +217,11 @@ scripts/make_dummy_characters.sh
 ```
 
 Do not hand-edit anything under `assets/characters/alice/` or
-`assets/characters/bob/` — edit the script. On a machine without `sips` and
-`say` the script prints a notice and exits 0, so the packs are simply absent;
-the game must cope with that.
+`assets/characters/bob/` — edit the script. It needs `sips` (macOS) for the
+art and a VOICEVOX ENGINE for the voices; it starts the one inside
+`VOICEVOX.app` if it finds it, honours `VOICEVOX_URL` if you are running your
+own, and prints a notice and exits 0 if neither is there. The packs are then
+simply absent, which the game must cope with.
 
 For negative-path testing there is a second mode that writes deliberately
 broken packs (malformed JSON, a JPEG named `.png`, out-of-range numbers, a
