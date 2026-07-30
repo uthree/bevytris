@@ -150,6 +150,37 @@ NEG="lowres, bad anatomy, bad hands, mitten hands, blob hands, malformed hands, 
 # somebody else.
 SEED="${SEED:-31415}"
 
+# A seed pins the composition, not every pixel: the same seed re-run on the
+# same machine lands on the same picture with small differences in the fine
+# detail, because GPU sampling is not bit-reproducible. So re-running this
+# script rewrites art that nobody asked it to change. Regenerate the whole
+# cast when that is what you mean, and pass the ids you want otherwise.
+#
+# ..and this is for a seed that drew something wrong.
+#
+# `id:pose|seed`, one per line. A re-roll is a last resort and it is written
+# down rather than done by hand, because an image nobody can regenerate is
+# an image that quietly rots: the next person to run this script has to get
+# the same six characters out of it.
+#
+# Keep this short. If a pose needs re-rolling for every character then the
+# prompt is what is wrong, not the seed.
+SEED_OVERRIDES='
+vio:win|9001
+'
+# vio:win — 31415 drew her twice, a second head over her shoulder. The
+# negative already says `duplicate head, extra head` and the sampler did it
+# anyway, which is a seed problem rather than a prompt one.
+
+# seed_for <id> <pose>
+seed_for() {
+  local want="$1:$2" key seed
+  while IFS='|' read -r key seed; do
+    [ "$key" = "$want" ] && { echo "$seed"; return; }
+  done <<<"$SEED_OVERRIDES"
+  echo "$SEED"
+}
+
 # ---------------------------------------------------------------------------
 # Voice lines — one per VoiceKind the game knows about, plus the numbers.
 # Adding a kind in src/character.rs means adding a line here.
@@ -292,7 +323,7 @@ build_art() {
     "$SCRIPT_DIR/make_character_art.sh" --generate \
       "$STYLE, $(pose_prompt "$pose"), $design$([ "$pose" = lose ] && echo ", $defeat")" \
       "$(pose_negative "$pose")" \
-      "$SEED" "$hero/$pose.png" $(pose_size "$pose") || {
+      "$(seed_for "$id" "$pose")" "$hero/$pose.png" $(pose_size "$pose") || {
         /bin/rm -rf "$hero"; return 1;
       }
   done

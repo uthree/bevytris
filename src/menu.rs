@@ -1879,6 +1879,41 @@ fn item_count(items: &Query<(Entity, &MenuItem, &Interaction)>) -> usize {
     items.iter().count()
 }
 
+/// Where a vertical step lands in a wrapped picker grid.
+///
+/// `(cursor + cols) % count` is the obvious version, and it is wrong twice
+/// over as soon as the last row is not full. Six characters over four
+/// columns wraps tile 2 to tile 0 — a column to the left of where it
+/// started — so the cursor slides diagonally down the grid and pressing down
+/// then up does not come back to where it was. And the grid centres its
+/// short last row, so the tile *below* tile 2 is not the one four along: it
+/// is wherever the centring put it.
+///
+/// So this works in visual columns. Find which column the cursor is standing
+/// in given how far its own row is indented, then land on whatever the
+/// target row has nearest that column.
+fn grid_step(cursor: usize, count: usize, cols: usize, delta: isize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let cols = cols.max(1);
+    let rows = count.div_ceil(cols);
+    // One row has no other row to step to, and a picker that ignored up and
+    // down entirely would read as broken. Walk one tile instead.
+    if rows == 1 {
+        return (cursor as isize + delta).rem_euclid(count as isize) as usize;
+    }
+    // How many columns `justify_content: Center` indents a row by.
+    let indent = |row: usize| (cols - (count - row * cols).min(cols)) / 2;
+
+    let row = cursor / cols;
+    let column = indent(row) + cursor % cols;
+    let target = (row as isize + delta).rem_euclid(rows as isize) as usize;
+    let width = (count - target * cols).min(cols);
+    let landing = column.saturating_sub(indent(target)).min(width - 1);
+    target * cols + landing
+}
+
 fn menu_keyboard_nav(
     keys: Res<ButtonInput<KeyCode>>,
     pad: Res<PadInput>,
@@ -1898,31 +1933,25 @@ fn menu_keyboard_nav(
     // move the cursor instead of adjusting values. Deriving `grid` from the
     // step is what keeps left/right from being read as a value adjustment on
     // any screen that gains a grid later.
-    let step = match *activate.app_state.get() {
+    let cols = match *activate.app_state.get() {
         AppState::StageSelect | AppState::ZoneSelect => STAGE_COLUMNS,
         AppState::CharacterSelect => CHARACTER_COLUMNS,
         _ => 1,
     };
-    let grid = step > 1;
+    let grid = cols > 1;
 
     let down = keys.just_pressed(activate.settings.ui_key(UiAction::Down)) || pad.just_pressed(PadAction::Down);
     let up = keys.just_pressed(activate.settings.ui_key(UiAction::Up)) || pad.just_pressed(PadAction::Up);
     let right = keys.just_pressed(activate.settings.ui_key(UiAction::Right)) || pad.just_pressed(PadAction::Right);
     let left = keys.just_pressed(activate.settings.ui_key(UiAction::Left)) || pad.just_pressed(PadAction::Left);
 
-    // A grid whose whole roster fits on one row has no rows to jump
-    // between, so vertical movement walks one tile at a time instead.
-    // Without this, `count - step` underflows — 30 stages over 6 columns
-    // never could, but a picker with two characters over four columns
-    // does, and in a debug build that is a panic rather than a wrap.
-    let vstep = if count <= step { 1 } else { step };
     let mut moved = false;
     if down {
-        cursor.0 = (cursor.0 + vstep) % count;
+        cursor.0 = grid_step(cursor.0, count, cols, 1);
         moved = true;
     }
     if up {
-        cursor.0 = (cursor.0 as i64 - vstep as i64).rem_euclid(count as i64) as usize;
+        cursor.0 = grid_step(cursor.0, count, cols, -1);
         moved = true;
     }
     if grid {
@@ -3117,22 +3146,58 @@ mod picker_tests {
         // The grid step is a whole row wide, so a roster shorter than one
         // row used to underflow the wrap — a panic in a debug build, on the
         // very first Up press of a fresh install.
-        for count in 1..=(CHARACTER_COLUMNS * 2 + 1) {
-            let vstep = if count <= CHARACTER_COLUMNS {
-                1
-            } else {
-                CHARACTER_COLUMNS
-            };
+        for count in 1..=(CHARACTER_COLUMNS * 3 + 1) {
             for cursor in 0..count {
-                let up = (cursor as i64 - vstep as i64).rem_euclid(count as i64) as usize;
-                let down = (cursor + vstep) % count;
-                assert!(up < count, "up left the grid: {count} items, cursor {cursor}");
-                assert!(down < count, "down left the grid");
+                for delta in [1, -1] {
+                    let landed = grid_step(cursor, count, CHARACTER_COLUMNS, delta);
+                    assert!(landed < count, "{count} items, {cursor} by {delta} left the grid");
+                }
             }
             // And with a single row, up and down still move somewhere.
             if count > 1 && count <= CHARACTER_COLUMNS {
-                assert_ne!(vstep % count, 0, "a single row must still move");
+                assert_ne!(grid_step(0, count, CHARACTER_COLUMNS, 1), 0, "a single row must still move");
             }
+        }
+    }
+
+    #[test]
+    fn vertical_movement_stays_in_its_column() {
+        // The bug this is here for: with six characters over four columns,
+        // `(cursor + cols) % count` walked tile 2 to tile 0, so holding down
+        // dragged the cursor sideways across the grid.
+        //
+        //   0 1 2 3
+        //    4 5        <- centred, so 4 is under 1 and 5 is under 2
+        let down = |c| grid_step(c, 6, 4, 1);
+        let up = |c| grid_step(c, 6, 4, -1);
+        assert_eq!(down(1), 4, "the tile under ASH is ROSA");
+        assert_eq!(down(2), 5, "the tile under COBALT is VIO");
+        assert_eq!(up(4), 1);
+        assert_eq!(up(5), 2);
+        // Columns with nothing under them lean to the nearest tile that is
+        // there rather than jumping the width of the grid.
+        assert_eq!(down(0), 4);
+        assert_eq!(down(3), 5);
+        // And the wrap round the bottom keeps the column too.
+        assert_eq!(down(4), 1);
+        assert_eq!(down(5), 2);
+    }
+
+    #[test]
+    fn a_full_grid_steps_a_whole_row() {
+        // The stage pickers are 30 over 6, which divides — the fix must not
+        // have changed them.
+        for cursor in 0..30 {
+            assert_eq!(grid_step(cursor, 30, 6, 1), (cursor + 6) % 30);
+            assert_eq!(grid_step(cursor, 30, 6, -1), (cursor + 24) % 30);
+        }
+    }
+
+    #[test]
+    fn a_plain_list_still_walks_one_at_a_time() {
+        for cursor in 0..7 {
+            assert_eq!(grid_step(cursor, 7, 1, 1), (cursor + 1) % 7);
+            assert_eq!(grid_step(cursor, 7, 1, -1), (cursor + 6) % 7);
         }
     }
 
