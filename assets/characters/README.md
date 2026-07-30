@@ -13,7 +13,8 @@ assets/characters/<id>/
 ├── images/
 │   ├── standing_right.png           512x1024, character faces RIGHT
 │   ├── standing_left.png            512x1024, character faces LEFT
-│   ├── cutin.png                    optional, wide; the big-move cut-in
+│   ├── cutin.png                    optional; the big-move cut-in, drawn
+│   │                                behind the boards as scenery
 │   ├── icon.png                     optional, square-ish; the picker tile
 │   ├── win.png                      optional; pose held on a win
 │   └── lose.png                     optional; pose held on a loss
@@ -73,7 +74,7 @@ The other three are pure extras and each falls back:
 
 | file | used for | falls back to |
 | --- | --- | --- |
-| `cutin.png` | the strip along the bottom of the screen on a TETRIS, T-Spin Double/Triple, Perfect Clear, or a zone release clearing 5+ lines | the standing art |
+| `cutin.png` | drawn large *behind* the boards on a TETRIS, T-Spin Double/Triple, Perfect Clear, or a zone release clearing 5+ lines, washed with that move's colour | the standing art |
 | `icon.png` | the character picker tile | the standing art |
 | `win.png` / `lose.png` | the pose held on the board while the result is up, next to the WIN/LOSE lettering | the other one, then the standing art |
 

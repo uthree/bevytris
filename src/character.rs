@@ -139,19 +139,9 @@ impl CutInKind {
         }
     }
 
-    /// Shown on the cut-in itself. English on purpose: these are the
-    /// game's own move names, which the rest of the UI also leaves
-    /// untranslated (see the note at the top of `i18n.rs`).
-    fn label(self) -> &'static str {
-        match self {
-            CutInKind::Tetris => "TETRIS",
-            CutInKind::TSpinDouble => "T-SPIN DOUBLE",
-            CutInKind::TSpinTriple => "T-SPIN TRIPLE",
-            CutInKind::ZoneRelease => "ZONE RELEASE",
-            CutInKind::PerfectClear => "PERFECT CLEAR",
-        }
-    }
-
+    /// The colour the art is washed with, so a glance says which move it
+    /// was. The move's *name* is not drawn here — the clear banners over
+    /// the board already announce it, and this is scenery now.
     fn tint(self) -> Color {
         match self {
             CutInKind::Tetris => Color::srgb(0.35, 0.85, 1.0),
@@ -1002,32 +992,49 @@ fn fit_portraits(
 // The cut-in
 // ---------------------------------------------------------------------------
 
-/// UI draws after the whole 2D pass, so a cut-in here is above every
-/// world-space effect including the full-screen flashes that fire on
-/// exactly these moments. 20 clears the pause overlay (10) and stays under
-/// the BGM toast (30).
-const CUTIN_Z: i32 = 20;
-
-/// How long the whole gesture lasts, and how much of that is the slide in
-/// and back out. It was under a second when the cut-in sat across the
-/// middle of the screen, where every extra frame was a frame of the field
-/// the player could not see. Down in the corner it costs nothing, so it
-/// now stays long enough to actually read the name on it.
-const CUTIN_LIFE: f32 = 2.0;
-const CUTIN_SLIDE_IN: f32 = 0.16;
-const CUTIN_SLIDE_OUT: f32 = 0.22;
-
-/// How tall the cut-in strip is, as a fraction of the window.
+/// Where a cut-in sits: *behind* the boards.
 ///
-/// It lives along the bottom edge and nowhere else. The first version put
-/// a big card across the middle of the screen, which looked great and was
-/// unplayable: it covered the field for most of a second every time the
-/// player did the thing it was congratulating them for. The boards reach
-/// down to roughly 88% of the window in versus and 94% in solo, so a
-/// strip this size sits under the versus fields entirely and only grazes
-/// the very bottom of a solo one. A celebration must not cost the player
-/// the board.
-const CUTIN_HEIGHT: f32 = 12.0;
+/// This has been three things. A card across the middle of the screen
+/// covered the field for a second every time the player earned it. A small
+/// strip in the corner fixed that and looked like a phone notification.
+/// So it is scenery now — big, behind everything, part of the background
+/// rather than a thing pasted over the game. That also decides the
+/// technology: bevy_ui draws after the whole 2D pass, so a UI node is in
+/// front of every sprite whatever its z. Only a world-space sprite can be
+/// behind a board.
+///
+/// The band is wide open. Background scenes live at z -18 and below, and
+/// the shallowest thing a board draws is its own opaque backdrop at 0.5.
+const CUTIN_Z: f32 = -1.0;
+
+/// How long the whole thing lasts, and how much of that is the fade in and
+/// out. Behind the field it costs the player nothing, so it can hold.
+const CUTIN_LIFE: f32 = 2.0;
+const CUTIN_FADE_IN: f32 = 0.16;
+const CUTIN_FADE_OUT: f32 = 0.45;
+
+/// The 1280x720 composition the camera is built around (`setup_camera`
+/// uses `ScalingMode::AutoMin` on exactly this), inset so a cut-in never
+/// runs off the edge.
+const CUTIN_BOX: Vec2 = Vec2::new(1240.0, 690.0);
+
+/// How solid the art gets at its peak. A board's backdrop is opaque, so in
+/// versus most of this is hidden behind the two fields and only the edges
+/// and the middle gap show it — which is the trade for it never being in
+/// the way. In solo, with one field and a lot more spare screen, it reads
+/// clearly.
+///
+/// Deliberately not pushed into HDR the way the rest of this screen is.
+/// Everything else here is neon line art that is *supposed* to bloom; a
+/// character drawn at full-screen size and then bloomed washes out the HUD
+/// sitting on top of it, and a background that outshines the numbers the
+/// player is reading is a background that has misunderstood its job.
+const CUTIN_ALPHA: f32 = 0.7;
+const CUTIN_GLOW: f32 = 1.0;
+
+/// How far it drifts open while it holds. Just enough that it is moving.
+const CUTIN_DRIFT: f32 = 0.05;
+
 /// A zone release also fires the gold line tally, which is the bigger
 /// moment; let it peak first.
 const CUTIN_DELAY_ZONE: f32 = 0.45;
@@ -1035,7 +1042,13 @@ const CUTIN_DELAY_ZONE: f32 = 0.45;
 #[derive(Component)]
 struct CutIn {
     life: f32,
-    from_left: bool,
+    /// Size at full bloom, before the drift is applied.
+    size: Vec2,
+    /// The move's colour. Kept here rather than read back off the sprite:
+    /// the tint is written through `emissive`, and recovering it from a
+    /// value that has already been multiplied would multiply it again on
+    /// every frame.
+    tint: Color,
     /// How loudly the moment on screen insists. Kept on the entity rather
     /// than in the queue resource so it cannot outlive it: the cut-in is
     /// `DespawnOnExit(AppState::Playing)`, and a flag in a resource would
@@ -1095,6 +1108,8 @@ fn spawn_cutins(
     chosen: Res<MatchCharacters>,
     server: Res<AssetServer>,
     mut assets: ResMut<CharacterAssets>,
+    images: Res<Assets<Image>>,
+    boards: Query<(&BoardIndex, &Transform)>,
     live: Query<Entity, With<CutIn>>,
 ) {
     let Some((delay, slot, kind)) = queue.pending else {
@@ -1107,134 +1122,86 @@ fn spawn_cutins(
     queue.pending = None;
     // `slot` is a board, not a roster entry — the two only agree when the
     // player happens to have picked the first character installed.
-    let Some(character) = chosen.sides[slot.min(1)].and_then(|i| roster.get(i)) else {
+    let slot = slot.min(1);
+    let Some(character) = chosen.sides[slot].and_then(|i| roster.get(i)) else {
         return;
     };
+    let Some(path) = character
+        .cutin
+        .as_deref()
+        .or_else(|| character.standing_for(slot))
+    else {
+        return;
+    };
+    let image = assets.image(&server, path);
     for entity in &live {
         commands.entity(entity).despawn();
     }
     debug!("cut-in {kind:?} for {} on slot {slot}", character.id);
-    let art = character
-        .cutin
-        .as_deref()
-        .or_else(|| character.standing_for(slot))
-        .map(|path| assets.image(&server, path));
-    // The left-hand board's character slides in from the left.
-    let from_left = slot != 1;
-    let tint = kind.tint();
-    commands
-        .spawn((
-            // A transparent full-width strip along the bottom; the card
-            // inside it hugs the edge the character's own board is on, so
-            // the two sides never collide and neither covers a field.
-            Node {
-                position_type: PositionType::Absolute,
-                left: percent(0),
-                bottom: percent(0),
-                width: percent(100),
-                height: percent(CUTIN_HEIGHT),
-                align_items: AlignItems::FlexEnd,
-                justify_content: if from_left {
-                    JustifyContent::FlexStart
-                } else {
-                    JustifyContent::FlexEnd
-                },
-                ..default()
-            },
-            GlobalZIndex(CUTIN_Z),
-            Pickable::IGNORE,
-            CutIn {
-                life: CUTIN_LIFE,
-                from_left,
-                priority: kind.priority(),
-            },
-            DespawnOnExit(AppState::Playing),
-        ))
-        .with_children(|strip| {
-            strip
-                .spawn((
-                    Node {
-                        height: percent(100),
-                        align_items: AlignItems::Center,
-                        column_gap: px(14),
-                        padding: UiRect::axes(px(16), px(6)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.02, 0.02, 0.05, 0.72)),
-                    Pickable::IGNORE,
-                ))
-                .with_children(|parent| {
-            if let Some(image) = art {
-                parent.spawn((
-                    // Auto width against a fixed height keeps whatever
-                    // aspect the pack drew; bevy_ui measures the image.
-                    ImageNode::new(image),
-                    Node {
-                        height: percent(94),
-                        ..default()
-                    },
-                    Pickable::IGNORE,
-                ));
-            }
-            parent
-                .spawn((
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(2),
-                        ..default()
-                    },
-                    Pickable::IGNORE,
-                ))
-                .with_children(|text| {
-                    text.spawn((
-                        Text::new(kind.label()),
-                        TextFont {
-                            font_size: FontSize::Px(22.0),
-                            ..default()
-                        },
-                        TextColor(emissive(tint, 1.6)),
-                    ));
-                    text.spawn((
-                        Text::new(character.display_name.clone()),
-                        TextFont {
-                            font_size: FontSize::Px(15.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.85, 0.9, 1.0)),
-                    ));
-                });
-                });
-        });
+
+    // Fit inside the composition, preserving whatever aspect the pack drew.
+    // The art is preloaded when the match starts, so this is measured once
+    // here rather than deferred the way the board portrait has to be.
+    let native = images
+        .get(&image)
+        .map(|i| i.size_f32())
+        .filter(|s| s.x > 0.0 && s.y > 0.0)
+        .unwrap_or(Vec2::new(1024.0, 512.0));
+    let scale = (CUTIN_BOX.x / native.x).min(CUTIN_BOX.y / native.y);
+    let size = native * scale;
+    // Centred on its owner's board, then pulled back on screen: wide art
+    // ends up middle-of-screen, a narrow portrait stands over the board it
+    // belongs to.
+    let anchor = boards
+        .iter()
+        .find(|(index, _)| index.0.min(1) == slot)
+        .map(|(_, tf)| tf.translation.x)
+        .unwrap_or(0.0);
+    let room = (CUTIN_BOX.x - size.x).max(0.0) / 2.0;
+    let x = anchor.clamp(-room, room);
+    commands.spawn((
+        Sprite {
+            image,
+            custom_size: Some(size),
+            // The move's colour, so a glance says which one it was. Pushed
+            // into HDR because everything else on this screen blooms.
+            color: emissive(kind.tint().with_alpha(0.0), CUTIN_GLOW),
+            ..default()
+        },
+        Transform::from_xyz(x, 0.0, CUTIN_Z),
+        CutIn {
+            life: CUTIN_LIFE,
+            size,
+            tint: kind.tint(),
+            priority: kind.priority(),
+        },
+        DespawnOnExit(AppState::Playing),
+    ));
 }
 
-/// Slide in, hold, slide out. Ungated on purpose, like every other
+/// Bloom in, drift, fade out. Ungated on purpose, like every other
 /// transient in this game: a cut-in caught by a pause finishes rather than
-/// freezing halfway across the screen.
+/// freezing halfway.
 fn update_cutins(
     mut commands: Commands,
     time: Res<Time>,
-    mut cutins: Query<(Entity, &mut CutIn, &mut Node)>,
+    mut cutins: Query<(Entity, &mut CutIn, &mut Sprite, &mut Transform)>,
 ) {
-    for (entity, mut cutin, mut node) in &mut cutins {
+    for (entity, mut cutin, mut sprite, mut transform) in &mut cutins {
         cutin.life -= time.delta_secs();
         if cutin.life <= 0.0 {
             commands.entity(entity).despawn();
             continue;
         }
-        // Absolute seconds, not fractions of the life: the slide should
-        // look the same however long the card holds for.
+        // Absolute seconds, not fractions of the life: the fade should look
+        // the same however long the art holds for.
         let elapsed = CUTIN_LIFE - cutin.life;
-        let travel = if elapsed < CUTIN_SLIDE_IN {
-            1.0 - elapsed / CUTIN_SLIDE_IN
-        } else if cutin.life < CUTIN_SLIDE_OUT {
-            1.0 - cutin.life / CUTIN_SLIDE_OUT
-        } else {
-            0.0
-        };
-        // The strip is transparent, so sliding it takes the card with it
-        // and nothing has to fade.
-        let offset = travel * 110.0;
-        node.left = percent(if cutin.from_left { -offset } else { offset });
+        let fade = (elapsed / CUTIN_FADE_IN).min(cutin.life / CUTIN_FADE_OUT).min(1.0);
+        sprite.color = emissive(cutin.tint.with_alpha(CUTIN_ALPHA * fade), CUTIN_GLOW);
+        // Opening slowly is what keeps it from reading as a static overlay.
+        let drift = 1.0 + CUTIN_DRIFT * (elapsed / CUTIN_LIFE);
+        sprite.custom_size = Some(cutin.size * drift);
+        transform.translation.z = CUTIN_Z;
     }
 }
 
