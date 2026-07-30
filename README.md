@@ -168,6 +168,13 @@ piece.
 See [assets/CREDITS.md](assets/CREDITS.md) for full details.
 
 - **Code**: licensed under [Apache-2.0](LICENSE).
+- **Character packs** (`assets/characters/`): **not** Apache-2.0 — see
+  [assets/CREDITS.md](assets/CREDITS.md). Voices are generated with
+  [VOICEVOX](https://voicevox.hiroshiba.jp/) and must credit the character
+  they borrowed; art depicting characters of the
+  [東北ずん子・ずんだもんプロジェクト](https://zunko.jp/) is 二次創作 used
+  under [their guidelines](https://zunko.jp/guideline.html) and is
+  **non-commercial only**.
 - **Music**: none shipped — the BGM is generated at runtime by this
   repository's own [`crates/chiptune`](crates/chiptune).
 - **Sound effects**: ["512 Sound Effects (8-bit style)"](https://opengameart.org/content/512-sound-effects-8-bit-style)

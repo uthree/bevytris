@@ -62,6 +62,16 @@
 #       cutin.png, icon.png if present) and derive the pack into
 #       assets/characters/<id>/images/.
 #
+# ENVIRONMENT
+#   COMFYUI_URL        where the engine is (default http://127.0.0.1:8188)
+#   CHARACTER_DESIGN   whose character this depicts, if not ours — e.g.
+#                      "ずんだもん (東北ずん子・ずんだもんプロジェクト)".
+#                      Set it and the pack's SOURCE.md records that the art
+#                      is a 二次創作 under that character's guidelines and
+#                      is non-commercial only; leave it unset and the art
+#                      carries this repository's own licence.  The script
+#                      cannot tell by looking, so it has to be told.
+#
 #   scripts/make_character_art.sh <id>
 #       Generate the hero images through ComfyUI, then derive as above.
 #       Needs a workflow template; scripts/comfyui/README.md says what one
@@ -436,9 +446,17 @@ comfy_wait() {
 # be guessing.  One workflow, one picture.
 comfy_collect() {
   local id="$1" dest="$2" name="$3" spec
-  spec="$(curl -sS -f -m 30 "$COMFYUI_URL/history/$id" | python3 - "$id" <<'PY'
+  mkdir -p "$dest"
+  local history="$dest/.history.$name.json"
+  curl -sS -f -m 30 "$COMFYUI_URL/history/$id" -o "$history" || return 1
+  # The history goes through a file rather than a pipe on purpose. `python3 -`
+  # reads its program from stdin, and a heredoc supplying that program *is*
+  # stdin — so piping the response in as well silently loses it, and
+  # json.load(sys.stdin) reads the already-consumed heredoc instead. Learned
+  # the hard way against a generation that had in fact succeeded.
+  spec="$(python3 - "$history" "$id" <<'PY'
 import json, sys, urllib.parse
-history = json.load(sys.stdin)[sys.argv[1]]
+history = json.load(open(sys.argv[1]))[sys.argv[2]]
 for node in history.get('outputs', {}).values():
     for image in node.get('images', []):
         print(urllib.parse.urlencode({
@@ -449,8 +467,8 @@ for node in history.get('outputs', {}).values():
         sys.exit(0)
 sys.exit("the workflow finished without saving an image")
 PY
-)" || return 1
-  mkdir -p "$dest"
+)" || { /bin/rm -f "$history"; return 1; }
+  /bin/rm -f "$history"
   curl -sS -f -m 60 "$COMFYUI_URL/view?$spec" -o "$dest/$name.png"
 }
 
@@ -487,21 +505,53 @@ generate() {
 # ---------------------------------------------------------------------------
 write_source_note() {
   local id="$1" method="$2" detail="$3"
-  cat > "$CHARACTERS_DIR/$id/SOURCE.md" <<NOTE
+  local note="$CHARACTERS_DIR/$id/SOURCE.md"
+  cat > "$note" <<NOTE
 # How this pack's art was made
 
 Generated for bevytris by \`scripts/make_character_art.sh\`.
 
 - Method: $method
 $detail
+NOTE
 
-Open-weight image models license their *weights*, not their *outputs*; the
-Fair AI Public License and CreativeML OpenRAIL both state that outputs are
-not covered and that no contributor claims rights in them. These files are
-therefore distributed under this repository's own license.
+  # \$CHARACTER_DESIGN names whose character this depicts, when it is not
+  # ours. That single fact decides the licence the art carries, and it is
+  # not something the script can work out by looking at the pixels — so it
+  # is asked for rather than guessed, and recorded next to the files rather
+  # than only in a central document somebody may not read.
+  if [ -n "${CHARACTER_DESIGN:-}" ]; then
+    cat >> "$note" <<NOTE
 
-The voices in \`voices/\` are a separate matter with separate terms — see
-\`metadata.json\`'s \`author\` field for the credit they carry.
+## Licence: NOT this repository's
+
+This pack depicts **$CHARACTER_DESIGN**, which this project does not own.
+The art is an original drawing (a 二次創作) rather than a copy of any
+official or fan-made illustration file, and is used under that character's
+own guidelines.
+
+**Non-commercial use only**, and the character's guidelines travel with
+these files. See \`assets/CREDITS.md\` for the full terms before reusing
+anything here.
+NOTE
+  else
+    cat >> "$note" <<'NOTE'
+
+## Licence: this repository's
+
+The characters here are nobody else's. Open-weight image models license
+their *weights*, not their *outputs* — the Fair AI Public License and
+CreativeML OpenRAIL both state that outputs are not covered and that no
+contributor claims rights in them — and only outputs are redistributed.
+NOTE
+  fi
+
+  cat >> "$note" <<'NOTE'
+
+The voices in `voices/` are a separate matter with separate terms: audio
+generated from a VOICEVOX voice library may be used commercially and
+non-commercially provided the character is credited. See `metadata.json`'s
+`author` field for the credit this pack carries.
 NOTE
 }
 
