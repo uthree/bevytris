@@ -70,10 +70,11 @@ Bevy's bundled default font (a **Fira Mono** subset © Mozilla Foundation,
 
 ## Character packs (`assets/characters/`)
 
-> **These files are not under the repository's Apache-2.0 licence.**
-> The code is Apache-2.0. A character pack is not, because it depicts
-> characters this project does not own. See the terms below before reusing
-> anything in this directory.
+> **A character pack is half ours and half borrowed.** The art is original
+> and carries the repository's Apache-2.0 licence like the code. The
+> *voices* are synthesized from VOICEVOX libraries and must credit the
+> character they came from wherever they are used — that obligation
+> travels with the files. Read this section before reusing anything here.
 
 Characters are an optional drop-in folder: a name, portrait art and voice
 clips, all cosmetic. Six ship with the game. Each pack carries its own
@@ -140,9 +141,11 @@ The terms for the characters whose voices are used here are at
 terms for the voices, which is the easiest thing in this whole area to get
 wrong.
 
-Placeholder portraits in the throwaway `alice` and `bob` fixtures are
-procedural SVG from `scripts/make_dummy_characters.sh` and likewise carry
-the repository licence.
+The two placeholder packs that used to sit here, `alice` and `bob`, are
+gone: they existed so the loading and layout code had something to point at
+before real characters existed, and there are six real ones now. The
+hostile fixtures that tested the loader's defences outlived them and live
+in `scripts/make_broken_characters.sh`.
 
 ## Everything else
 

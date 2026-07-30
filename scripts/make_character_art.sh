@@ -81,13 +81,13 @@
 # REQUIREMENTS
 #   macOS `sips` for the derivation, python3 for JSON handling, and — for
 #   generation only — a reachable ComfyUI.  Missing pieces are reported and
-#   skipped rather than failed, the same way make_dummy_characters.sh does it.
+#   skipped rather than failed, the same way make_characters.sh does it.
 #
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Locate ourselves.  Resolved from the script path so $PWD cannot change what
-# this writes, matching make_dummy_characters.sh.
+# this writes, matching make_characters.sh.
 # ---------------------------------------------------------------------------
 self="${BASH_SOURCE[0]}"
 while [ -L "$self" ]; do

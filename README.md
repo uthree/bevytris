@@ -168,12 +168,12 @@ piece.
 See [assets/CREDITS.md](assets/CREDITS.md) for full details.
 
 - **Code**: licensed under [Apache-2.0](LICENSE).
-- **Characters** (`assets/characters/`): six original designs — their art is
-  generated for this project and carries the repository's licence. Their
-  **voices are not ours**: they are synthesized with
-  [VOICEVOX](https://voicevox.hiroshiba.jp/) and each pack must credit the
-  voice it borrowed, which it does in its own `metadata.json` (the picker
-  shows it on screen). See [assets/CREDITS.md](assets/CREDITS.md).
+- **Characters** (`assets/characters/`): six original designs — MINT, ROSA,
+  AMBER, VIO, COBALT and ASH. Their art is generated for this project and
+  carries the repository's licence. Their **voices are not ours**: they are
+  synthesized with [VOICEVOX](https://voicevox.hiroshiba.jp/) and each pack
+  credits the voice it borrowed in its own `metadata.json`, which the picker
+  shows on screen. See [assets/CREDITS.md](assets/CREDITS.md).
 - **Music**: none shipped — the BGM is generated at runtime by this
   repository's own [`crates/chiptune`](crates/chiptune).
 - **Sound effects**: ["512 Sound Effects (8-bit style)"](https://opengameart.org/content/512-sound-effects-8-bit-style)

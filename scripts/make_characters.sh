@@ -5,9 +5,8 @@
 # WHAT THIS IS
 #   The cast. Six original characters, each a folder under
 #   assets/characters/ containing a metadata.json, portrait art and a voice.
-#   Unlike the throwaway fixtures from make_dummy_characters.sh, these are
-#   committed and distributed, so everything here has to be something we are
-#   actually allowed to hand to somebody else.
+#   These are committed and distributed, so everything here has to be
+#   something we are actually allowed to hand to somebody else.
 #
 # WHAT IS OURS AND WHAT IS BORROWED
 #   The *designs* are original. That was a deliberate turn: adopting an
@@ -152,8 +151,8 @@ NEG="lowres, bad anatomy, bad hands, mitten hands, blob hands, malformed hands, 
 SEED="${SEED:-31415}"
 
 # ---------------------------------------------------------------------------
-# Voice lines. The same table make_dummy_characters.sh uses, because it is
-# the game's list of voice kinds and there is only one of those.
+# Voice lines — one per VoiceKind the game knows about, plus the numbers.
+# Adding a kind in src/character.rs means adding a line here.
 # ---------------------------------------------------------------------------
 VOICE_LINES='
 select|まかせて

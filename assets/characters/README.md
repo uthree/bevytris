@@ -40,11 +40,11 @@ beginning with `.` are skipped as hidden.
 ```json
 {
   "schema": 1,
-  "display_name": "ダミー・ボブ",
-  "ascii_name": "DUMMY BOB",
-  "flavor": "テスト用のダミーキャラ。日本語をしゃべる。",
-  "author": "scripts/make_dummy_characters.sh",
-  "portrait_alpha": 0.20,
+  "display_name": "ミント",
+  "ascii_name": "MINT",
+  "flavor": "落ち着いていて、いつも音楽を聴いている。",
+  "author": "VOICEVOX:四国めたん",
+  "portrait_alpha": 0.11,
   "voice_gain": 1.0
 }
 ```
@@ -52,10 +52,10 @@ beginning with `.` are skipped as hidden.
 | field | meaning |
 | --- | --- |
 | `schema` | Format version. Currently always `1`. A newer one loads anyway, with a warning: losing the whole character is worse than losing whatever the new field did. |
-| `display_name` | Shown in game. May be non-ASCII; `ダミー・ボブ` exists precisely to exercise the Japanese font path. |
+| `display_name` | Shown in game. May be non-ASCII — every shipped pack is, which is what exercises the Japanese font path. |
 | `ascii_name` | ASCII fallback for the 8x8 pixel font. Max 24 characters. |
 | `flavor` | One-line flavour text. |
-| `author` | Who made the pack. |
+| `author` | Shown in the picker under the focused character. This is where a pack states the credit it owes, which is why every shipped pack puts its VOICEVOX line here. |
 | `portrait_alpha` | Opacity of the standing portrait behind the board. Clamped to `0.05..0.45`. **Dense art wants far less than the 0.20 default** — see below. |
 | `voice_gain` | Per-character volume multiplier for the voice clips. Clamped to `0.2..2.0`. |
 
@@ -80,8 +80,9 @@ number does. Check it against a real board rather than trusting the value.
 `standing_right.png` shows the character **facing right**, so it belongs to the
 **left-hand** board — the character looks in towards the middle of the screen.
 `standing_left.png` is the mirror case for the **right-hand** board. Getting
-this backwards makes both players look away from each other, which is why the
-dummy art has a large arrow printed on it.
+this backwards makes both players look away from each other. `make_character_art.sh`
+derives the left-facing art by mirroring the right, so a pack built with it
+cannot get this wrong.
 
 The portraits have a transparent margin, so they must be composited with alpha,
 not drawn as opaque quads.
@@ -118,10 +119,17 @@ scripts/make_character_art.sh --from ~/art/mychar mychar
 
 It takes `standing.png` (required) plus `win.png`, `lose.png`, `cutin.png` and
 `icon.png` if you have them, and writes the pack's `images/` — mirroring the
-standing art for the other facing, cropping the face for the icon, and putting
-it on a wide canvas for the cut-in. Anything you did supply is used as-is
-rather than derived. It also writes a `SOURCE.md` recording where the art came
-from, which is what `assets/CREDITS.md` asks for.
+standing art for the other facing and cropping the face for the icon. Anything
+you did supply is used as-is rather than derived, and anything that arrives
+without an alpha channel has its background cut first. It also writes a
+`SOURCE.md` recording where the art came from, which is what
+`assets/CREDITS.md` asks for.
+
+The cut-in is the one worth drawing separately rather than deriving. It is
+swept full-bleed behind the boards at full opacity, so it wants the opposite
+of a portrait: wide, close, and with a background of its own — which the
+derivation cannot invent. Supply one and it is kept exactly as drawn,
+background included.
 
 ## Voice kinds
 
@@ -232,38 +240,36 @@ Standing art is 512x1024 and cut-in art is 1024x512. Both are PNG with an
 alpha channel. Keep the character roughly centred horizontally in the standing
 art; the board is drawn over the middle of it.
 
-## The dummy packs
+## Rebuilding the cast
 
-`alice` and `bob` are generated placeholders, **not** real content:
-
-* `alice` — `DUMMY ALICE`, teal, voiced by `VOICEVOX:四国めたん`.
-* `bob` — `ダミー・ボブ`, magenta, voiced by `VOICEVOX:ずんだもん`. Non-ASCII
-  display name on purpose, so the pixel-font and `ascii_name` fallback paths
-  get exercised.
-
-The art is deliberately ugly procedural SVG that states its own id, facing
-and pixel size, so a portrait drawn on the wrong side or at the wrong scale
-says so out loud. The voices are real, because there is no such thing as
-placeholder audio you can hear a bug in.
-
-They are listed in `.gitignore` and are **not** committed. Regenerate them with:
+`scripts/make_characters.sh` holds all six — their designs, prompts, voice
+assignments and flavour text — and rebuilds any of them:
 
 ```sh
-scripts/make_dummy_characters.sh
+scripts/make_characters.sh              # everything
+scripts/make_characters.sh mint rosa    # just those
+scripts/make_characters.sh --voices     # voices and metadata only
+scripts/make_characters.sh --art        # art only
 ```
 
-Do not hand-edit anything under `assets/characters/alice/` or
-`assets/characters/bob/` — edit the script. It needs `sips` (macOS) for the
-art and a VOICEVOX ENGINE for the voices; it starts the one inside
-`VOICEVOX.app` if it finds it, honours `VOICEVOX_URL` if you are running your
-own, and prints a notice and exits 0 if neither is there. The packs are then
-simply absent, which the game must cope with.
+It needs a VOICEVOX ENGINE for the voices (it starts the one inside
+`VOICEVOX.app` if it finds one, or set `VOICEVOX_URL`), a ComfyUI for the art
+(`COMFYUI_URL`), and macOS `sips` to fit the images. Anything missing is
+reported and skipped rather than failed.
 
-For negative-path testing there is a second mode that writes deliberately
-broken packs (malformed JSON, a JPEG named `.png`, out-of-range numbers, a
-symlink escaping the pack, illegal directory names, and so on) into a scratch
-directory outside the repository:
+Do not hand-edit a pack — edit the script. A pack is derived output, and the
+only copy of *why* a character looks the way it does is in there.
+
+## Testing the loader
+
+Everything above is somebody else's input as far as the game is concerned:
+the loader's contract is that a malformed pack is skipped with a warning
+naming the folder and the reason, never a panic and never a path that escapes
+the pack. `scripts/make_broken_characters.sh` writes packs designed to break
+that — truncated JSON, a JPEG named `.png`, a text file named `.wav`,
+out-of-range numbers, a display name full of bidi overrides, a symlink walking
+out of the assets directory — into a scratch directory outside the repository:
 
 ```sh
-scripts/make_dummy_characters.sh --broken /tmp/broken-characters
+scripts/make_broken_characters.sh /tmp/broken-characters
 ```
