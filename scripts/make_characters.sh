@@ -167,10 +167,13 @@ SEED="${SEED:-31415}"
 # prompt is what is wrong, not the seed.
 SEED_OVERRIDES='
 vio:win|9001
+amber:win|424242
 '
-# vio:win — 31415 drew her twice, a second head over her shoulder. The
-# negative already says `duplicate head, extra head` and the sampler did it
-# anyway, which is a seed problem rather than a prompt one.
+# Both of these are the victory pose, and both for the same reason: 31415
+# drew VIO twice, a second head over her shoulder, and gave AMBER four arms.
+# Arms raised over the head is the pose that invites it — the negative
+# already says `duplicate head, extra head` and the sampler did it anyway,
+# which makes it a seed problem rather than a prompt one.
 
 # seed_for <id> <pose>
 seed_for() {

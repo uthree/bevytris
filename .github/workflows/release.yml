@@ -111,6 +111,13 @@ jobs:
               preview count, garbage messiness, attack handicaps and starting garbage
             - Local two-player on one keyboard, with its own key set for player 2 (or the
               second gamepad) — every custom rule applies to both boards
+            - Six characters — MINT, ROSA, AMBER, VIO, COBALT and ASH. Each stands behind
+              their own board, calls the line count out loud, cuts in on a tetris, a
+              T-spin, a perfect clear or a garbage cancel, and has a pose for winning and
+              one for losing. Original designs; the voices are synthesized with VOICEVOX
+              and each pack credits the voice it borrowed, on screen in the picker
+            - Drop a folder into `assets/characters/` to add your own — art and voice
+              files, no code. See `assets/characters/README.md`
             - CPU opponents plan like MisaMino / Cold Clear: beam search with soft-drop tucks,
               SRS spins and self-built T-spin doubles at higher stages
             - SRS, 7-bag, hold, T-spins, B2B, combos, guideline scoring, margin time
@@ -134,7 +141,9 @@ jobs:
               the screen. Set BEVYTRIS_MUSIC_SEED to replay a session note for note
             - SFX from CC0 samples plus procedurally synthesized bells and booms
 
-            Full third-party credits in `assets/CREDITS.md`.
+            Full third-party credits in `assets/CREDITS.md`. The character voices are
+            VOICEVOX and carry their own attribution terms — see that file before
+            reusing anything from `assets/characters/`.
           files: |
             *.tar.gz
             *.zip
