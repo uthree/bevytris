@@ -139,8 +139,16 @@ jobs:
               climbs. Every piece rolls its own key, tempo, time signature (4/4, and
               sometimes 3/4 or 6/8) and drum kit, ends with a final chorus a whole tone
               up, and comes home through an outro so it loops
-            - MUSIC room: pick a seed and a preset and listen, with the piano roll filling
-              the screen. Set BEVYTRIS_MUSIC_SEED to replay a session note for note
+            - Where a beat is the point, a piece can roll a hard-bass groove instead: a
+              saturated sub kick on every beat with the whole mix ducking out of its way,
+              the bass answering on the offbeats under a sawtooth donk, chord stabs
+              between them, and release-cut piano scattered over the sixteenths. Those
+              pieces usually take the IVM7-III7-vi-I7 changes J-pop calls the maru-sa
+              progression, whose two secondary dominants are the only chords here that
+              borrow from outside the key
+            - MUSIC room: pick a seed, a preset and a groove and listen, with the piano
+              roll filling the screen. Set BEVYTRIS_MUSIC_SEED to replay a session note
+              for note
             - SFX from CC0 samples plus procedurally synthesized bells and booms
 
             Full third-party credits in `assets/CREDITS.md`. The character voices are
