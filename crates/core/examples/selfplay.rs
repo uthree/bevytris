@@ -30,8 +30,9 @@ fn run_stage(stage: u32) {
                 game.hold,
                 &queue,
                 0,
-                game.b2b_armed(),
+                game.b2b_chain(),
                 game.combo(),
+                game.spin_rule,
                 &profile,
                 &mut rng,
             ) else {

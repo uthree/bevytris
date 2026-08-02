@@ -78,6 +78,25 @@ pub enum ClearKind {
     Normal,
     TSpin,
     TSpinMini,
+    /// A piece other than T that rotated into a slot it cannot get out
+    /// of. Only exists under [`SpinRule::AllSpin`]; pays like a T-spin,
+    /// because setting one up costs the same kind of planning.
+    Spin,
+}
+
+/// Which rotations into a slot count as a spin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpinRule {
+    /// The guideline rule: T pieces only, judged by the three-corner
+    /// test. Everything else that rotates into a gap is just a tuck.
+    #[default]
+    TOnly,
+    /// Every piece may spin. A lock straight out of a rotation counts
+    /// when the piece is *immobile* where it landed — the test modern
+    /// versus games settled on, because it needs no per-piece corner
+    /// tables and it cannot be earned by accident: if the piece could
+    /// have been slid or dropped into the slot, it is not a spin.
+    AllSpin,
 }
 
 /// Everything the frontend needs to celebrate a line clear.
@@ -85,8 +104,14 @@ pub enum ClearKind {
 pub struct LineClear {
     pub lines: u32,
     pub kind: ClearKind,
+    /// The piece that made the clear — what a spin is named after.
+    pub piece: PieceKind,
     /// True when this clear extended a back-to-back chain.
     pub b2b: bool,
+    /// How long the chain was *before* this clear, which is the level its
+    /// bonus was paid at. 0 when this clear started a chain rather than
+    /// continuing one, so `b2b == (b2b_chain > 0)`.
+    pub b2b_chain: u32,
     /// 0 for the first clear of a streak, 1 for the second, ...
     pub combo: u32,
     pub perfect_clear: bool,
@@ -119,8 +144,11 @@ pub enum GameEvent {
     HardDrop {
         distance: i8,
     },
-    /// A T-piece locked as a T-spin / mini without clearing lines.
-    TSpinNoLines {
+    /// A piece locked as a spin without clearing any lines.
+    SpinNoLines {
+        /// What spun — a spin is named after its piece.
+        piece: PieceKind,
+        /// T-spin mini. Only the T piece has a lesser spin.
         mini: bool,
     },
     Locked {
@@ -169,6 +197,9 @@ pub enum GameEvent {
 pub struct Stats {
     pub pieces: u32,
     pub tetrises: u32,
+    /// Full spins: T-spins always, and every other piece's spins where
+    /// [`SpinRule::AllSpin`] is in force. The grade counts them together
+    /// because they are worth the same and cost the same to build.
     pub tspins: u32,
     pub max_combo: u32,
     pub attack_sent: u32,
@@ -199,8 +230,15 @@ pub struct Game {
     start_level: u32,
     /// -1 when the previous lock did not clear lines.
     combo: i32,
-    /// True when the last line clear was "difficult" (tetris / t-spin).
-    b2b_armed: bool,
+    /// How many difficult clears (tetris / spin) are in the current
+    /// back-to-back run. 0 means the chain is broken; 1 means one has
+    /// landed and the *next* one will chain.
+    b2b_chain: u32,
+    /// False pins the back-to-back bonus at the flat +1 the guideline
+    /// gives, however long the chain gets.
+    pub b2b_escalation: bool,
+    /// Which rotations into a slot count as a spin.
+    pub spin_rule: SpinRule,
 
     gravity_acc: f32,
     lock_timer: f32,
@@ -274,7 +312,9 @@ impl Game {
             max_level: u32::MAX,
             start_level: start_level.max(1),
             combo: -1,
-            b2b_armed: false,
+            b2b_chain: 0,
+            b2b_escalation: true,
+            spin_rule: SpinRule::TOnly,
             gravity_acc: 0.0,
             lock_timer: 0.0,
             lock_resets: 0,
@@ -320,7 +360,23 @@ impl Game {
 
     /// Back-to-back armed: the next difficult clear will chain.
     pub fn b2b_armed(&self) -> bool {
-        self.b2b_armed
+        self.b2b_chain > 0
+    }
+
+    /// Difficult clears in the current back-to-back run.
+    pub fn b2b_chain(&self) -> u32 {
+        self.b2b_chain
+    }
+
+    /// The chain length the *next* difficult clear would be paid at —
+    /// which is the current one unless escalation is switched off, in
+    /// which case every chained clear is worth the same flat bonus.
+    fn b2b_level(&self) -> u32 {
+        if self.b2b_escalation {
+            self.b2b_chain
+        } else {
+            self.b2b_chain.min(1)
+        }
     }
 
     /// Combo counter as the game tracks it: -1 when the previous lock did
@@ -681,7 +737,7 @@ impl Game {
             // The chain died with the stack; starting the fresh field on
             // a live combo or back-to-back would be unearned.
             self.combo = -1;
-            self.b2b_armed = false;
+            self.b2b_chain = 0;
             self.incoming.clear();
             self.stats.board_resets += 1;
             self.events.push(GameEvent::BoardReset);
@@ -692,7 +748,12 @@ impl Game {
     }
 
     fn detect_tspin(&self) -> Option<ClearKind> {
-        t_spin_kind(&self.board, &self.active, self.last_rotation_kick)
+        spin_kind(
+            &self.board,
+            &self.active,
+            self.last_rotation_kick,
+            self.spin_rule,
+        )
     }
 
     fn lock_active(&mut self) {
@@ -757,7 +818,7 @@ impl Game {
             let lines = rows.len() as u32;
 
             if lines > 0 {
-                self.apply_clear(lines, rows, tspin, garbage_rows_cleared);
+                self.apply_clear(lines, rows, piece.kind, tspin, garbage_rows_cleared);
             } else {
                 if let Some(kind) = tspin {
                     let mini = kind == ClearKind::TSpinMini;
@@ -766,7 +827,10 @@ impl Game {
                     if !mini {
                         self.stats.tspins += 1;
                     }
-                    self.events.push(GameEvent::TSpinNoLines { mini });
+                    self.events.push(GameEvent::SpinNoLines {
+                        piece: piece.kind,
+                        mini,
+                    });
                 }
                 self.combo = -1;
                 self.rise_garbage();
@@ -785,12 +849,17 @@ impl Game {
         &mut self,
         lines: u32,
         rows: Vec<i8>,
+        piece: PieceKind,
         tspin: Option<ClearKind>,
         garbage_rows_cleared: u32,
     ) {
         let kind = tspin.unwrap_or(ClearKind::Normal);
         let difficult = lines == 4 || tspin.is_some();
-        let b2b = difficult && self.b2b_armed;
+        // The level this clear is paid at is the chain it *arrives* on,
+        // not the one it leaves behind: the first difficult clear of a
+        // run is not back-to-back with anything.
+        let chain = if difficult { self.b2b_level() } else { 0 };
+        let b2b = chain > 0;
 
         self.combo += 1;
         let combo = self.combo as u32;
@@ -798,7 +867,7 @@ impl Game {
         if lines == 4 {
             self.stats.tetrises += 1;
         }
-        if tspin == Some(ClearKind::TSpin) {
+        if matches!(kind, ClearKind::TSpin | ClearKind::Spin) {
             self.stats.tspins += 1;
         }
 
@@ -813,11 +882,20 @@ impl Game {
             (ClearKind::TSpin, 1) => 800,
             (ClearKind::TSpin, 2) => 1200,
             (ClearKind::TSpin, 3) => 1600,
+            // A spin by anything else is worth what a T-spin is worth,
+            // and the four-line one — which only an I piece can make —
+            // is worth rather more than a tetris.
+            (ClearKind::Spin, 1) => 800,
+            (ClearKind::Spin, 2) => 1200,
+            (ClearKind::Spin, 3) => 1600,
+            (ClearKind::Spin, 4) => 2000,
             _ => 0,
         };
         let mut gained = base * self.level as u64;
         if b2b {
-            gained = gained * 3 / 2;
+            // 1.5x for the first chained clear, climbing with the chain
+            // to 2.5x and stopping there.
+            gained = gained * (5 + b2b_bonus(chain) as u64) / 4;
         }
         gained += 50 * combo as u64 * self.level as u64;
 
@@ -841,7 +919,7 @@ impl Game {
         self.score += gained;
 
         // --- Attack (VS garbage) ------------------------------------------
-        let mut attack = attack_for(kind, lines, b2b, combo, perfect_clear);
+        let mut attack = attack_for(kind, lines, chain, combo, perfect_clear);
         // Margin time: long rounds scale everyone's attack to force an end.
         attack = (attack as f32 * self.attack_multiplier()).floor() as u32;
         // Line clears cancel queued garbage before sending the remainder.
@@ -874,11 +952,13 @@ impl Game {
             }
         }
 
-        self.b2b_armed = difficult;
+        self.b2b_chain = if difficult { self.b2b_chain + 1 } else { 0 };
         self.events.push(GameEvent::Cleared(LineClear {
             lines,
             kind,
+            piece,
             b2b,
+            b2b_chain: chain,
             combo,
             perfect_clear,
             rows,
@@ -993,11 +1073,33 @@ fn zone_bonus(lines: u32) -> u32 {
     }
 }
 
+/// Extra garbage rows a back-to-back chain is worth, given how many
+/// difficult clears came before this one.
+///
+/// 0 is no chain at all. The guideline gives a flat +1 forever, which
+/// means the twentieth tetris in a row is worth exactly what the second
+/// was — the hardest thing to keep going in the game pays nothing extra
+/// for keeping it going. This climbs instead, and stops: a chain is a
+/// reason to hold a line clear back, not a reason to win outright.
+pub fn b2b_bonus(chain: u32) -> u32 {
+    match chain {
+        0 => 0,
+        1..=2 => 1,
+        3..=5 => 2,
+        6..=9 => 3,
+        10..=17 => 4,
+        _ => 5,
+    }
+}
+
 /// Garbage rows a clear sends before margin-time scaling and cancelling:
 /// the guideline-style attack table plus back-to-back, combo and
 /// perfect-clear bonuses. Shared by the game and the AI planner so the
 /// CPU values moves exactly as they will pay out.
-pub fn attack_for(kind: ClearKind, lines: u32, b2b: bool, combo: u32, perfect_clear: bool) -> u32 {
+///
+/// `b2b` is the chain length this clear arrives on — 0 for a clear that
+/// starts (or breaks) a chain. See [`b2b_bonus`].
+pub fn attack_for(kind: ClearKind, lines: u32, b2b: u32, combo: u32, perfect_clear: bool) -> u32 {
     let mut attack: u32 = match (kind, lines) {
         (ClearKind::Normal, 2) => 1,
         (ClearKind::Normal, 3) => 2,
@@ -1006,17 +1108,55 @@ pub fn attack_for(kind: ClearKind, lines: u32, b2b: bool, combo: u32, perfect_cl
         (ClearKind::TSpin, 1) => 2,
         (ClearKind::TSpin, 2) => 4,
         (ClearKind::TSpin, 3) => 6,
+        // Any other piece's spin pays what a T-spin pays. The four-line
+        // one belongs to the I piece alone and is the hardest placement
+        // this rule set allows, so it out-pays a tetris the way a T-spin
+        // double out-pays a double.
+        (ClearKind::Spin, 1) => 2,
+        (ClearKind::Spin, 2) => 4,
+        (ClearKind::Spin, 3) => 6,
+        (ClearKind::Spin, 4) => 8,
         _ => 0,
     };
-    if b2b {
-        attack += 1;
-    }
+    attack += b2b_bonus(b2b);
     const COMBO_BONUS: [u32; 12] = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5];
     attack += COMBO_BONUS[(combo as usize).min(COMBO_BONUS.len() - 1)];
     if perfect_clear {
         attack += 10;
     }
     attack
+}
+
+/// Classify a piece about to lock on `board` under `rule`. T pieces are
+/// judged by the corner test whatever the rule says; everything else only
+/// counts under [`SpinRule::AllSpin`], and only when it is immobile.
+///
+/// Shared by the game and the AI planner, so the CPU sees exactly the
+/// spins the player does.
+pub fn spin_kind(
+    board: &Board,
+    piece: &ActivePiece,
+    last_kick: Option<usize>,
+    rule: SpinRule,
+) -> Option<ClearKind> {
+    if let Some(kind) = t_spin_kind(board, piece, last_kick) {
+        return Some(kind);
+    }
+    if rule != SpinRule::AllSpin || piece.kind == PieceKind::T {
+        return None;
+    }
+    // Same precondition as a T-spin: the lock has to follow a rotation.
+    last_kick?;
+    immobile(board, piece).then_some(ClearKind::Spin)
+}
+
+/// True when `piece` cannot be nudged sideways or lifted out of where it
+/// sits. Down is not tested because this is only ever asked at lock time,
+/// when the piece is resting on the stack by definition.
+fn immobile(board: &Board, piece: &ActivePiece) -> bool {
+    !board.fits(&piece.shifted(-1, 0))
+        && !board.fits(&piece.shifted(1, 0))
+        && !board.fits(&piece.shifted(0, 1))
 }
 
 /// Classify a T piece about to lock on `board` as a T-spin, a mini, or
@@ -1129,7 +1269,7 @@ mod tests {
         let mut game = Game::new(5, 1);
         game.endless = true;
         game.combo = 4;
-        game.b2b_armed = true;
+        game.b2b_chain = 1;
         bury(&mut game);
         game.hard_drop();
         assert_eq!(game.combo(), -1);
@@ -1285,7 +1425,210 @@ mod tests {
         assert!(!clear.b2b, "first difficult clear is not yet b2b");
         assert!(!clear.perfect_clear);
         assert_eq!(clear.attack, 4);
-        assert!(game.b2b_armed);
+        assert!(game.b2b_armed());
+    }
+
+    /// Set up and clear a tetris, leaving one stray block above so it is
+    /// never also a perfect clear. Repeatable: the board comes back to
+    /// the same single-block state every time.
+    fn tetris(game: &mut Game) -> LineClear {
+        for y in 0..4 {
+            fill_row(game, y, &[9]);
+        }
+        game.board.set_cell(0, 6, Some(Cell::Garbage));
+        force_piece(game, PieceKind::I);
+        game.rotate(true);
+        while game.active.x + 2 < 9 {
+            if !game.move_horizontal(1) {
+                break;
+            }
+        }
+        game.take_events();
+        game.hard_drop();
+        game.events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::Cleared(c) => Some(c.clone()),
+                _ => None,
+            })
+            .expect("tetris cleared")
+    }
+
+    /// An S piece standing in a slot shaped exactly like it: the three
+    /// rows it completes have holes only where its own cells go, and the
+    /// walls either side mean it could not have been slid or dropped in.
+    fn s_slot(game: &mut Game) {
+        fill_row(game, 0, &[5]);
+        fill_row(game, 1, &[4, 5]);
+        fill_row(game, 2, &[4]);
+        // Somewhere for the clear to leave a block, so it is not also a
+        // perfect clear.
+        game.board.set_cell(0, 6, Some(Cell::Garbage));
+        game.active = ActivePiece {
+            kind: PieceKind::S,
+            rot: Rot::R1,
+            x: 3,
+            y: 0,
+        };
+        assert!(game.board.fits(&game.active), "the slot does not fit an S");
+    }
+
+    #[test]
+    fn any_piece_can_spin_where_the_rule_allows_it() {
+        let mut game = Game::new(1, 1);
+        game.spin_rule = SpinRule::AllSpin;
+        s_slot(&mut game);
+        // Immobile: the walls hold it on both sides and the overhang
+        // stops it lifting out.
+        assert!(!game.board.fits(&game.active.shifted(-1, 0)));
+        assert!(!game.board.fits(&game.active.shifted(1, 0)));
+        assert!(!game.board.fits(&game.active.shifted(0, 1)));
+        game.last_rotation_kick = Some(0);
+        game.hard_drop();
+
+        let clear = game
+            .events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::Cleared(c) => Some(c.clone()),
+                _ => None,
+            })
+            .expect("the slot should have cleared three rows");
+        assert_eq!(clear.kind, ClearKind::Spin);
+        assert_eq!(clear.piece, PieceKind::S);
+        assert_eq!(clear.lines, 3);
+        // A T-spin triple's worth, and difficult enough to hold a chain.
+        assert_eq!(clear.attack, 6);
+        assert!(game.b2b_armed());
+        assert_eq!(game.stats.tspins, 1);
+    }
+
+    #[test]
+    fn a_spin_has_to_be_spun_and_has_to_be_allowed() {
+        // Same placement, same slot, no rotation to get there: a triple.
+        let mut game = Game::new(1, 1);
+        game.spin_rule = SpinRule::AllSpin;
+        s_slot(&mut game);
+        game.last_rotation_kick = None;
+        game.hard_drop();
+        let kind = game
+            .events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::Cleared(c) => Some(c.kind),
+                _ => None,
+            })
+            .expect("cleared");
+        assert_eq!(kind, ClearKind::Normal, "a tuck is not a spin");
+
+        // And under the guideline rule the rotation buys nothing either.
+        let mut game = Game::new(1, 1);
+        s_slot(&mut game);
+        game.last_rotation_kick = Some(0);
+        game.hard_drop();
+        let clear = game
+            .events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::Cleared(c) => Some(c.clone()),
+                _ => None,
+            })
+            .expect("cleared");
+        assert_eq!(clear.kind, ClearKind::Normal);
+        assert_eq!(clear.attack, 2, "a plain triple");
+        assert!(!game.b2b_armed(), "and it breaks the chain");
+    }
+
+    #[test]
+    fn a_piece_that_can_still_wriggle_did_not_spin() {
+        // The same S rotated into place, but with the right-hand wall
+        // taken away so it could have been slid in.
+        let mut game = Game::new(1, 1);
+        game.spin_rule = SpinRule::AllSpin;
+        s_slot(&mut game);
+        game.board.set_cell(5, 2, None);
+        assert!(game.board.fits(&game.active.shifted(0, 1)));
+        game.last_rotation_kick = Some(0);
+        game.hard_drop();
+        assert!(
+            !game
+                .events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Cleared(c) if c.kind == ClearKind::Spin)),
+            "a mobile piece must not count as a spin"
+        );
+    }
+
+    #[test]
+    fn back_to_back_pays_more_the_longer_it_runs() {
+        let attack = |chain| attack_for(ClearKind::Normal, 4, chain, 0, false);
+        assert_eq!(attack(0), 4, "an unchained tetris is the baseline");
+        assert_eq!(attack(1), 5, "the guideline's flat +1 is still the first");
+        assert!(attack(4) > attack(1));
+        assert!(attack(12) > attack(4));
+        // It climbs and then stops: a chain is a reason to hold a clear
+        // back, not a reason to win outright.
+        assert_eq!(attack(30), attack(3_000));
+        assert!(attack(3_000) - attack(0) <= 5);
+        for chain in 0..64 {
+            assert!(attack(chain) <= attack(chain + 1), "chain {chain} dipped");
+        }
+    }
+
+    #[test]
+    fn the_chain_counts_up_across_clears_and_dies_with_one_plain_one() {
+        let mut game = Game::new(1, 1);
+        assert_eq!(tetris(&mut game).b2b_chain, 0, "nothing to chain with yet");
+        assert_eq!(game.b2b_chain(), 1);
+
+        let second = tetris(&mut game);
+        assert!(second.b2b);
+        assert_eq!(second.b2b_chain, 1);
+        assert_eq!(second.attack, 5);
+
+        // Deep into a chain the same tetris is worth more. The combo is
+        // reset first so the only thing moving is the back-to-back term.
+        game.b2b_chain = 12;
+        game.combo = -1;
+        let deep = tetris(&mut game);
+        assert_eq!(deep.b2b_chain, 12);
+        assert_eq!(deep.attack, 4 + b2b_bonus(12));
+        assert_eq!(game.b2b_chain(), 13);
+
+        // One plain clear ends it, and the next difficult clear starts
+        // again from nothing.
+        fill_row(&mut game, 0, &[9]);
+        force_piece(&mut game, PieceKind::I);
+        game.rotate(true);
+        while game.active.x + 2 < 9 {
+            if !game.move_horizontal(1) {
+                break;
+            }
+        }
+        game.take_events();
+        game.hard_drop();
+        assert!(
+            game.events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Cleared(c) if c.lines == 1)),
+            "the test meant to clear a single"
+        );
+        assert_eq!(game.b2b_chain(), 0, "a single should have broken it");
+        assert_eq!(tetris(&mut game).b2b_chain, 0);
+    }
+
+    #[test]
+    fn escalation_can_be_switched_off() {
+        let mut game = Game::new(1, 1);
+        game.b2b_escalation = false;
+        game.b2b_chain = 20;
+        let clear = tetris(&mut game);
+        assert!(clear.b2b, "it is still back-to-back");
+        assert_eq!(clear.b2b_chain, 1, "just never worth more than the first");
+        assert_eq!(clear.attack, 5);
+        // The chain still counts up underneath, so switching the rule
+        // back on mid-game would not have to rebuild it.
+        assert_eq!(game.b2b_chain(), 21);
     }
 
     #[test]
@@ -1374,7 +1717,7 @@ mod tests {
         assert!(
             game.events
                 .iter()
-                .any(|e| matches!(e, GameEvent::TSpinNoLines { mini: true }))
+                .any(|e| matches!(e, GameEvent::SpinNoLines { mini: true, .. }))
         );
     }
 

@@ -703,7 +703,10 @@ fn voice_for(event: &GameEvent, two_boards: bool) -> Option<VoiceLine> {
         GameEvent::Cleared(c) => {
             if c.perfect_clear {
                 named(VoiceKind::PerfectClear)
-            } else if matches!(c.kind, ClearKind::TSpin | ClearKind::TSpinMini) {
+            } else if matches!(
+                c.kind,
+                ClearKind::TSpin | ClearKind::TSpinMini | ClearKind::Spin
+            ) {
                 named(VoiceKind::TSpin)
             } else if c.lines >= 4 {
                 named(VoiceKind::Tetris)
@@ -722,7 +725,7 @@ fn voice_for(event: &GameEvent, two_boards: bool) -> Option<VoiceLine> {
                 named(VoiceKind::Clear)
             }
         }
-        GameEvent::TSpinNoLines { .. } => named(VoiceKind::TSpin),
+        GameEvent::SpinNoLines { .. } => named(VoiceKind::TSpin),
         GameEvent::GarbageRose { rows } if *rows >= HEAVY_GARBAGE_ROWS => {
             named(VoiceKind::DamageHeavy)
         }
@@ -757,7 +760,7 @@ fn cutin_for_clear(c: &LineClear) -> Option<CutInKind> {
     if c.perfect_clear {
         return Some(CutInKind::PerfectClear);
     }
-    if matches!(c.kind, ClearKind::TSpin) {
+    if matches!(c.kind, ClearKind::TSpin | ClearKind::Spin) {
         return match c.lines {
             3 => Some(CutInKind::TSpinTriple),
             2 => Some(CutInKind::TSpinDouble),
@@ -2281,7 +2284,9 @@ mod tests {
         GameEvent::Cleared(LineClear {
             lines,
             kind,
+            piece: crate::core::piece::PieceKind::T,
             b2b: false,
+            b2b_chain: 0,
             combo: 0,
             perfect_clear: false,
             rows: Vec::new(),

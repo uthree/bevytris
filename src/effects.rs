@@ -770,13 +770,13 @@ fn map_events_to_effects(
             }
             GameEvent::Held => play(Sfx::Hold, gain),
             GameEvent::HoldBlocked => play(Sfx::HoldFail, 0.5 * gain),
-            GameEvent::TSpinNoLines { mini } => {
+            GameEvent::SpinNoLines { piece, mini } => {
                 play(Sfx::TSpin, 0.7 * gain);
-                let label = if *mini { "T-SPIN MINI" } else { "T-SPIN" };
+                let label = format!("{piece:?}-SPIN{}", if *mini { " MINI" } else { "" });
                 spawn_banner(
                     &mut commands,
                     center + Vec2::new(0.0, 40.0 + banner_stagger),
-                    label.to_string(),
+                    label,
                     Color::srgb(0.85, 0.4, 1.0),
                     theme.cell,
                 );
@@ -879,9 +879,21 @@ fn map_events_to_effects(
                         "T-SPIN MINI {}",
                         ["", "SINGLE", "DOUBLE", ""][n.min(3) as usize]
                     ),
+                    // A spin is named after the piece that made it, the
+                    // way a T-spin is: "S-SPIN DOUBLE".
+                    (ClearKind::Spin, n) => format!(
+                        "{:?}-SPIN {}",
+                        clear.piece,
+                        ["", "SINGLE", "DOUBLE", "TRIPLE", "QUAD"][n.min(4) as usize]
+                    ),
                 };
                 if clear.b2b {
-                    label = format!("B2B {label}");
+                    // The count only appears once it is worth something
+                    // more than the first one was.
+                    label = match clear.b2b_chain {
+                        0 | 1 => format!("B2B {label}"),
+                        n => format!("B2B x{n} {label}"),
+                    };
                 }
                 let color = if clear.perfect_clear {
                     Color::srgb(1.0, 0.95, 0.4)

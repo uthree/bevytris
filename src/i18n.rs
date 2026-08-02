@@ -253,6 +253,10 @@ pub struct Strings {
     pub cm_na: &'static str,
     pub cm_hold: &'static str,
     pub cm_previews: &'static str,
+    /// Custom match: every piece may spin, not just T.
+    pub cm_all_spin: &'static str,
+    /// Custom match: back-to-back pays more the longer it runs.
+    pub cm_b2b_chain: &'static str,
     pub cm_messiness: &'static str,
     /// Messiness 0: every attack arrives as one clean well.
     pub cm_mess_clean: &'static str,
@@ -309,6 +313,8 @@ pub struct Strings {
     pub rounds: &'static str,
     pub attack: &'static str,
     pub tetris: &'static str,
+    /// Result screen: full spins made. Not "T-spin" — under the all-spin
+    /// rule the number counts every piece's spins, and a T-spin is one.
     pub tspin: &'static str,
     pub combo: &'static str,
     pub pc: &'static str,
@@ -433,6 +439,8 @@ pub const EN: Strings = Strings {
     cm_na: "-",
     cm_hold: "Hold",
     cm_previews: "Previews",
+    cm_all_spin: "All spin",
+    cm_b2b_chain: "B2B chain",
     cm_messiness: "Messiness",
     cm_mess_clean: "CLEAN (ONE WELL)",
     cm_p1_atk: "1P Attack",
@@ -478,7 +486,7 @@ pub const EN: Strings = Strings {
     rounds: "ROUNDS",
     attack: "ATTACK",
     tetris: "TETRIS",
-    tspin: "T-SPIN",
+    tspin: "SPIN",
     combo: "COMBO",
     pc: "PC",
     pieces: "PIECES",
@@ -598,6 +606,8 @@ pub const JA: Strings = Strings {
     cm_na: "-",
     cm_hold: "ホールド",
     cm_previews: "ネクスト数",
+    cm_all_spin: "全スピン",
+    cm_b2b_chain: "B2B強化",
     cm_messiness: "穴のばらけ",
     cm_mess_clean: "揃える(1列)",
     cm_p1_atk: "1Pの攻撃力",
@@ -643,7 +653,7 @@ pub const JA: Strings = Strings {
     rounds: "ラウンド",
     attack: "攻撃",
     tetris: "テトリス",
-    tspin: "Tスピン",
+    tspin: "スピン",
     combo: "コンボ",
     pc: "パフェ",
     pieces: "ピース",

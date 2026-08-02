@@ -12,7 +12,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use super::board::{ActivePiece, BOARD_HEIGHT, BOARD_WIDTH, Board, VISIBLE_HEIGHT};
-use super::game::{ClearKind, DEADLY_COLS, attack_for, t_spin_kind};
+use super::game::{ClearKind, DEADLY_COLS, SpinRule, attack_for, spin_kind};
 use super::piece::{PieceKind, Rot};
 use super::srs::kicks;
 
@@ -235,9 +235,15 @@ fn state_index(p: &ActivePiece, spin: bool) -> Option<usize> {
 /// path to each: BFS over (rotation, x, y) with moves, SRS rotations and
 /// sonic drops. Because a rotation is a distinct final input, spins and
 /// their kicks fall out of the search for free. States are additionally
-/// keyed on "was the last input a rotation" for T pieces only, so a slot
-/// reachable both by sliding and by spinning keeps the spin variant.
-fn reachable_placements(board: &Board, start: ActivePiece, finesse: bool) -> Vec<Placement> {
+/// keyed on "was the last input a rotation" for whichever pieces `rule`
+/// lets spin, so a slot reachable both by sliding and by spinning keeps
+/// the spin variant.
+fn reachable_placements(
+    board: &Board,
+    start: ActivePiece,
+    finesse: bool,
+    rule: SpinRule,
+) -> Vec<Placement> {
     if !board.fits(&start) {
         return Vec::new();
     }
@@ -260,14 +266,15 @@ fn reachable_placements(board: &Board, start: ActivePiece, finesse: bool) -> Vec
         if grounded {
             // Candidate placement; dedup by the cells it fills plus the
             // T-spin classification (BFS order keeps the shortest path).
-            let tspin = t_spin_kind(board, &piece, kick);
+            let tspin = spin_kind(board, &piece, kick, rule);
             let mut cells = piece.board_cells();
             cells.sort_unstable();
             let tag = match tspin {
                 None => 0u8,
                 Some(ClearKind::TSpinMini) => 1,
                 Some(ClearKind::TSpin) => 2,
-                Some(ClearKind::Normal) => 3,
+                Some(ClearKind::Spin) => 3,
+                Some(ClearKind::Normal) => 4,
             };
             if seen_final.insert((cells, tag)) {
                 out.push(Placement {
@@ -295,7 +302,10 @@ fn reachable_placements(board: &Board, start: ActivePiece, finesse: bool) -> Vec
             for (i, &(dx, dy)) in kicks(piece.kind, piece.rot, to).iter().enumerate() {
                 let cand = piece.rotated(to).shifted(dx, dy);
                 if board.fits(&cand) {
-                    let spin = piece.kind == PieceKind::T;
+                    // Under all-spin every piece can earn something by
+                    // arriving turned, so every piece needs the spin
+                    // variant of the state kept separately.
+                    let spin = rule == SpinRule::AllSpin || piece.kind == PieceKind::T;
                     if let Some(idx) = state_index(&cand, spin)
                         && !visited[idx]
                     {
@@ -378,8 +388,8 @@ struct Sim {
     spawn_blocked: bool,
 }
 
-fn simulate(board: &Board, piece: &ActivePiece, last_kick: Option<usize>) -> Sim {
-    let tspin = t_spin_kind(board, piece, last_kick);
+fn simulate(board: &Board, piece: &ActivePiece, last_kick: Option<usize>, rule: SpinRule) -> Sim {
+    let tspin = spin_kind(board, piece, last_kick, rule);
     let cells = piece.board_cells();
     let min_y = cells.iter().map(|c| c.1).min().unwrap_or(0);
     let max_y = cells.iter().map(|c| c.1).max().unwrap_or(0);
@@ -400,24 +410,28 @@ fn simulate(board: &Board, piece: &ActivePiece, last_kick: Option<usize>) -> Sim
 }
 
 /// B2B / combo bookkeeping across search plies, mirroring the game rules.
-fn next_ctx(sim: &Sim, b2b: bool, combo: i32) -> (bool, i32) {
+/// `b2b` is the chain length, so a plan that keeps one going is valued
+/// for keeping it going.
+fn next_ctx(sim: &Sim, b2b: u32, combo: i32) -> (u32, i32) {
     if sim.lines == 0 {
         (b2b, -1)
+    } else if sim.lines == 4 || sim.tspin.is_some() {
+        (b2b + 1, combo + 1)
     } else {
-        (sim.lines == 4 || sim.tspin.is_some(), combo + 1)
+        (0, combo + 1)
     }
 }
 
 /// Immediate value of locking one placement (line-clear terms only; the
 /// board structure is scored separately).
-fn move_reward(sim: &Sim, b2b_armed: bool, combo_prev: i32, profile: &AiProfile) -> f32 {
+fn move_reward(sim: &Sim, b2b_chain: u32, combo_prev: i32, profile: &AiProfile) -> f32 {
     let mut r = -4.500 * sim.landing_height;
     if sim.lines == 0 {
         return r;
     }
     let kind = sim.tspin.unwrap_or(ClearKind::Normal);
     let difficult = sim.lines == 4 || sim.tspin.is_some();
-    let b2b = difficult && b2b_armed;
+    let b2b = if difficult { b2b_chain } else { 0 };
     let combo = (combo_prev + 1).max(0) as u32;
     let attack = attack_for(kind, sim.lines, b2b, combo, sim.perfect);
 
@@ -436,6 +450,11 @@ fn move_reward(sim: &Sim, b2b_armed: bool, combo_prev: i32, profile: &AiProfile)
         (ClearKind::TSpin, 1) => 8.0,
         (ClearKind::TSpin, 2) => 30.0,
         (ClearKind::TSpin, 3) => 50.0,
+        // Worth chasing for the same reason, but not worth *building*
+        // for the way a T-spin slot is: an all-spin slot is usually
+        // something the stack offered rather than something planned.
+        (ClearKind::Spin, 1) => 6.0,
+        (ClearKind::Spin, n) => 12.0 * n as f32,
         _ => 0.0,
     };
     r + style * profile.tspin_focus
@@ -585,7 +604,7 @@ struct Node {
     acc: f32,
     /// acc + structural score of `board` (the beam's ranking key).
     score: f32,
-    b2b: bool,
+    b2b: u32,
     combo: i32,
     /// Queue offset: 1 when the root move consumed queue[0] via hold.
     q_off: usize,
@@ -598,9 +617,10 @@ struct Node {
 /// `active` is the falling piece as it currently stands; `queue` the
 /// visible previews. `incoming` is the number of queued garbage rows —
 /// the planner treats them as imminent height and favors clears that
-/// cancel them. `b2b_armed` / `combo` mirror the game state so future
-/// clears are valued with the right bonuses. Returns None only if no
-/// placement fits.
+/// cancel them. `b2b` (the chain length) and `combo` mirror the game
+/// state so future clears are valued with the right bonuses, and `rule`
+/// decides which rotations the CPU may treat as spins. Returns None only
+/// if no placement fits.
 #[allow(clippy::too_many_arguments)]
 pub fn plan(
     board: &Board,
@@ -608,8 +628,9 @@ pub fn plan(
     hold: Option<PieceKind>,
     queue: &[PieceKind],
     incoming: u32,
-    b2b_armed: bool,
+    b2b: u32,
     combo: i32,
+    rule: SpinRule,
     profile: &AiProfile,
     rng: &mut StdRng,
 ) -> Option<Plan> {
@@ -648,12 +669,12 @@ pub fn plan(
     let mut roots: Vec<Plan> = Vec::with_capacity(96);
     let mut nodes: Vec<Node> = Vec::with_capacity(96);
     for (start, use_hold, q_off) in starts {
-        for pl in reachable_placements(board, start, profile.finesse) {
+        for pl in reachable_placements(board, start, profile.finesse, rule) {
             if is_lock_out(&pl.piece) {
                 continue;
             }
-            let sim = simulate(board, &pl.piece, pl.last_kick);
-            let mut reward = move_reward(&sim, b2b_armed, combo, profile);
+            let sim = simulate(board, &pl.piece, pl.last_kick, rule);
+            let mut reward = move_reward(&sim, b2b, combo, profile);
             if sim.spawn_blocked {
                 reward -= 10_000.0;
             }
@@ -666,7 +687,7 @@ pub fn plan(
             if incoming > 0 {
                 reward += sim.lines as f32 * (4.0 + 2.0 * incoming.min(8) as f32);
             }
-            let (b2b2, combo2) = next_ctx(&sim, b2b_armed, combo);
+            let (b2b2, combo2) = next_ctx(&sim, b2b, combo);
             let score = reward + board_score(&sim.board, profile, t_soon);
             roots.push(Plan {
                 use_hold,
@@ -700,11 +721,11 @@ pub fn plan(
             };
             let mut expanded = false;
             if let Some(start) = spawn_state(&node.board, kind) {
-                for pl in reachable_placements(&node.board, start, profile.finesse) {
+                for pl in reachable_placements(&node.board, start, profile.finesse, rule) {
                     if is_lock_out(&pl.piece) {
                         continue;
                     }
-                    let sim = simulate(&node.board, &pl.piece, pl.last_kick);
+                    let sim = simulate(&node.board, &pl.piece, pl.last_kick, rule);
                     let mut reward = move_reward(&sim, node.b2b, node.combo, profile);
                     if sim.spawn_blocked {
                         reward -= 10_000.0;
@@ -854,7 +875,19 @@ mod tests {
         let mut reference: Option<Vec<Step>> = None;
         for seed in 0..8 {
             let mut rng = StdRng::seed_from_u64(seed);
-            let p = plan(&board, start, None, &[], 0, false, -1, &profile, &mut rng).unwrap();
+            let p = plan(
+                &board,
+                start,
+                None,
+                &[],
+                0,
+                0,
+                -1,
+                SpinRule::TOnly,
+                &profile,
+                &mut rng,
+            )
+            .unwrap();
             match &reference {
                 None => reference = Some(p.steps.clone()),
                 Some(r) => assert_eq!(*r, p.steps, "danger picks must be deterministic"),
@@ -872,8 +905,9 @@ mod tests {
             None,
             &[PieceKind::I],
             0,
-            false,
+            0,
             -1,
+            SpinRule::TOnly,
             &AiProfile::normal(),
             &mut rng,
         );
@@ -913,8 +947,9 @@ mod tests {
             None,
             &[],
             0,
-            false,
+            0,
             -1,
+            SpinRule::TOnly,
             &exact_profile(0.0),
             &mut rng,
         )
@@ -940,8 +975,9 @@ mod tests {
             None,
             &[],
             0,
-            false,
+            0,
             -1,
+            SpinRule::TOnly,
             &exact_profile(1.0),
             &mut rng,
         )
@@ -968,8 +1004,9 @@ mod tests {
             None,
             &[],
             0,
-            false,
+            0,
             -1,
+            SpinRule::TOnly,
             &AiProfile::normal(),
             &mut rng,
         )
@@ -1018,8 +1055,9 @@ mod tests {
             None,
             &[],
             0,
-            false,
+            0,
             -1,
+            SpinRule::TOnly,
             &profile,
             &mut rng,
         )
@@ -1049,11 +1087,11 @@ mod tests {
                 .any(|p| p.piece.board_cells().iter().any(|&(x, y)| x == 0 && y < 2))
         };
         assert!(
-            covers(&reachable_placements(&board, start, true)),
+            covers(&reachable_placements(&board, start, true, SpinRule::TOnly)),
             "finesse movegen must tuck under the roof"
         );
         assert!(
-            !covers(&reachable_placements(&board, start, false)),
+            !covers(&reachable_placements(&board, start, false, SpinRule::TOnly)),
             "drop-only movegen cannot reach under the roof"
         );
     }

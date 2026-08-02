@@ -204,6 +204,13 @@ pub struct CustomMatchConfig {
     pub hold: bool,
     /// Previews shown to both boards (0..=5).
     pub previews: u32,
+    /// Every piece may spin, not just T — a lock straight out of a
+    /// rotation pays like a T-spin when the piece lands immobile. This is
+    /// ZONE BATTLE's own rule, offered here for any match.
+    pub all_spin: bool,
+    /// Back-to-back pays more the longer the chain runs. Off pins it at
+    /// the flat +1 row the guideline gives.
+    pub b2b_chain: bool,
 }
 
 impl Default for CustomMatchConfig {
@@ -222,6 +229,8 @@ impl Default for CustomMatchConfig {
             messiness: 0,
             hold: true,
             previews: 5,
+            all_spin: false,
+            b2b_chain: true,
         }
     }
 }

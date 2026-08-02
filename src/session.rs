@@ -10,7 +10,7 @@ use crate::audio::{PlaySfx, Sfx};
 use crate::config::{Action, CustomMatchConfig, GameSettings, Opponent};
 use crate::core::ai::{self, AiProfile, Plan, Step};
 use crate::core::board::BOARD_WIDTH;
-use crate::core::game::{Game, GameEvent, Leveling, MAX_TIMED_LEVEL, Stats, Zone};
+use crate::core::game::{Game, GameEvent, Leveling, MAX_TIMED_LEVEL, SpinRule, Stats, Zone};
 use crate::input::PadInput;
 use crate::progress::{Grade, Progress};
 use crate::render::BoardKick;
@@ -82,6 +82,10 @@ fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
             };
             game.margin_time = Some(MARGIN_TIME_SECS);
             game.zone = Some(Zone::default());
+            // The campaign that is already about firing off everything you
+            // have: every piece may spin, so a stack full of awkward gaps
+            // is an attack waiting to happen rather than a mess to dig.
+            game.spin_rule = SpinRule::AllSpin;
         }
         GameMode::Sprint => game.leveling = Leveling::Fixed,
         GameMode::Zen => {
@@ -112,6 +116,10 @@ fn new_game(seed: u64, mode: GameMode, custom: &CustomMatchConfig) -> Game {
                 stack_cheese(&mut game, seed, custom.start_garbage);
             }
             // Rules that apply equally to both boards.
+            if custom.all_spin {
+                game.spin_rule = SpinRule::AllSpin;
+            }
+            game.b2b_escalation = custom.b2b_chain;
             game.garbage_messiness = custom.messiness;
             game.hold_enabled = custom.hold;
             game.visible_previews = custom.previews as usize;
@@ -795,8 +803,9 @@ fn cpu_drive(time: Res<Time>, mut query: Query<(&mut GameSession, &mut CpuContro
                 game.hold,
                 &queue,
                 game.incoming_total(),
-                game.b2b_armed(),
+                game.b2b_chain(),
                 game.combo(),
+                game.spin_rule,
                 profile,
                 rng,
             );

@@ -60,6 +60,10 @@ enum MenuAction {
     CustomMessiness,
     CustomHold,
     CustomPreviews,
+    /// Every piece may spin, not just T.
+    CustomAllSpin,
+    /// Back-to-back pays more the longer the chain runs.
+    CustomB2b,
     /// Play as this character (index into the roster).
     Character(usize),
     /// Start the match with nobody: what the picker offers when no
@@ -1227,6 +1231,8 @@ fn setup_custom(mut commands: Commands, mut cursor: ResMut<MenuCursor>, locale: 
                         MenuAction::CustomZone,
                         MenuAction::CustomMargin,
                         MenuAction::CustomSpeed,
+                        MenuAction::CustomAllSpin,
+                        MenuAction::CustomB2b,
                         MenuAction::CustomHold,
                         MenuAction::CustomPreviews,
                         MenuAction::CustomMessiness,
@@ -1875,6 +1881,20 @@ fn settings_label(
             s.cm_hold,
             if settings.custom.hold { "ON" } else { "OFF" }
         ),
+        MenuAction::CustomAllSpin => format!(
+            "{:<12} {}",
+            s.cm_all_spin,
+            if settings.custom.all_spin { "ON" } else { "OFF" }
+        ),
+        MenuAction::CustomB2b => format!(
+            "{:<12} {}",
+            s.cm_b2b_chain,
+            if settings.custom.b2b_chain {
+                "ON"
+            } else {
+                "OFF"
+            }
+        ),
         MenuAction::CustomPreviews => {
             format!("{:<12} {}", s.cm_previews, settings.custom.previews)
         }
@@ -2319,6 +2339,14 @@ fn run_menu_action(
                 s.custom.hold = !s.custom.hold;
                 true
             }
+            MenuAction::CustomAllSpin => {
+                s.custom.all_spin = !s.custom.all_spin;
+                true
+            }
+            MenuAction::CustomB2b => {
+                s.custom.b2b_chain = !s.custom.b2b_chain;
+                true
+            }
             MenuAction::CustomPreviews => {
                 s.custom.previews = (s.custom.previews as i32 + adjust).clamp(0, 5) as u32;
                 true
@@ -2409,6 +2437,16 @@ fn run_menu_action(
         }
         MenuAction::CustomHold => {
             p.settings.custom.hold = !p.settings.custom.hold;
+            save_settings(&p.settings);
+            sfx.write(PlaySfx::quiet(Sfx::MenuMove));
+        }
+        MenuAction::CustomAllSpin => {
+            p.settings.custom.all_spin = !p.settings.custom.all_spin;
+            save_settings(&p.settings);
+            sfx.write(PlaySfx::quiet(Sfx::MenuMove));
+        }
+        MenuAction::CustomB2b => {
+            p.settings.custom.b2b_chain = !p.settings.custom.b2b_chain;
             save_settings(&p.settings);
             sfx.write(PlaySfx::quiet(Sfx::MenuMove));
         }

@@ -27,12 +27,16 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
 - **ZONE BATTLE** — a second 30-stage campaign with a Tetris-Effect-style
   super move: cancelling or digging garbage charges a gauge; firing it stops
   time, banks every cleared row at the bottom of the field and launches them
-  all as one attack when the zone ends.
+  all as one attack when the zone ends. It also runs the **all-spin** rule:
+  any piece that rotates into a slot and lands immobile pays what a T-spin
+  pays, so an awkward stack is an attack waiting to happen rather than a
+  mess to dig out.
 - **CUSTOM MATCH** — build your own versus rules: opponent (CPU or a second
   player on the same keyboard), CPU level (1-30) and playstyle, first-to-N,
-  zone gauges on/off, margin time, fixed or ramping gravity, hold on/off,
-  preview count (0-5), garbage messiness, per-side attack handicaps
-  (50-200%) and starting garbage.
+  zone gauges on/off, all-spin on/off, escalating back-to-back on/off,
+  margin time, fixed or ramping gravity, hold on/off, preview count (0-5),
+  garbage messiness, per-side attack handicaps (50-200%) and starting
+  garbage.
 - **Local two-player** — set CUSTOM MATCH's opponent to PLAYER 2 and both
   boards become human. Player 2 gets its own key set (and the second
   connected gamepad, if there is one); every custom rule applies to both
@@ -50,7 +54,14 @@ A guideline-flavored Tetris clone written in Rust with [Bevy Engine](https://bev
   - 7-bag randomizer, hold, 5-piece preview, ghost piece
   - Extended placement lockdown (0.5 s lock delay, 15 move resets)
   - T-Spin / T-Spin Mini detection (3-corner rule + TST kick exception)
-  - Back-to-Back, combos, perfect clears, guideline scoring
+  - Optional **all-spin**: every piece may spin, judged by the immobility
+    test — a lock straight out of a rotation counts when the piece cannot
+    be nudged sideways or lifted out of where it landed. On in ZONE
+    BATTLE, a switch in CUSTOM MATCH
+  - **Back-to-back chains**: the bonus grows with the run rather than
+    sitting at the guideline's flat +1 row, up to +5 and no further.
+    Switchable in CUSTOM MATCH
+  - Combos, perfect clears, guideline scoring
   - Piece spawning in rows 21–22 with immediate drop, block-out / lock-out top-out rules
 - **Configurable controls** — every action can be rebound in the Settings menu,
   including the menu keys and buttons themselves, and an action can answer to
